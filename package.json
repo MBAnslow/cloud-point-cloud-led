@@ -1,0 +1,19 @@
+{
+  "name": "cloud-point-cloud-led",
+  "private": true,
+  "version": "0.1.0",
+  "description": "3D simulation of LEDs around an ellipsoidal cloud, streaming colors to a WLED controller over DDP.",
+  "workspaces": [
+    "app",
+    "relay"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n app,relay -c blue,magenta \"npm:dev --workspace app\" \"npm:dev --workspace relay\"",
+    "dev:app": "npm run dev --workspace app",
+    "dev:relay": "npm run dev --workspace relay",
+    "build": "npm run build --workspace app && npm run build --workspace relay"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
