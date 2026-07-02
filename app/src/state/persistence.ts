@@ -1,8 +1,10 @@
 import type {
   AmbientLightParams,
+  BreathParams,
   CloudParams,
   DirectionalLightParams,
   EllipsoidParams,
+  LedViewMode,
   SkyParams,
   StrandParams,
   WledParams,
@@ -21,6 +23,8 @@ export interface Snapshot {
   directional: DirectionalLightParams;
   sky?: SkyParams;
   wled: WledParams;
+  breath?: BreathParams;
+  ledViewMode?: LedViewMode;
 }
 
 export function saveSnapshot(snap: Omit<Snapshot, "version">): void {

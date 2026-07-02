@@ -12,6 +12,11 @@ export type StartDirection =
   | "front"
   | "back";
 
+export type LedViewMode =
+  | "breathIntensity"
+  | "lightOnly"
+  | "breathPlusLight";
+
 /** Ellipsoid semi-axes in metres. */
 export interface EllipsoidParams {
   rx: number;
@@ -137,6 +142,71 @@ export interface WledParams {
   enabled: boolean;
 }
 
+export interface Breather {
+  id: string;
+  color: string;
+  /**
+   * Normalized phase shift in cycles, [0, 1). Lets multiple breathers
+   * run the same waveform but offset in time.
+   */
+  phaseOffset: number;
+}
+
+export interface BreathParams {
+  enabled: boolean;
+  /** Duration of inhale ramp (seconds). */
+  inhaleSeconds: number;
+  /** Duration of hold at the inhalation peak (seconds). */
+  holdPeakSeconds: number;
+  /** Duration of exhale ramp (seconds). */
+  exhaleSeconds: number;
+  /** Duration of hold at the exhalation trough (seconds). */
+  holdTroughSeconds: number;
+  /** Global intensity scale for all breather color lights. */
+  intensity: number;
+  /**
+   * Parameters for the exhale "wind" source under the cloud. This is used
+   * by the visual breath effect now and is intended to drive LED influence
+   * by distance in a later step.
+   */
+  wind: BreathWindParams;
+  breathers: Breather[];
+}
+
+export interface BreathWindParams {
+  enabled: boolean;
+  /** Source direction around cloud center, in degrees. */
+  sourceAzimuthDeg: number;
+  /** Source elevation in degrees (-90 = below, +90 = above). */
+  sourceElevationDeg: number;
+  /** Distance from cloud surface along source direction (metres). */
+  distanceFromCloud: number;
+  /** Radius in metres where influence tapers to zero. */
+  radius: number;
+  /** Falloff exponent (>1 concentrates near source, <1 broadens). */
+  falloffExponent: number;
+  /** Max scalar applied at source during strongest exhale. */
+  maxIntensity: number;
+  /** Max scalar applied at source during strongest inhale. */
+  inhaleMaxIntensity: number;
+  /** How strongly inhale dims LEDs in influenced regions. */
+  inhaleDimAmount: number;
+  /** How strongly exhale boosts LED exposure in influenced regions. */
+  exhaleExposureAmount: number;
+  /** Tint color applied by local breath influence over current LED color. */
+  tintColor: string;
+  /** How strongly breath influence tints existing LED color. */
+  tintAmount: number;
+  /** Time constant for channels decaying back toward neutral (seconds). */
+  neutralDecaySeconds: number;
+  /** Height of the visible upward plume (metres). */
+  plumeHeight: number;
+}
+
+type BreathPatch = Partial<Omit<BreathParams, "wind">> & {
+  wind?: Partial<BreathWindParams>;
+};
+
 interface SimState {
   ellipsoid: EllipsoidParams;
   cloud: CloudParams;
@@ -145,6 +215,8 @@ interface SimState {
   directional: DirectionalLightParams;
   sky: SkyParams;
   wled: WledParams;
+  breath: BreathParams;
+  ledViewMode: LedViewMode;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
   setStrand: (s: Partial<StrandParams>) => void;
@@ -152,6 +224,8 @@ interface SimState {
   setDirectional: (d: Partial<DirectionalLightParams>) => void;
   setSky: (sk: Partial<SkyParams>) => void;
   setWled: (w: Partial<WledParams>) => void;
+  setBreath: (b: BreathPatch) => void;
+  setLedViewMode: (mode: LedViewMode) => void;
 }
 
 /**
@@ -243,6 +317,32 @@ const DEFAULTS = {
     ambientStops: buildDefaultChannelStops("ambient"),
   } as SkyParams,
   wled: { host: "192.168.1.50", fps: 30, enabled: false } as WledParams,
+  breath: {
+    enabled: true,
+    inhaleSeconds: 2.5,
+    holdPeakSeconds: 0.8,
+    exhaleSeconds: 3.5,
+    holdTroughSeconds: 0.9,
+    intensity: 0.65,
+    wind: {
+      enabled: true,
+      sourceAzimuthDeg: 0,
+      sourceElevationDeg: -90,
+      distanceFromCloud: 0.28,
+      radius: 1.2,
+      falloffExponent: 2.1,
+      maxIntensity: 1.0,
+      inhaleMaxIntensity: 0.85,
+      inhaleDimAmount: 1.8,
+      exhaleExposureAmount: 1.8,
+      tintColor: "#8fd8ff",
+      tintAmount: 0.45,
+      neutralDecaySeconds: 1.2,
+      plumeHeight: 0.95,
+    },
+    breathers: [{ id: "breather-0", color: "#77d5ff", phaseOffset: 0 }],
+  } as BreathParams,
+  ledViewMode: "breathPlusLight" as LedViewMode,
 };
 
 /**
@@ -387,6 +487,12 @@ function initialState() {
     // Don't auto-resume streaming on page load: if the user reopens the app
     // they probably don't want it immediately blasting UDP to the strip.
     wled: { ...DEFAULTS.wled, ...saved.wled, enabled: false },
+    breath: {
+      ...DEFAULTS.breath,
+      ...saved.breath,
+      wind: { ...DEFAULTS.breath.wind, ...saved.breath?.wind },
+    },
+    ledViewMode: saved.ledViewMode ?? DEFAULTS.ledViewMode,
   };
 }
 
@@ -400,6 +506,15 @@ export const useSimStore = create<SimState>((set) => ({
     set((s) => ({ directional: { ...s.directional, ...d } })),
   setSky: (sk) => set((s) => ({ sky: { ...s.sky, ...sk } })),
   setWled: (w) => set((s) => ({ wled: { ...s.wled, ...w } })),
+  setBreath: (b) =>
+    set((s) => ({
+      breath: {
+        ...s.breath,
+        ...b,
+        wind: { ...s.breath.wind, ...b.wind },
+      },
+    })),
+  setLedViewMode: (mode) => set({ ledViewMode: mode }),
 }));
 
 /**
@@ -426,6 +541,12 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   });
   // Same caveat as initialState — never re-enable streaming via a load.
   s.setWled({ ...snap.wled, enabled: false });
+  s.setBreath({
+    ...DEFAULTS.breath,
+    ...snap.breath,
+    wind: { ...DEFAULTS.breath.wind, ...snap.breath?.wind },
+  });
+  s.setLedViewMode(snap.ledViewMode ?? DEFAULTS.ledViewMode);
   return snap;
 }
 
@@ -440,6 +561,8 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     directional: s.directional,
     sky: s.sky,
     wled: s.wled,
+    breath: s.breath,
+    ledViewMode: s.ledViewMode,
   };
 }
 
