@@ -18,68 +18,24 @@ const START_OPTIONS: Record<string, StartDirection> = {
 };
 
 /**
- * y-up spherical → Cartesian. Azimuth sweeps around the vertical axis
- * (0° = +x, 90° = +z), elevation is periodic over a full cycle
- * (0..360°; equivalent to traditional pitch modulo 360).
- */
-function sphericalToCartesian(
-  azimuthDeg: number,
-  elevationDeg: number,
-  distance: number,
-): [number, number, number] {
-  const az = (azimuthDeg * Math.PI) / 180;
-  const el = (elevationDeg * Math.PI) / 180;
-  const ce = Math.cos(el);
-  return [
-    distance * ce * Math.cos(az),
-    distance * Math.sin(el),
-    distance * ce * Math.sin(az),
-  ];
-}
-
-/**
- * Inverse. Used when loading a snapshot (or initial state) where the
- * directional light's position is stored as Cartesian — we need to push
- * the equivalent spherical values back into the leva sliders. Both azimuth
- * and elevation are normalised to [0, 360) so they always read cleanly on
- * the sliders.
- */
-function cartesianToSpherical(pos: readonly [number, number, number]): {
-  azimuthDeg: number;
-  elevationDeg: number;
-  distance: number;
-} {
-  const [x, y, z] = pos;
-  const r = Math.hypot(x, y, z);
-  if (r < 1e-9) return { azimuthDeg: 0, elevationDeg: 0, distance: 0 };
-  let elevationDeg = (Math.asin(y / r) * 180) / Math.PI;
-  let azimuthDeg = (Math.atan2(z, x) * 180) / Math.PI;
-  if (azimuthDeg < 0) azimuthDeg += 360;
-  if (elevationDeg < 0) elevationDeg += 360;
-  return { azimuthDeg, elevationDeg, distance: r };
-}
-
-/**
  * Renders no DOM itself — leva manages its own panel. We use the controls
  * purely to drive the zustand store so the rest of the app reads from a
  * single source of truth.
  *
- * Note: the sky-cycle color palette is not controlled here anymore. The
+ * Note: the time-of-day visualization color palette is not controlled here anymore. The
  * `SkyTimeline` overlay component owns the draggable swatch stops and
  * writes them directly to the store. This panel only manages playback
- * settings and global intensity scales for the sky cycle.
+ * settings and global intensity scales for the time-of-day visualization.
  */
 export function ControlPanel() {
   const setEllipsoid = useSimStore((s) => s.setEllipsoid);
   const setCloud = useSimStore((s) => s.setCloud);
   const setStrand = useSimStore((s) => s.setStrand);
   const setAmbient = useSimStore((s) => s.setAmbient);
-  const setDirectional = useSimStore((s) => s.setDirectional);
   const setSky = useSimStore((s) => s.setSky);
   const setWled = useSimStore((s) => s.setWled);
 
   const initial = useSimStore.getState();
-  const initialDirSpherical = cartesianToSpherical(initial.directional.position);
 
   const [ell, setEll] = useControls(
     "Ellipsoid (m)",
@@ -136,47 +92,6 @@ export function ControlPanel() {
           label: "ambient intensity",
         },
       }),
-      directional: folder({
-        dirColor: {
-          value: initial.directional.color,
-          label: "directional color",
-        },
-        dirIntensity: {
-          value: initial.directional.intensity,
-          min: 0,
-          max: 5,
-          step: 0.05,
-          label: "directional intensity",
-        },
-        dirSpread: {
-          value: initial.directional.spread,
-          min: 0,
-          max: 1,
-          step: 0.01,
-          label: "spread (0=narrow, 1=broad)",
-        },
-        dirAzimuth: {
-          value: initialDirSpherical.azimuthDeg,
-          min: 0,
-          max: 360,
-          step: 1,
-          label: "azimuth (°)",
-        },
-        dirElevation: {
-          value: initialDirSpherical.elevationDeg,
-          min: 0,
-          max: 360,
-          step: 1,
-          label: "elevation (°)",
-        },
-        dirDistance: {
-          value: initialDirSpherical.distance,
-          min: 0.5,
-          max: 20,
-          step: 0.1,
-          label: "distance",
-        },
-      }),
     }),
     [],
   );
@@ -192,9 +107,16 @@ export function ControlPanel() {
   );
 
   const [skyControls, setSkyControls] = useControls(
-    "Sky Cycle",
+    "Time of Day Visualization",
     () => ({
-      enabled: { value: initial.sky.enabled, label: "enable sky cycle" },
+      enabled: { value: initial.sky.enabled, label: "enable time of day" },
+      visualizationAmount: {
+        value: initial.sky.visualizationAmount ?? 1,
+        min: 0,
+        max: 1,
+        step: 0.01,
+        label: "time of day amount",
+      },
       cycleSeconds: {
         value: initial.sky.cycleSeconds,
         min: 20,
@@ -256,19 +178,13 @@ export function ControlPanel() {
         start: snap.strand.start,
         ledSize: snap.strand.ledSize,
       });
-      const sph = cartesianToSpherical(snap.directional.position);
       setLights({
         ambientColor: snap.ambient.color,
         ambientIntensity: snap.ambient.intensity,
-        dirColor: snap.directional.color,
-        dirIntensity: snap.directional.intensity,
-        dirSpread: snap.directional.spread,
-        dirAzimuth: sph.azimuthDeg,
-        dirElevation: sph.elevationDeg,
-        dirDistance: sph.distance,
       });
       setSkyControls({
         enabled: snap.sky?.enabled ?? true,
+        visualizationAmount: snap.sky?.visualizationAmount ?? 1,
         cycleSeconds: snap.sky?.cycleSeconds ?? 180,
         ambientScale: snap.sky?.ambientScale ?? 1,
         sunScale: snap.sky?.sunScale ?? 1,
@@ -306,33 +222,13 @@ export function ControlPanel() {
     });
   }, [lights.ambientColor, lights.ambientIntensity, setAmbient]);
 
-  useEffect(() => {
-    setDirectional({
-      color: lights.dirColor,
-      intensity: lights.dirIntensity,
-      spread: lights.dirSpread,
-      position: sphericalToCartesian(
-        lights.dirAzimuth,
-        lights.dirElevation,
-        lights.dirDistance,
-      ),
-    });
-  }, [
-    lights.dirColor,
-    lights.dirIntensity,
-    lights.dirSpread,
-    lights.dirAzimuth,
-    lights.dirElevation,
-    lights.dirDistance,
-    setDirectional,
-  ]);
-
   // Push sky-cycle playback / scale controls to the store. The timeline
   // overlay owns `timeHours`, `autoPlay`, and `stops`, so we deliberately
   // don't include them here.
   useEffect(() => {
     setSky({
       enabled: skyControls.enabled,
+      visualizationAmount: skyControls.visualizationAmount,
       cycleSeconds: skyControls.cycleSeconds,
       ambientScale: skyControls.ambientScale,
       sunScale: skyControls.sunScale,
@@ -340,6 +236,7 @@ export function ControlPanel() {
     });
   }, [
     skyControls.enabled,
+    skyControls.visualizationAmount,
     skyControls.cycleSeconds,
     skyControls.ambientScale,
     skyControls.sunScale,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { useFrame } from "@react-three/fiber";
+import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import {
   Color,
   DynamicDrawUsage,
@@ -19,7 +19,7 @@ import {
   shadeLeds,
   type ShadeLight,
 } from "../lighting/shade";
-import { directionalDistanceFalloff, useSimStore } from "../state";
+import { useSimStore } from "../state";
 import { computeSkyLighting } from "../lighting/skyCycle";
 import { WledStreamClient } from "../wled/client";
 import { publishFrame } from "../stream/frameBuffer";
@@ -97,16 +97,21 @@ export function Leds() {
   const cloud = useSimStore((s) => s.cloud);
   const strand = useSimStore((s) => s.strand);
   const ambient = useSimStore((s) => s.ambient);
-  const directional = useSimStore((s) => s.directional);
   const sky = useSimStore((s) => s.sky);
   const breath = useSimStore((s) => s.breath);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
+  const ledLocator = useSimStore((s) => s.ledLocator);
+  const toggleLocatedLed = useSimStore((s) => s.toggleLocatedLed);
   const wled = useSimStore((s) => s.wled);
   const MANUAL_BLEND_WHEN_SKY = 0.2;
 
   const meshRef = useRef<InstancedMesh>(null);
   const dummy = useMemo(() => new Object3D(), []);
   const tmpColor = useMemo(() => new Color(), []);
+  const locatedSet = useMemo(
+    () => new Set(ledLocator.highlighted),
+    [ledLocator.highlighted],
+  );
 
   // Per-LED buffers. Reallocated when the LED count changes.
   const buffers = useMemo(() => {
@@ -207,29 +212,18 @@ export function Leds() {
     const mesh = meshRef.current;
     if (!mesh) return;
 
-    // Direction *from origin (ellipsoid center) to the light*. A real
-    // directional light has no distance falloff (its rays are parallel
-    // from infinity), but the panel exposes a `distance` slider so we
-    // apply our own softened inverse-square attenuation — see
-    // `directionalDistanceFalloff` for the formula and rationale.
-    const [lx, ly, lz] = directional.position;
-    const dlen = Math.hypot(lx, ly, lz) || 1;
-    const distFalloff = directionalDistanceFalloff(dlen);
     const skyLighting = computeSkyLighting(sky);
-    const manualBlend = sky.enabled ? MANUAL_BLEND_WHEN_SKY : 1;
+    const skyAmount = clamp01(sky.visualizationAmount ?? 1);
+    const manualBlend = sky.enabled
+      ? 1 - (1 - MANUAL_BLEND_WHEN_SKY) * skyAmount
+      : 1;
+    const breathMaster = clamp01(breath.masterAmount ?? 1);
 
     const lights: ShadeLight[] = [
       {
         type: "ambient",
         color: hexToVec3(ambient.color),
         intensity: ambient.intensity * manualBlend,
-      },
-      {
-        type: "directional",
-        direction: [lx / dlen, ly / dlen, lz / dlen],
-        color: hexToVec3(directional.color),
-        intensity: directional.intensity * distFalloff * manualBlend,
-        spread: directional.spread,
       },
     ];
     if (sky.enabled) {
@@ -267,7 +261,8 @@ export function Leds() {
         breath.exhaleSeconds +
         breath.holdTroughSeconds;
       const cycleMs = Math.max(1, cycleSeconds * 1000);
-      const perBreatherGain = breath.intensity / Math.max(1, breath.breathers.length);
+      const perBreatherGain =
+        (breath.intensity * breathMaster) / Math.max(1, breath.breathers.length);
       for (const breather of breath.breathers) {
         const phaseMs = (breather.phaseOffset % 1) * cycleMs;
         const level = breathLevelAt(breath, nowMs + phaseMs);
@@ -334,8 +329,8 @@ export function Leds() {
         );
 
         // Per-LED dynamic channels (stateful over time).
-        const inhaleTarget = inhalePull * breath.wind.inhaleDimAmount;
-        const exhaleTarget = exhalePush * breath.wind.exhaleExposureAmount;
+        const inhaleTarget = inhalePull * breath.wind.inhaleDimAmount * breathMaster;
+        const exhaleTarget = exhalePush * breath.wind.exhaleExposureAmount * breathMaster;
 
         const [inhaleParam, inhaleVel] = stepDynamicParam(
           buffers.inhaleParam[i],
@@ -464,13 +459,26 @@ export function Leds() {
       }
     }
 
+    const locatorColor = hexToVec3(ledLocator.color);
     for (let i = 0; i < buffers.n; i++) {
       const i3 = i * 3;
-      tmpColor.setRGB(
-        buffers.colorFloats[i3],
-        buffers.colorFloats[i3 + 1],
-        buffers.colorFloats[i3 + 2],
-      );
+      if (ledLocator.enabled && locatedSet.has(i)) {
+        // Hard output override: bypass all prior processing and force this LED
+        // to locator yellow both in the 3D view and in streamed byte output.
+        buffers.colorFloats[i3] = locatorColor[0];
+        buffers.colorFloats[i3 + 1] = locatorColor[1];
+        buffers.colorFloats[i3 + 2] = locatorColor[2];
+        buffers.colorBytes[i3] = (locatorColor[0] * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 1] = (locatorColor[1] * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 2] = (locatorColor[2] * 255 + 0.5) | 0;
+        tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
+      } else {
+        tmpColor.setRGB(
+          buffers.colorFloats[i3],
+          buffers.colorFloats[i3 + 1],
+          buffers.colorFloats[i3 + 2],
+        );
+      }
       mesh.setColorAt(i, tmpColor);
     }
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
@@ -488,11 +496,19 @@ export function Leds() {
     }
   });
 
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    if (!ledLocator.enabled) return;
+    if (e.instanceId === undefined || e.instanceId === null) return;
+    e.stopPropagation();
+    toggleLocatedLed(e.instanceId);
+  };
+
   return (
     <instancedMesh
       ref={meshRef}
       args={[undefined, undefined, buffers.n]}
       frustumCulled={false}
+      onPointerDown={onPointerDown}
     >
       <sphereGeometry args={[1, 12, 8]} />
       <meshBasicMaterial color="#ffffff" toneMapped={false} />

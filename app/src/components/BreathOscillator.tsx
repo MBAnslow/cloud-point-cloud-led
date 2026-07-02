@@ -51,6 +51,8 @@ const PARAM_HELP = {
     "How long breath rests at the trough before the next inhale starts.",
   breathIntensity:
     "Global brightness contribution from the breather color lights independent of wind.",
+  breathMaster:
+    "Master amount for the full breath system, including breath visuals and LED modulation.",
   windRadius:
     "Max distance from the breath source where wind can affect LEDs and visuals.",
   windFalloff:
@@ -104,8 +106,9 @@ export function BreathOscillator() {
   const leadProgress = (nowMs % cycleMs) / cycleMs;
   const sample = sampleBreathAt(breath, nowMs);
   const currentLevel = sample.level;
-  const inhaleLevel = sample.inhaleIntensity;
-  const exhaleLevel = sample.exhaleIntensity;
+  const master = Math.max(0, Math.min(1, breath.masterAmount ?? 1));
+  const inhaleLevel = sample.inhaleIntensity * master;
+  const exhaleLevel = sample.exhaleIntensity * master;
 
   const sourcePos = computeBreathWindOrigin(ellipsoid, {
     sourceAzimuthDeg: breath.wind.sourceAzimuthDeg,
@@ -319,6 +322,15 @@ export function BreathOscillator() {
         }}
       >
         <Section title="Breath Timing">
+          <SliderField
+            label="breath amount"
+            tooltip={PARAM_HELP.breathMaster}
+            value={breath.masterAmount}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setBreath({ masterAmount: v })}
+          />
           <SliderField
             label="inhale"
             tooltip={PARAM_HELP.inhaleSeconds}

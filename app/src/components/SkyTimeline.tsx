@@ -244,7 +244,7 @@ export function SkyTimeline() {
               opacity: 0.7,
             }}
           >
-            Sky Timeline
+            Time of Day Visualization
           </span>
           <button
             onClick={togglePlay}

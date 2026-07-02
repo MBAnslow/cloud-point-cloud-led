@@ -133,6 +133,7 @@ export function interpolateChannel(
  */
 export function computeSkyLighting(sky: SkyParams): SkyLighting {
   const hour = normalizeHour(sky.timeHours);
+  const vis = clamp01(sky.visualizationAmount ?? 1);
 
   const rawSunColor = interpolateChannel(sky.sunStops, hour, "#05070d");
   const rawMoonColor = interpolateChannel(sky.moonStops, hour, "#b7c8ff");
@@ -157,9 +158,9 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
   const sunBase = 1.1 * sunVisible + 0.35 * twilight;
   const moonBase = 0.75 * moonVisible;
 
-  const ambientIntensity = ambientBase * sky.ambientScale;
-  const sunIntensity = clamp01(sunBase * sky.sunScale) * 1.6;
-  const moonIntensity = clamp01(moonBase * sky.moonScale) * 0.95;
+  const ambientIntensity = ambientBase * sky.ambientScale * vis;
+  const sunIntensity = clamp01(sunBase * sky.sunScale) * 1.6 * vis;
+  const moonIntensity = clamp01(moonBase * sky.moonScale) * 0.95 * vis;
 
   return {
     ambientColor: saturateHex(rawAmbientColor, 1.08 + twilight * 0.25),

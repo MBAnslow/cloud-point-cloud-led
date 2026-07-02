@@ -102,6 +102,8 @@ export interface SkyChannelStop {
 export interface SkyParams {
   /** Enables the sun/moon 24-hour sky sequence. */
   enabled: boolean;
+  /** Master amount of the time-of-day visualization effect. */
+  visualizationAmount: number;
   /** Advances `timeHours` automatically every frame. */
   autoPlay: boolean;
   /** Time of day in decimal hours [0, 24). */
@@ -154,6 +156,8 @@ export interface Breather {
 
 export interface BreathParams {
   enabled: boolean;
+  /** Master amount for the overall breath system and LED coupling. */
+  masterAmount: number;
   /** Duration of inhale ramp (seconds). */
   inhaleSeconds: number;
   /** Duration of hold at the inhalation peak (seconds). */
@@ -217,6 +221,7 @@ interface SimState {
   wled: WledParams;
   breath: BreathParams;
   ledViewMode: LedViewMode;
+  ledLocator: LedLocatorState;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
   setStrand: (s: Partial<StrandParams>) => void;
@@ -226,6 +231,15 @@ interface SimState {
   setWled: (w: Partial<WledParams>) => void;
   setBreath: (b: BreathPatch) => void;
   setLedViewMode: (mode: LedViewMode) => void;
+  setLedLocator: (patch: Partial<LedLocatorState>) => void;
+  toggleLocatedLed: (index: number) => void;
+  clearLocatedLeds: () => void;
+}
+
+export interface LedLocatorState {
+  enabled: boolean;
+  highlighted: number[];
+  color: string;
 }
 
 /**
@@ -306,6 +320,7 @@ const DEFAULTS = {
   } as DirectionalLightParams,
   sky: {
     enabled: true,
+    visualizationAmount: 1,
     autoPlay: true,
     timeHours: 12,
     cycleSeconds: 180,
@@ -319,6 +334,7 @@ const DEFAULTS = {
   wled: { host: "192.168.1.50", fps: 30, enabled: false } as WledParams,
   breath: {
     enabled: true,
+    masterAmount: 1,
     inhaleSeconds: 2.5,
     holdPeakSeconds: 0.8,
     exhaleSeconds: 3.5,
@@ -343,6 +359,11 @@ const DEFAULTS = {
     breathers: [{ id: "breather-0", color: "#77d5ff", phaseOffset: 0 }],
   } as BreathParams,
   ledViewMode: "breathPlusLight" as LedViewMode,
+  ledLocator: {
+    enabled: false,
+    highlighted: [],
+    color: "#ffe14d",
+  } as LedLocatorState,
 };
 
 /**
@@ -493,6 +514,7 @@ function initialState() {
       wind: { ...DEFAULTS.breath.wind, ...saved.breath?.wind },
     },
     ledViewMode: saved.ledViewMode ?? DEFAULTS.ledViewMode,
+    ledLocator: { ...DEFAULTS.ledLocator, ...saved.ledLocator },
   };
 }
 
@@ -515,6 +537,23 @@ export const useSimStore = create<SimState>((set) => ({
       },
     })),
   setLedViewMode: (mode) => set({ ledViewMode: mode }),
+  setLedLocator: (patch) =>
+    set((s) => ({ ledLocator: { ...s.ledLocator, ...patch } })),
+  toggleLocatedLed: (index) =>
+    set((s) => {
+      const i = Math.max(0, Math.floor(index));
+      const exists = s.ledLocator.highlighted.includes(i);
+      return {
+        ledLocator: {
+          ...s.ledLocator,
+          highlighted: exists
+            ? s.ledLocator.highlighted.filter((x) => x !== i)
+            : [...s.ledLocator.highlighted, i],
+        },
+      };
+    }),
+  clearLocatedLeds: () =>
+    set((s) => ({ ledLocator: { ...s.ledLocator, highlighted: [] } })),
 }));
 
 /**
@@ -547,6 +586,7 @@ export function applySnapshot(snap: Snapshot): Snapshot {
     wind: { ...DEFAULTS.breath.wind, ...snap.breath?.wind },
   });
   s.setLedViewMode(snap.ledViewMode ?? DEFAULTS.ledViewMode);
+  s.setLedLocator({ ...DEFAULTS.ledLocator, ...snap.ledLocator });
   return snap;
 }
 
@@ -563,6 +603,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     wled: s.wled,
     breath: s.breath,
     ledViewMode: s.ledViewMode,
+    ledLocator: s.ledLocator,
   };
 }
 

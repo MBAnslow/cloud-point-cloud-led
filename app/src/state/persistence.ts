@@ -4,6 +4,7 @@ import type {
   CloudParams,
   DirectionalLightParams,
   EllipsoidParams,
+  LedLocatorState,
   LedViewMode,
   SkyParams,
   StrandParams,
@@ -25,6 +26,7 @@ export interface Snapshot {
   wled: WledParams;
   breath?: BreathParams;
   ledViewMode?: LedViewMode;
+  ledLocator?: LedLocatorState;
 }
 
 export function saveSnapshot(snap: Omit<Snapshot, "version">): void {

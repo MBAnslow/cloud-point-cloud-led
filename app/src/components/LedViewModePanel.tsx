@@ -21,6 +21,9 @@ const MODES: Array<{ id: LedViewMode; label: string; help: string }> = [
 export function LedViewModePanel() {
   const mode = useSimStore((s) => s.ledViewMode);
   const setMode = useSimStore((s) => s.setLedViewMode);
+  const locator = useSimStore((s) => s.ledLocator);
+  const setLocator = useSimStore((s) => s.setLedLocator);
+  const clearLocated = useSimStore((s) => s.clearLocatedLeds);
 
   return (
     <div
@@ -87,6 +90,46 @@ export function LedViewModePanel() {
             </span>
           </label>
         ))}
+      </div>
+      <div
+        style={{
+          marginTop: 8,
+          paddingTop: 8,
+          borderTop: "1px solid rgba(255,255,255,0.1)",
+          display: "grid",
+          gap: 6,
+        }}
+      >
+        <label
+          title="When enabled, click LEDs in the 3D view to toggle bright yellow highlight."
+          style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}
+        >
+          <input
+            type="checkbox"
+            checked={locator.enabled}
+            onChange={(e) => setLocator({ enabled: e.target.checked })}
+          />
+          locate LEDs (click to highlight)
+        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 11, opacity: 0.75 }}>
+            selected {locator.highlighted.length}
+          </span>
+          <button
+            onClick={clearLocated}
+            style={{
+              background: "rgba(255,255,255,0.08)",
+              color: "inherit",
+              border: "1px solid rgba(255,255,255,0.2)",
+              borderRadius: 6,
+              padding: "2px 8px",
+              fontSize: 11,
+              cursor: "pointer",
+            }}
+          >
+            clear
+          </button>
+        </div>
       </div>
     </div>
   );

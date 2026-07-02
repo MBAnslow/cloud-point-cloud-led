@@ -1,5 +1,11 @@
-import { directionalDistanceFalloff, useSimStore } from "../state";
+import { useSimStore } from "../state";
 import { computeSkyLighting } from "../lighting/skyCycle";
+
+function clamp01(v: number): number {
+  if (v <= 0) return 0;
+  if (v >= 1) return 1;
+  return v;
+}
 
 /**
  * Ambient + directional light. Position and colour are driven by the leva
@@ -13,14 +19,14 @@ import { computeSkyLighting } from "../lighting/skyCycle";
  */
 export function Lights() {
   const ambient = useSimStore((s) => s.ambient);
-  const directional = useSimStore((s) => s.directional);
   const sky = useSimStore((s) => s.sky);
   const MANUAL_BLEND_WHEN_SKY = 0.2;
 
-  const [lx, ly, lz] = directional.position;
-  const distFalloff = directionalDistanceFalloff(Math.hypot(lx, ly, lz));
   const skyLighting = computeSkyLighting(sky);
-  const manualBlend = sky.enabled ? MANUAL_BLEND_WHEN_SKY : 1;
+  const skyAmount = clamp01(sky.visualizationAmount ?? 1);
+  const manualBlend = sky.enabled
+    ? 1 - (1 - MANUAL_BLEND_WHEN_SKY) * skyAmount
+    : 1;
   const skyRadius = 8;
   const sunPos: [number, number, number] = [
     skyLighting.sunDirection[0] * skyRadius,
@@ -62,15 +68,6 @@ export function Lights() {
           </mesh>
         </>
       )}
-      <directionalLight
-        color={directional.color}
-        intensity={directional.intensity * distFalloff * manualBlend}
-        position={directional.position}
-      />
-      <mesh position={directional.position}>
-        <sphereGeometry args={[0.06, 16, 12]} />
-        <meshBasicMaterial color={directional.color} />
-      </mesh>
     </>
   );
 }

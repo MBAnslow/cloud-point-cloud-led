@@ -47,6 +47,7 @@ export function BreathWind() {
     if (!groupRef.current) return;
     groupRef.current.visible = breath.enabled && breath.wind.enabled;
     if (!breath.enabled || !breath.wind.enabled) return;
+    const breathMaster = Math.max(0, Math.min(1, breath.masterAmount ?? 1));
 
     const nowMs = clock.elapsedTime * 1000;
     const cycleMs =
@@ -58,8 +59,10 @@ export function BreathWind() {
           breath.holdTroughSeconds,
       ) * 1000;
     const sample = sampleBreathAt(breath, nowMs);
-    const exhale = sample.exhaleIntensity * breath.wind.maxIntensity;
-    const inhale = sample.inhaleIntensity * breath.wind.inhaleMaxIntensity;
+    const exhale =
+      sample.exhaleIntensity * breath.wind.maxIntensity * breathMaster;
+    const inhale =
+      sample.inhaleIntensity * breath.wind.inhaleMaxIntensity * breathMaster;
     const activity = Math.max(exhale, inhale);
 
     // Always orient the plume from source toward the cloud origin.
