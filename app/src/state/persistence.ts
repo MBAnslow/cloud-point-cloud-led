@@ -4,8 +4,11 @@ import type {
   CloudParams,
   DirectionalLightParams,
   EllipsoidParams,
+  LedDisplayMode,
+  LedStreamPipeline,
   LedLocatorState,
   LedViewMode,
+  MappingParams,
   SkyParams,
   StrandParams,
   WledParams,
@@ -26,7 +29,10 @@ export interface Snapshot {
   wled: WledParams;
   breath?: BreathParams;
   ledViewMode?: LedViewMode;
+  ledDisplayMode?: LedDisplayMode;
+  ledStreamPipeline?: LedStreamPipeline;
   ledLocator?: LedLocatorState;
+  mapping?: MappingParams;
 }
 
 export function saveSnapshot(snap: Omit<Snapshot, "version">): void {

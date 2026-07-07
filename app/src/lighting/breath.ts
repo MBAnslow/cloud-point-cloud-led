@@ -18,19 +18,25 @@ function easeOutCubic(t: number): number {
 }
 
 export interface BreathSample {
-  /** Overall inhale/exhale envelope in [0,1]. */
+  /** Lung fullness envelope in [0,1] over the whole cycle. */
   level: number;
-  /** Non-zero only during inhale; tracks inbreath pull strength in [0,1]. */
+  /** Inhale (fullness) driver in [0,1]. 0 = empty lungs, 1 = full lungs. */
   inhaleIntensity: number;
-  /** Non-zero only during exhale; tracks outbreath strength in [0,1]. */
+  /** Exhale (emptiness) driver in [0,1]. 0 = full lungs, 1 = empty lungs. */
   exhaleIntensity: number;
   phase: "inhale" | "holdPeak" | "exhale" | "holdTrough";
 }
 
 /**
  * Breath cycle progress in [0,1], shaped with separate inhale/exhale and
- * explicit holds at peak/trough. Exhale is expected to be longer in normal
- * settings, but all segment durations are fully user-controlled.
+ * explicit holds at peak/trough.
+ *
+ * The returned `level` is the smooth lung-fullness envelope. The two
+ * intensity channels are simple derivations of it:
+ *   inhaleIntensity = level        (peaks at full lungs, held through holdPeak)
+ *   exhaleIntensity = 1 - level    (peaks at empty lungs, held through holdTrough)
+ * They crossfade smoothly across the whole cycle so both effects share the
+ * timing dynamics without hard cutoffs at phase boundaries.
  */
 export function sampleBreathAt(params: BreathParams, nowMs: number): BreathSample {
   const inhaleMs = Math.max(0, params.inhaleSeconds) * 1000;
@@ -42,7 +48,7 @@ export function sampleBreathAt(params: BreathParams, nowMs: number): BreathSampl
     return {
       level: 0,
       inhaleIntensity: 0,
-      exhaleIntensity: 0,
+      exhaleIntensity: 1,
       phase: "holdTrough",
     };
   }
@@ -50,41 +56,32 @@ export function sampleBreathAt(params: BreathParams, nowMs: number): BreathSampl
   let t = nowMs % cycleMs;
   if (t < 0) t += cycleMs;
 
+  let level: number;
+  let phase: BreathSample["phase"];
+
   if (t < inhaleMs) {
-    // Inhale: smooth physiological rise (not linear).
-    return {
-      level: inhaleMs > 0 ? easeInOutSine(t / inhaleMs) : 1,
-      inhaleIntensity: inhaleMs > 0 ? easeInOutSine(t / inhaleMs) : 1,
-      exhaleIntensity: 0,
-      phase: "inhale",
-    };
-  }
-  t -= inhaleMs;
-  if (t < holdPeakMs) {
-    return {
-      level: 1,
-      inhaleIntensity: 0,
-      exhaleIntensity: 0,
-      phase: "holdPeak",
-    };
+    const x = inhaleMs > 0 ? t / inhaleMs : 1;
+    level = easeInOutSine(x);
+    phase = "inhale";
+  } else if (t < inhaleMs + holdPeakMs) {
+    level = 1;
+    phase = "holdPeak";
+  } else if (t < inhaleMs + holdPeakMs + exhaleMs) {
+    const x = exhaleMs > 0
+      ? clamp01((t - inhaleMs - holdPeakMs) / exhaleMs)
+      : 1;
+    level = 1 - easeOutCubic(x);
+    phase = "exhale";
+  } else {
+    level = 0;
+    phase = "holdTrough";
   }
 
-  t -= holdPeakMs;
-  if (t < exhaleMs) {
-    const exhaleT = exhaleMs > 0 ? clamp01(t / exhaleMs) : 1;
-    // Exhale: stronger early release that eases into the trough.
-    return {
-      level: exhaleMs > 0 ? clamp01(1 - easeOutCubic(exhaleT)) : 0,
-      inhaleIntensity: 0,
-      exhaleIntensity: exhaleMs > 0 ? easeOutCubic(exhaleT) : 1,
-      phase: "exhale",
-    };
-  }
   return {
-    level: 0,
-    inhaleIntensity: 0,
-    exhaleIntensity: 0,
-    phase: "holdTrough",
+    level,
+    inhaleIntensity: level,
+    exhaleIntensity: 1 - level,
+    phase,
   };
 }
 

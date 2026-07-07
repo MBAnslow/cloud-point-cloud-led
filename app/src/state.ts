@@ -4,18 +4,30 @@ import { loadSnapshot, type Snapshot } from "./state/persistence";
 
 export type Vec3 = [number, number, number];
 
-export type StartDirection =
-  | "top"
-  | "bottom"
-  | "left"
-  | "right"
-  | "front"
-  | "back";
-
 export type LedViewMode =
   | "breathIntensity"
-  | "lightOnly"
-  | "breathPlusLight";
+  | "timeOfDay"
+  | "breathPlusTimeOfDay";
+
+/**
+ * How the per-LED points are visualized in the 3D scene:
+ *   "sensors" — matte spheres that sample lighting at their surface
+ *               position. Represents the sampling side of the rendering
+ *               pipeline (what the app uses internally to decide colors).
+ *   "leds"    — narrow oriented hemispheres with additive blending that
+ *               emit their per-LED stream color. Represents what actually
+ *               gets streamed to WLED.
+ */
+export type LedDisplayMode = "sensors" | "leds";
+
+export interface LedStreamPipeline {
+  /** Enables the base time-of-day lighting stage. */
+  timeOfDayStage: boolean;
+  /** Enables breath masking/compositing stages. */
+  breathStage: boolean;
+  /** Enables locator hard override in streamed output. */
+  locatorOverrideStage: boolean;
+}
 
 /** Ellipsoid semi-axes in metres. */
 export interface EllipsoidParams {
@@ -40,13 +52,23 @@ export interface CloudParams {
    * or shows the visual representation of the cloud body.
    */
   showOpacity: boolean;
+  /** Rotation of the cloud around world up axis, in degrees. */
+  rotationYDeg: number;
+  /** World-space X offset of the cloud center, in metres. */
+  offsetX: number;
+  /** World-space Z offset of the cloud center, in metres. */
+  offsetZ: number;
 }
 
 export interface StrandParams {
-  count: number;
-  turns: number;
-  start: StartDirection;
+  /** Bead size for each rendered LED, in metres. */
   ledSize: number;
+  /**
+   * Hemisphere averaging focus for sensor sampling.
+   * 0 = uniform hemisphere average; higher values bias samples toward the
+   * sensor normal (head-on light contributes more than grazing light).
+   */
+  sensorHemisphereFocus: number;
 }
 
 export interface AmbientLightParams {
@@ -116,6 +138,17 @@ export interface SkyParams {
   sunScale: number;
   /** Global intensity scale for moon contribution. */
   moonScale: number;
+  /** Angular spread of sun light (0 = tight hotspot, 1 = broad sky-like). */
+  sunSpread: number;
+  /** Angular spread of moon light (0 = tight hotspot, 1 = broad sky-like). */
+  moonSpread: number;
+  /**
+   * Altitude (deg) where horizon occlusion starts opening.
+   * Negative values allow a bit of under-horizon twilight.
+   */
+  horizonCutoffDeg: number;
+  /** Soft transition width (deg) for horizon occlusion. */
+  horizonSoftnessDeg: number;
   /**
    * Draggable timeline of sun-color stops across the 24-hour day. The
    * sky cycle sorts stops by `timeHours` internally and interpolates
@@ -156,8 +189,6 @@ export interface Breather {
 
 export interface BreathParams {
   enabled: boolean;
-  /** Master amount for the overall breath system and LED coupling. */
-  masterAmount: number;
   /** Duration of inhale ramp (seconds). */
   inhaleSeconds: number;
   /** Duration of hold at the inhalation peak (seconds). */
@@ -166,19 +197,15 @@ export interface BreathParams {
   exhaleSeconds: number;
   /** Duration of hold at the exhalation trough (seconds). */
   holdTroughSeconds: number;
-  /** Global intensity scale for all breather color lights. */
-  intensity: number;
   /**
-   * Parameters for the exhale "wind" source under the cloud. This is used
-   * by the visual breath effect now and is intended to drive LED influence
-   * by distance in a later step.
+   * Area of effect anchored near the cloud surface. Defines where the
+   * breath influence is applied and how it falls off with distance.
    */
-  wind: BreathWindParams;
+  area: BreathAreaParams;
   breathers: Breather[];
 }
 
-export interface BreathWindParams {
-  enabled: boolean;
+export interface BreathAreaParams {
   /** Source direction around cloud center, in degrees. */
   sourceAzimuthDeg: number;
   /** Source elevation in degrees (-90 = below, +90 = above). */
@@ -189,26 +216,16 @@ export interface BreathWindParams {
   radius: number;
   /** Falloff exponent (>1 concentrates near source, <1 broadens). */
   falloffExponent: number;
-  /** Max scalar applied at source during strongest exhale. */
-  maxIntensity: number;
-  /** Max scalar applied at source during strongest inhale. */
-  inhaleMaxIntensity: number;
-  /** How strongly inhale dims LEDs in influenced regions. */
-  inhaleDimAmount: number;
-  /** How strongly exhale boosts LED exposure in influenced regions. */
-  exhaleExposureAmount: number;
-  /** Tint color applied by local breath influence over current LED color. */
+  /** Tint color applied over current LED color in the influenced area. */
   tintColor: string;
-  /** How strongly breath influence tints existing LED color. */
+  /** How strongly inhale blends LEDs toward the tint color. */
   tintAmount: number;
-  /** Time constant for channels decaying back toward neutral (seconds). */
-  neutralDecaySeconds: number;
-  /** Height of the visible upward plume (metres). */
-  plumeHeight: number;
+  /** Blend in combined mode: 0 = time of day, 1 = breath. */
+  breathVsTimeMix: number;
 }
 
-type BreathPatch = Partial<Omit<BreathParams, "wind">> & {
-  wind?: Partial<BreathWindParams>;
+type BreathPatch = Partial<Omit<BreathParams, "area">> & {
+  area?: Partial<BreathAreaParams>;
 };
 
 interface SimState {
@@ -221,7 +238,10 @@ interface SimState {
   wled: WledParams;
   breath: BreathParams;
   ledViewMode: LedViewMode;
+  ledDisplayMode: LedDisplayMode;
+  ledStreamPipeline: LedStreamPipeline;
   ledLocator: LedLocatorState;
+  mapping: MappingParams;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
   setStrand: (s: Partial<StrandParams>) => void;
@@ -231,15 +251,50 @@ interface SimState {
   setWled: (w: Partial<WledParams>) => void;
   setBreath: (b: BreathPatch) => void;
   setLedViewMode: (mode: LedViewMode) => void;
+  setLedDisplayMode: (mode: LedDisplayMode) => void;
+  setLedStreamPipeline: (patch: Partial<LedStreamPipeline>) => void;
   setLedLocator: (patch: Partial<LedLocatorState>) => void;
   toggleLocatedLed: (index: number) => void;
   clearLocatedLeds: () => void;
+  setMapping: (m: Partial<MappingParams>) => void;
+  addMappedLed: (dir: Vec3) => void;
+  moveMappedLed: (index: number, dir: Vec3) => void;
+  removeLastMappedLed: () => void;
+  clearMappedLeds: () => void;
 }
 
 export interface LedLocatorState {
   enabled: boolean;
   highlighted: number[];
   color: string;
+}
+
+/**
+ * A single manually-placed LED in the mapping app. Its location is stored
+ * as a unit-sphere direction so it stays glued to the ellipsoid surface
+ * when the cloud dimensions change: the surface point is simply
+ * `(rx, ry, rz) * dir`.
+ */
+export interface MappedLed {
+  dir: Vec3;
+}
+
+export interface MappingParams {
+  /** LEDs in the order they were placed on the strand. */
+  leds: MappedLed[];
+  /** Mirror mapping orientation vertically (swap top/bottom). */
+  flipUpDown: boolean;
+  /** Mirror mapping orientation horizontally (swap left/right). */
+  flipLeftRight: boolean;
+  /**
+   * When true, the logical sequence (LED numbering + the order streamed to
+   * the simulator/WLED) is the reverse of the placement order — i.e. the
+   * last-placed bead becomes #1. Flips which physical end counts as the
+   * start of the string.
+   */
+  reversed: boolean;
+  /** Bead display size in the mapping view (metres). */
+  ledSize: number;
 }
 
 /**
@@ -304,12 +359,16 @@ export function buildDefaultChannelStops(channel: SkyChannel): SkyChannelStop[] 
 
 const DEFAULTS = {
   ellipsoid: { rx: 1.2, ry: 0.8, rz: 1.0 } as EllipsoidParams,
-  cloud: { opacity: 0.6, showOpacity: true } as CloudParams,
+  cloud: {
+    opacity: 0.6,
+    showOpacity: true,
+    rotationYDeg: 0,
+    offsetX: 0,
+    offsetZ: 0,
+  } as CloudParams,
   strand: {
-    count: 120,
-    turns: 5,
-    start: "top" as const,
     ledSize: 0.04,
+    sensorHemisphereFocus: 0,
   } as StrandParams,
   ambient: { color: "#262830", intensity: 0.25 } as AmbientLightParams,
   directional: {
@@ -327,6 +386,10 @@ const DEFAULTS = {
     ambientScale: 1,
     sunScale: 1,
     moonScale: 1,
+    sunSpread: 0.9,
+    moonSpread: 0.9,
+    horizonCutoffDeg: -7,
+    horizonSoftnessDeg: 19,
     sunStops: buildDefaultChannelStops("sun"),
     moonStops: buildDefaultChannelStops("moon"),
     ambientStops: buildDefaultChannelStops("ambient"),
@@ -334,37 +397,55 @@ const DEFAULTS = {
   wled: { host: "192.168.1.50", fps: 30, enabled: false } as WledParams,
   breath: {
     enabled: true,
-    masterAmount: 1,
     inhaleSeconds: 2.5,
     holdPeakSeconds: 0.8,
     exhaleSeconds: 3.5,
     holdTroughSeconds: 0.9,
-    intensity: 0.65,
-    wind: {
-      enabled: true,
+    area: {
       sourceAzimuthDeg: 0,
       sourceElevationDeg: -90,
       distanceFromCloud: 0.28,
       radius: 1.2,
       falloffExponent: 2.1,
-      maxIntensity: 1.0,
-      inhaleMaxIntensity: 0.85,
-      inhaleDimAmount: 1.8,
-      exhaleExposureAmount: 1.8,
       tintColor: "#8fd8ff",
-      tintAmount: 0.45,
-      neutralDecaySeconds: 1.2,
-      plumeHeight: 0.95,
+      tintAmount: 1.2,
+      breathVsTimeMix: 0.5,
     },
     breathers: [{ id: "breather-0", color: "#77d5ff", phaseOffset: 0 }],
   } as BreathParams,
-  ledViewMode: "breathPlusLight" as LedViewMode,
+  ledViewMode: "breathPlusTimeOfDay" as LedViewMode,
+  ledDisplayMode: "sensors" as LedDisplayMode,
+  ledStreamPipeline: {
+    timeOfDayStage: true,
+    breathStage: true,
+    locatorOverrideStage: true,
+  } as LedStreamPipeline,
   ledLocator: {
     enabled: false,
     highlighted: [],
     color: "#ffe14d",
   } as LedLocatorState,
+  mapping: {
+    leds: [],
+    flipUpDown: false,
+    flipLeftRight: false,
+    reversed: false,
+    ledSize: 0.05,
+  } as MappingParams,
 };
+
+function normalizeLedViewMode(mode: unknown): LedViewMode {
+  if (mode === "lightOnly") return "timeOfDay";
+  if (mode === "breathPlusLight") return "breathPlusTimeOfDay";
+  if (
+    mode === "breathIntensity" ||
+    mode === "timeOfDay" ||
+    mode === "breathPlusTimeOfDay"
+  ) {
+    return mode;
+  }
+  return DEFAULTS.ledViewMode;
+}
 
 /**
  * Migration from the previous tri-color stop model where each stop
@@ -511,10 +592,26 @@ function initialState() {
     breath: {
       ...DEFAULTS.breath,
       ...saved.breath,
-      wind: { ...DEFAULTS.breath.wind, ...saved.breath?.wind },
+      area: {
+        ...DEFAULTS.breath.area,
+        // Older snapshots stored these params under `wind`; fall back to
+        // that so previously saved settings still apply.
+        ...(saved.breath as { wind?: Partial<BreathAreaParams> } | undefined)
+          ?.wind,
+        ...saved.breath?.area,
+      },
     },
-    ledViewMode: saved.ledViewMode ?? DEFAULTS.ledViewMode,
+    ledViewMode: normalizeLedViewMode(saved.ledViewMode),
+    ledDisplayMode:
+      saved.ledDisplayMode === "leds" || saved.ledDisplayMode === "sensors"
+        ? saved.ledDisplayMode
+        : DEFAULTS.ledDisplayMode,
+    ledStreamPipeline: {
+      ...DEFAULTS.ledStreamPipeline,
+      ...saved.ledStreamPipeline,
+    },
     ledLocator: { ...DEFAULTS.ledLocator, ...saved.ledLocator },
+    mapping: { ...DEFAULTS.mapping, ...saved.mapping },
   };
 }
 
@@ -533,10 +630,15 @@ export const useSimStore = create<SimState>((set) => ({
       breath: {
         ...s.breath,
         ...b,
-        wind: { ...s.breath.wind, ...b.wind },
+        area: { ...s.breath.area, ...b.area },
       },
     })),
   setLedViewMode: (mode) => set({ ledViewMode: mode }),
+  setLedDisplayMode: (mode) => set({ ledDisplayMode: mode }),
+  setLedStreamPipeline: (patch) =>
+    set((s) => ({
+      ledStreamPipeline: { ...s.ledStreamPipeline, ...patch },
+    })),
   setLedLocator: (patch) =>
     set((s) => ({ ledLocator: { ...s.ledLocator, ...patch } })),
   toggleLocatedLed: (index) =>
@@ -554,6 +656,24 @@ export const useSimStore = create<SimState>((set) => ({
     }),
   clearLocatedLeds: () =>
     set((s) => ({ ledLocator: { ...s.ledLocator, highlighted: [] } })),
+  setMapping: (m) => set((s) => ({ mapping: { ...s.mapping, ...m } })),
+  addMappedLed: (dir) =>
+    set((s) => ({
+      mapping: { ...s.mapping, leds: [...s.mapping.leds, { dir }] },
+    })),
+  moveMappedLed: (index, dir) =>
+    set((s) => ({
+      mapping: {
+        ...s.mapping,
+        leds: s.mapping.leds.map((l, i) => (i === index ? { dir } : l)),
+      },
+    })),
+  removeLastMappedLed: () =>
+    set((s) => ({
+      mapping: { ...s.mapping, leds: s.mapping.leds.slice(0, -1) },
+    })),
+  clearMappedLeds: () =>
+    set((s) => ({ mapping: { ...s.mapping, leds: [] } })),
 }));
 
 /**
@@ -583,10 +703,25 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   s.setBreath({
     ...DEFAULTS.breath,
     ...snap.breath,
-    wind: { ...DEFAULTS.breath.wind, ...snap.breath?.wind },
+    area: {
+      ...DEFAULTS.breath.area,
+      ...(snap.breath as { wind?: Partial<BreathAreaParams> } | undefined)
+        ?.wind,
+      ...snap.breath?.area,
+    },
   });
-  s.setLedViewMode(snap.ledViewMode ?? DEFAULTS.ledViewMode);
+  s.setLedViewMode(normalizeLedViewMode(snap.ledViewMode));
+  if (snap.ledDisplayMode === "leds" || snap.ledDisplayMode === "sensors") {
+    s.setLedDisplayMode(snap.ledDisplayMode);
+  } else {
+    s.setLedDisplayMode(DEFAULTS.ledDisplayMode);
+  }
+  s.setLedStreamPipeline({
+    ...DEFAULTS.ledStreamPipeline,
+    ...snap.ledStreamPipeline,
+  });
   s.setLedLocator({ ...DEFAULTS.ledLocator, ...snap.ledLocator });
+  s.setMapping({ ...DEFAULTS.mapping, ...snap.mapping });
   return snap;
 }
 
@@ -603,19 +738,12 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     wled: s.wled,
     breath: s.breath,
     ledViewMode: s.ledViewMode,
+    ledDisplayMode: s.ledDisplayMode,
+    ledStreamPipeline: s.ledStreamPipeline,
     ledLocator: s.ledLocator,
+    mapping: s.mapping,
   };
 }
-
-/** Unit vector for each cardinal start direction. */
-export const START_AXIS: Record<StartDirection, Vec3> = {
-  top: [0, 1, 0],
-  bottom: [0, -1, 0],
-  right: [1, 0, 0],
-  left: [-1, 0, 0],
-  front: [0, 0, 1],
-  back: [0, 0, -1],
-};
 
 /**
  * Distance-based intensity multiplier for the directional light.

@@ -141,6 +141,7 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
 
   const solar = Math.sin(((hour - 6) / 24) * TAU);
   const altitude = Math.asin(solar);
+  const altitudeDeg = (altitude * 180) / Math.PI;
   const azimuth = ((hour - 6) / 24) * TAU;
   const sunDirection = directionFromAzAlt(azimuth, altitude);
   const moonDirection: Vec3 = [
@@ -149,14 +150,22 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
     -sunDirection[2],
   ];
 
-  const sunVisible = smoothstep(-0.12, 0.2, solar);
-  const moonVisible = smoothstep(-0.12, 0.2, -solar);
+  const hCut = sky.horizonCutoffDeg ?? -7;
+  const hSoft = Math.max(0, sky.horizonSoftnessDeg ?? 0);
+  const sunVisible = hSoft <= 0
+    ? (altitudeDeg >= hCut ? 1 : 0)
+    : smoothstep(hCut, hCut + hSoft, altitudeDeg);
+  const moonVisible = hSoft <= 0
+    ? (-altitudeDeg >= hCut ? 1 : 0)
+    : smoothstep(hCut, hCut + hSoft, -altitudeDeg);
   const twilight = Math.exp(-Math.pow(solar / 0.22, 2));
+  const twilightSun = twilight * sunVisible;
+  const twilightMoon = twilight * moonVisible;
   const sunsetBoost = 1 + twilight * 0.55;
 
   const ambientBase = 0.08 + 0.22 * clamp01((solar + 0.2) / 1.2);
-  const sunBase = 1.1 * sunVisible + 0.35 * twilight;
-  const moonBase = 0.75 * moonVisible;
+  const sunBase = 1.1 * sunVisible + 0.35 * twilightSun;
+  const moonBase = 0.75 * moonVisible + 0.2 * twilightMoon;
 
   const ambientIntensity = ambientBase * sky.ambientScale * vis;
   const sunIntensity = clamp01(sunBase * sky.sunScale) * 1.6 * vis;

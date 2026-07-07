@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { breathLevelAt, sampleBreathAt } from "../lighting/breath";
-import { breathWindModesAt, computeBreathWindOrigin } from "../lighting/breathWind";
+import { computeBreathAreaOrigin } from "../lighting/breathArea";
 import { useSimStore, type Breather } from "../state";
 
 const PRESET_COLORS = [
@@ -49,36 +49,22 @@ const PARAM_HELP = {
     "Duration of the exhale ramp. Longer values create a slower outward breath release.",
   holdTroughSeconds:
     "How long breath rests at the trough before the next inhale starts.",
-  breathIntensity:
-    "Global brightness contribution from the breather color lights independent of wind.",
-  breathMaster:
-    "Master amount for the full breath system, including breath visuals and LED modulation.",
-  windRadius:
-    "Max distance from the breath source where wind can affect LEDs and visuals.",
-  windFalloff:
-    "How quickly wind influence drops with distance. Higher means stronger near source, weaker farther away.",
-  windExhaleMax:
-    "Peak exhale push strength at the source before distance falloff is applied.",
-  windInhaleMax:
-    "Peak inhale pull strength at the source before distance falloff is applied.",
-  inhaleDim:
-    "How strongly inhale darkens LEDs in influenced regions.",
-  exhaleExposure:
-    "How strongly exhale increases LED exposure in influenced regions.",
+  areaRadius:
+    "Radius of the breath area of effect on the cloud. LEDs outside are unaffected.",
+  areaFalloff:
+    "How quickly influence drops from the center of the area. Higher means sharper, lower means broader.",
   breathTintColor:
-    "Color applied by breath to tint existing LED lighting where breath influence is present.",
+    "Color blended over LEDs inside the area of effect, proportional to inhale amount.",
   breathTintAmount:
-    "How strongly breath influence blends LEDs toward the selected breath tint color.",
-  neutralDecay:
-    "How quickly inhale/exhale LED channels relax back to neutral over time. Lower is snappier decay.",
+    "How strongly inhale blends LEDs toward the selected tint color.",
+  breathTimeMix:
+    "Blend in Breath + Time of Day mode. 0 = time-of-day only, 1 = breath-only.",
   sourceAzimuth:
     "Horizontal direction around the cloud center for the breath source.",
   sourceElevation:
     "Vertical direction of the breath source. -90 is below cloud, +90 is above.",
   distanceCloud:
-    "How far the source sits away from the cloud surface along the selected direction.",
-  plumeHeight:
-    "Visual height/depth of the animated breath plume.",
+    "Offset of the area center from the cloud surface along the selected direction.",
 };
 
 export function BreathOscillator() {
@@ -106,14 +92,13 @@ export function BreathOscillator() {
   const leadProgress = (nowMs % cycleMs) / cycleMs;
   const sample = sampleBreathAt(breath, nowMs);
   const currentLevel = sample.level;
-  const master = Math.max(0, Math.min(1, breath.masterAmount ?? 1));
-  const inhaleLevel = sample.inhaleIntensity * master;
-  const exhaleLevel = sample.exhaleIntensity * master;
+  const inhaleLevel = sample.inhaleIntensity;
+  const exhaleLevel = sample.exhaleIntensity;
 
-  const sourcePos = computeBreathWindOrigin(ellipsoid, {
-    sourceAzimuthDeg: breath.wind.sourceAzimuthDeg,
-    sourceElevationDeg: breath.wind.sourceElevationDeg,
-    distanceFromCloud: breath.wind.distanceFromCloud,
+  const sourcePos = computeBreathAreaOrigin(ellipsoid, {
+    sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
+    sourceElevationDeg: breath.area.sourceElevationDeg,
+    distanceFromCloud: breath.area.distanceFromCloud,
   });
 
   const segmentPercents = useMemo(() => {
@@ -159,14 +144,14 @@ export function BreathOscillator() {
   const selectedOriginPreset = useMemo(() => {
     for (const p of ORIGIN_PRESETS) {
       if (
-        Math.abs(breath.wind.sourceAzimuthDeg - p.azimuth) < 0.5 &&
-        Math.abs(breath.wind.sourceElevationDeg - p.elevation) < 0.5
+        Math.abs(breath.area.sourceAzimuthDeg - p.azimuth) < 0.5 &&
+        Math.abs(breath.area.sourceElevationDeg - p.elevation) < 0.5
       ) {
         return p.id;
       }
     }
     return "custom";
-  }, [breath.wind.sourceAzimuthDeg, breath.wind.sourceElevationDeg]);
+  }, [breath.area.sourceAzimuthDeg, breath.area.sourceElevationDeg]);
 
   const setOriginPreset = (
     value: "front" | "back" | "left" | "right" | "top" | "bottom" | "custom",
@@ -175,49 +160,12 @@ export function BreathOscillator() {
     const preset = ORIGIN_PRESETS.find((p) => p.id === value);
     if (!preset) return;
     setBreath({
-      wind: {
+      area: {
         sourceAzimuthDeg: preset.azimuth,
         sourceElevationDeg: preset.elevation,
       },
     });
   };
-
-  const windAtSource = breathWindModesAt(
-    sourcePos,
-    {
-      origin: sourcePos,
-      radius: breath.wind.radius,
-      falloffExponent: breath.wind.falloffExponent,
-    },
-    inhaleLevel,
-    exhaleLevel,
-    breath.wind.inhaleMaxIntensity,
-    breath.wind.maxIntensity,
-  );
-  const windAtHalf = breathWindModesAt(
-    [sourcePos[0] + breath.wind.radius * 0.5, sourcePos[1], sourcePos[2]],
-    {
-      origin: sourcePos,
-      radius: breath.wind.radius,
-      falloffExponent: breath.wind.falloffExponent,
-    },
-    inhaleLevel,
-    exhaleLevel,
-    breath.wind.inhaleMaxIntensity,
-    breath.wind.maxIntensity,
-  );
-  const windAtEdge = breathWindModesAt(
-    [sourcePos[0] + breath.wind.radius, sourcePos[1], sourcePos[2]],
-    {
-      origin: sourcePos,
-      radius: breath.wind.radius,
-      falloffExponent: breath.wind.falloffExponent,
-    },
-    inhaleLevel,
-    exhaleLevel,
-    breath.wind.inhaleMaxIntensity,
-    breath.wind.maxIntensity,
-  );
 
   return (
     <div
@@ -323,15 +271,6 @@ export function BreathOscillator() {
       >
         <Section title="Breath Timing">
           <SliderField
-            label="breath amount"
-            tooltip={PARAM_HELP.breathMaster}
-            value={breath.masterAmount}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => setBreath({ masterAmount: v })}
-          />
-          <SliderField
             label="inhale"
             tooltip={PARAM_HELP.inhaleSeconds}
             value={breath.inhaleSeconds}
@@ -367,137 +306,80 @@ export function BreathOscillator() {
             step={0.1}
             onChange={(v) => setBreath({ holdTroughSeconds: v })}
           />
-          <SliderField
-            label="intensity"
-            tooltip={PARAM_HELP.breathIntensity}
-            value={breath.intensity}
-            min={0}
-            max={2}
-            step={0.01}
-            onChange={(v) => setBreath({ intensity: v })}
-          />
         </Section>
 
-        <Section title="Source Placement">
+        <Section title="Area of Effect">
           <SliderField
             label="source azimuth"
             tooltip={PARAM_HELP.sourceAzimuth}
-            value={breath.wind.sourceAzimuthDeg}
+            value={breath.area.sourceAzimuthDeg}
             min={-180}
             max={180}
             step={1}
-            onChange={(v) => setBreath({ wind: { sourceAzimuthDeg: v } })}
+            onChange={(v) => setBreath({ area: { sourceAzimuthDeg: v } })}
           />
           <SliderField
             label="source elevation"
             tooltip={PARAM_HELP.sourceElevation}
-            value={breath.wind.sourceElevationDeg}
+            value={breath.area.sourceElevationDeg}
             min={-90}
             max={90}
             step={1}
-            onChange={(v) => setBreath({ wind: { sourceElevationDeg: v } })}
+            onChange={(v) => setBreath({ area: { sourceElevationDeg: v } })}
           />
           <SliderField
-            label="distance cloud"
+            label="surface offset"
             tooltip={PARAM_HELP.distanceCloud}
-            value={breath.wind.distanceFromCloud}
+            value={breath.area.distanceFromCloud}
             min={0}
-            max={3}
+            max={1.5}
             step={0.01}
-            onChange={(v) => setBreath({ wind: { distanceFromCloud: v } })}
+            onChange={(v) => setBreath({ area: { distanceFromCloud: v } })}
           />
           <SliderField
-            label="plume height"
-            tooltip={PARAM_HELP.plumeHeight}
-            value={breath.wind.plumeHeight}
+            label="radius"
+            tooltip={PARAM_HELP.areaRadius}
+            value={breath.area.radius}
             min={0.1}
-            max={3}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { plumeHeight: v } })}
-          />
-        </Section>
-
-        <Section title="Wind Field">
-          <SliderField
-            label="wind radius"
-            tooltip={PARAM_HELP.windRadius}
-            value={breath.wind.radius}
-            min={0.1}
-            max={4}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { radius: v } })}
+            max={20}
+            step={0.05}
+            onChange={(v) => setBreath({ area: { radius: v } })}
           />
           <SliderField
-            label="wind falloff"
-            tooltip={PARAM_HELP.windFalloff}
-            value={breath.wind.falloffExponent}
+            label="falloff"
+            tooltip={PARAM_HELP.areaFalloff}
+            value={breath.area.falloffExponent}
             min={0.2}
             max={6}
             step={0.05}
-            onChange={(v) => setBreath({ wind: { falloffExponent: v } })}
-          />
-          <SliderField
-            label="wind max"
-            tooltip={PARAM_HELP.windExhaleMax}
-            value={breath.wind.maxIntensity}
-            min={0}
-            max={4}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { maxIntensity: v } })}
-          />
-          <SliderField
-            label="inhale max"
-            tooltip={PARAM_HELP.windInhaleMax}
-            value={breath.wind.inhaleMaxIntensity}
-            min={0}
-            max={4}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { inhaleMaxIntensity: v } })}
+            onChange={(v) => setBreath({ area: { falloffExponent: v } })}
           />
         </Section>
 
         <Section title="LED Response">
-          <SliderField
-            label="inhale dim"
-            tooltip={PARAM_HELP.inhaleDim}
-            value={breath.wind.inhaleDimAmount}
-            min={0}
-            max={2}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { inhaleDimAmount: v } })}
-          />
-          <SliderField
-            label="exhale exposure"
-            tooltip={PARAM_HELP.exhaleExposure}
-            value={breath.wind.exhaleExposureAmount}
-            min={0}
-            max={3}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { exhaleExposureAmount: v } })}
-          />
           <ColorField
-            label="breath tint"
+            label="tint"
             tooltip={PARAM_HELP.breathTintColor}
-            value={breath.wind.tintColor}
-            onChange={(v) => setBreath({ wind: { tintColor: v } })}
+            value={breath.area.tintColor}
+            onChange={(v) => setBreath({ area: { tintColor: v } })}
           />
           <SliderField
             label="tint amount"
             tooltip={PARAM_HELP.breathTintAmount}
-            value={breath.wind.tintAmount}
+            value={breath.area.tintAmount}
+            min={0}
+            max={3}
+            step={0.01}
+            onChange={(v) => setBreath({ area: { tintAmount: v } })}
+          />
+          <SliderField
+            label="breath/time mix"
+            tooltip={PARAM_HELP.breathTimeMix}
+            value={breath.area.breathVsTimeMix}
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setBreath({ wind: { tintAmount: v } })}
-          />
-          <SliderField
-            label="neutral decay"
-            tooltip={PARAM_HELP.neutralDecay}
-            value={breath.wind.neutralDecaySeconds}
-            min={0.05}
-            max={6}
-            step={0.01}
-            onChange={(v) => setBreath({ wind: { neutralDecaySeconds: v } })}
+            onChange={(v) => setBreath({ area: { breathVsTimeMix: v } })}
           />
         </Section>
       </div>
@@ -558,29 +440,9 @@ export function BreathOscillator() {
           opacity: 0.78,
         }}
       >
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="checkbox"
-            checked={breath.wind.enabled}
-            onChange={(e) => setBreath({ wind: { enabled: e.target.checked } })}
-          />
-          show wind effect
-        </label>
         <span>
-          source in/out/overlap/net: {windAtSource.inhalePull.toFixed(2)} /{" "}
-          {windAtSource.exhalePush.toFixed(2)} / {windAtSource.overlap.toFixed(2)} /{" "}
-          {windAtSource.net.toFixed(2)}
-        </span>
-        <span>
-          mid in/out/net: {windAtHalf.inhalePull.toFixed(2)} /{" "}
-          {windAtHalf.exhalePush.toFixed(2)} / {windAtHalf.net.toFixed(2)}
-        </span>
-        <span>
-          edge in/out/net: {windAtEdge.inhalePull.toFixed(2)} /{" "}
-          {windAtEdge.exhalePush.toFixed(2)} / {windAtEdge.net.toFixed(2)}
-        </span>
-        <span>
-          source ({sourcePos[0].toFixed(2)}, {sourcePos[1].toFixed(2)}, {sourcePos[2].toFixed(2)})
+          area center ({sourcePos[0].toFixed(2)}, {sourcePos[1].toFixed(2)},{" "}
+          {sourcePos[2].toFixed(2)})
         </span>
       </div>
 

@@ -1,13 +1,16 @@
 import { Canvas } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
+import { Link } from "react-router-dom";
 import { Leva } from "leva";
 import { ControlPanel } from "./controls/Panel";
 import { Histogram } from "./components/Histogram";
+import { StreamMatrix } from "./components/StreamMatrix";
 import { BreathOscillator } from "./components/BreathOscillator";
 import { LedViewModePanel } from "./components/LedViewModePanel";
 import { SkyTimeline } from "./components/SkyTimeline";
 import { Ellipsoid } from "./scene/Ellipsoid";
-import { BreathWind } from "./scene/BreathWind";
+import { BreathArea } from "./scene/BreathArea";
+import { HorizonGuide } from "./scene/HorizonGuide";
 import { Leds } from "./scene/Leds";
 import { Lights } from "./scene/Lights";
 
@@ -15,11 +18,33 @@ export default function App() {
   return (
     <>
       <Leva collapsed={false} oneLineLabels />
+      <Link
+        to="/mapping"
+        style={{
+          position: "fixed",
+          bottom: 12,
+          right: 12,
+          zIndex: 20,
+          color: "rgba(207,214,230,0.95)",
+          textDecoration: "none",
+          background: "rgba(10, 12, 20, 0.82)",
+          backdropFilter: "blur(8px)",
+          border: "1px solid rgba(255,255,255,0.15)",
+          borderRadius: 8,
+          padding: "6px 12px",
+          fontFamily:
+            "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+          fontSize: 12,
+        }}
+      >
+        LED mapping →
+      </Link>
       <ControlPanel />
       <SkyTimeline />
       <LedViewModePanel />
       <BreathOscillator />
       <Histogram />
+      <StreamMatrix />
       <Canvas
         camera={{ position: [4, 3, 5], fov: 50 }}
         gl={{ antialias: true }}
@@ -39,9 +64,10 @@ export default function App() {
         <axesHelper args={[1]} />
 
         <Lights />
+        <HorizonGuide />
         <Ellipsoid />
-        <BreathWind />
         <Leds />
+        <BreathArea />
 
         <OrbitControls makeDefault />
       </Canvas>

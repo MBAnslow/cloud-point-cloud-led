@@ -1,19 +1,24 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import {
+  AdditiveBlending,
   Color,
+  FrontSide,
   DynamicDrawUsage,
   InstancedBufferAttribute,
   InstancedMesh,
   Object3D,
+  Vector3,
 } from "three";
-import { buildSpiral } from "../geometry/spiral";
-import { breathLevelAt } from "../lighting/breath";
+import {
+  applyMappingOrientation,
+  surfaceNormal,
+  surfacePoint,
+} from "../mapping/geometry";
 import { sampleBreathAt } from "../lighting/breath";
 import {
-  breathWindInfluenceAt,
-  computeBreathWindOrigin,
-} from "../lighting/breathWind";
+  computeBreathAreaOrigin,
+} from "../lighting/breathArea";
 import {
   hexToVec3,
   shadeLeds,
@@ -29,142 +34,123 @@ function clamp01(v: number): number {
   if (v >= 1) return 1;
   return v;
 }
+const STREAM_BYTE_DEADBAND = 1;
 
-/**
- * Exposure-like lift. Unlike plain multiplication, this can brighten even
- * darker LEDs so the exhale effect stays visible in low-light regions.
- */
-function applyExposureLift(c: number, amount: number): number {
-  if (amount <= 1e-6) return c;
-  return 1 - (1 - clamp01(c)) * Math.exp(-amount);
+function ensureOutwardNormal(position: [number, number, number], normal: [number, number, number]): [number, number, number] {
+  // If a normal ever comes in flipped (inward), invert it so lighting stays
+  // physically intuitive: lights above brighten the upper hemisphere.
+  const d = position[0] * normal[0] + position[1] * normal[1] + position[2] * normal[2];
+  return d >= 0 ? normal : [-normal[0], -normal[1], -normal[2]];
 }
 
-function inhaleDimStrength(param: number): number {
-  // Very strong pull-to-dark curve. At higher inhale values LEDs should
-  // approach off, not just "a bit dimmer".
-  const p = Math.max(0, param);
-  return clamp01(1 - Math.exp(-6.0 * p));
+function rotateY(v: [number, number, number], radians: number): [number, number, number] {
+  const c = Math.cos(radians);
+  const s = Math.sin(radians);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
 }
 
-function applyNeutralDecay(value: number, dtSec: number, decaySec: number): number {
-  const tau = Math.max(0.01, decaySec);
-  const strength = 3.1;
-  return value * Math.exp((-dtSec * strength) / tau);
-}
-
-function applyNeutralVelocityDecay(
-  velocity: number,
-  dtSec: number,
-  decaySec: number,
-): number {
-  const tau = Math.max(0.01, decaySec);
-  const strength = 4.4;
-  return velocity * Math.exp((-dtSec * strength) / tau);
-}
-
-/**
- * Second-order smoothing for per-LED breath channels.
- * Gives each LED an inertia-like response (value + velocity) so inhale/exhale
- * transitions accelerate/decelerate instead of hard-switching.
- */
-function stepDynamicParam(
-  value: number,
-  velocity: number,
-  target: number,
-  durationSec: number,
-  dtSec: number,
-): [number, number] {
-  const duration = Math.max(0.08, durationSec);
-  const omega = 2.8 / duration;
-  const accel = (target - value) * omega * omega;
-  let v = velocity + accel * dtSec;
-  v *= Math.exp(-2.1 * omega * dtSec);
-  let x = value + v * dtSec;
-
-  if (x < 0) {
-    x = 0;
-    if (v < 0) v = 0;
-  }
-  if (x > 6) {
-    x = 6;
-    if (v > 0) v = 0;
-  }
-  return [x, v];
+function offsetXZ(v: [number, number, number], x: number, z: number): [number, number, number] {
+  return [v[0] + x, v[1], v[2] + z];
 }
 
 export function Leds() {
   const ellipsoid = useSimStore((s) => s.ellipsoid);
   const cloud = useSimStore((s) => s.cloud);
   const strand = useSimStore((s) => s.strand);
+  const mapping = useSimStore((s) => s.mapping);
   const ambient = useSimStore((s) => s.ambient);
   const sky = useSimStore((s) => s.sky);
   const breath = useSimStore((s) => s.breath);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
+  const ledDisplayMode = useSimStore((s) => s.ledDisplayMode);
+  const ledStreamPipeline = useSimStore((s) => s.ledStreamPipeline);
   const ledLocator = useSimStore((s) => s.ledLocator);
   const toggleLocatedLed = useSimStore((s) => s.toggleLocatedLed);
   const wled = useSimStore((s) => s.wled);
+  const cloudYawRad = (cloud.rotationYDeg * Math.PI) / 180;
   const MANUAL_BLEND_WHEN_SKY = 0.2;
 
   const meshRef = useRef<InstancedMesh>(null);
   const dummy = useMemo(() => new Object3D(), []);
   const tmpColor = useMemo(() => new Color(), []);
+  const stableBytesRef = useRef<Uint8Array | null>(null);
   const locatedSet = useMemo(
     () => new Set(ledLocator.highlighted),
     [ledLocator.highlighted],
   );
 
+  // LED positions come exclusively from the mapping app.
+  const ledCount = mapping.leds.length;
+
   // Per-LED buffers. Reallocated when the LED count changes.
   const buffers = useMemo(() => {
-    const n = Math.max(2, Math.floor(strand.count));
+    const n = ledCount;
     return {
       n,
       positions: new Float32Array(n * 3),
       normals: new Float32Array(n * 3),
       colorFloats: new Float32Array(n * 3),
+      timeColorFloats: new Float32Array(n * 3),
+      breathColorFloats: new Float32Array(n * 3),
       colorBytes: new Uint8Array(n * 3),
-      inhaleParam: new Float32Array(n),
-      exhaleParam: new Float32Array(n),
-      inhaleVelocity: new Float32Array(n),
-      exhaleVelocity: new Float32Array(n),
     };
-  }, [strand.count]);
+  }, [ledCount]);
 
   // Recompute LED positions whenever the geometric parameters change.
   // Written in-place to avoid per-frame allocations.
   useEffect(() => {
-    const samples = buildSpiral({
-      rx: ellipsoid.rx,
-      ry: ellipsoid.ry,
-      rz: ellipsoid.rz,
-      count: buffers.n,
-      turns: strand.turns,
-      start: strand.start,
-    });
     for (let i = 0; i < buffers.n; i++) {
-      const s = samples[i];
+      // `i` is the logical strand index; map it to the placement index so
+      // the reverse toggle flips which physical end is LED #0.
+      const physical = mapping.reversed ? buffers.n - 1 - i : i;
+      const dir = applyMappingOrientation(
+        mapping.leds[physical].dir,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+      );
+      const pos = surfacePoint(dir, ellipsoid);
+      const nrm = ensureOutwardNormal(pos, surfaceNormal(dir, ellipsoid));
+      const rPos = offsetXZ(rotateY(pos, cloudYawRad), cloud.offsetX, cloud.offsetZ);
+      const rNrm = rotateY(nrm, cloudYawRad);
       const i3 = i * 3;
-      buffers.positions[i3] = s.position[0];
-      buffers.positions[i3 + 1] = s.position[1];
-      buffers.positions[i3 + 2] = s.position[2];
-      buffers.normals[i3] = s.normal[0];
-      buffers.normals[i3 + 1] = s.normal[1];
-      buffers.normals[i3 + 2] = s.normal[2];
+      buffers.positions[i3] = rPos[0];
+      buffers.positions[i3 + 1] = rPos[1];
+      buffers.positions[i3 + 2] = rPos[2];
+      buffers.normals[i3] = rNrm[0];
+      buffers.normals[i3 + 1] = rNrm[1];
+      buffers.normals[i3 + 2] = rNrm[2];
     }
 
     const mesh = meshRef.current;
     if (mesh) {
-      // Push each LED slightly outward along its surface normal so the bead
-      // sits on top of the (slightly translucent) ellipsoid rather than
-      // bisected by it. The offset is one bead radius — enough to keep the
-      // whole sphere visible without floating away from the surface.
-      const offset = strand.ledSize;
+      // In "sensors" mode the bead is a full sphere pushed one bead
+      // radius above the surface so it sits on top. In "leds" mode the
+      // primitive is a hemisphere whose flat side is at the surface, so
+      // we set no additional normal offset and just rotate the primitive
+      // to align its pole with the LED's outward normal.
+      const isLeds = ledDisplayMode === "leds";
+      // Keep both cap types off the exact cloud surface to avoid depth
+      // fighting shimmer. Streamed LED emitters sit a bit further out so
+      // additive blending reads as emission rather than shell acne.
+      const sensorOffset = Math.max(0.0015, strand.ledSize * 0.06);
+      const ledOffset = Math.max(0.003, strand.ledSize * 0.18);
+      const offset = isLeds ? ledOffset : sensorOffset;
+      const yAxis = new Vector3(0, 1, 0);
+      const normalVec = new Vector3();
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
+        const nx = buffers.normals[i3];
+        const ny = buffers.normals[i3 + 1];
+        const nz = buffers.normals[i3 + 2];
         dummy.position.set(
-          buffers.positions[i3] + buffers.normals[i3] * offset,
-          buffers.positions[i3 + 1] + buffers.normals[i3 + 1] * offset,
-          buffers.positions[i3 + 2] + buffers.normals[i3 + 2] * offset,
+          buffers.positions[i3] + nx * offset,
+          buffers.positions[i3 + 1] + ny * offset,
+          buffers.positions[i3 + 2] + nz * offset,
         );
+        {
+          normalVec.set(nx, ny, nz);
+          dummy.quaternion.setFromUnitVectors(yAxis, normalVec);
+        }
         dummy.scale.setScalar(strand.ledSize);
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);
@@ -176,9 +162,15 @@ export function Leds() {
     ellipsoid.rx,
     ellipsoid.ry,
     ellipsoid.rz,
-    strand.turns,
-    strand.start,
     strand.ledSize,
+    mapping.leds,
+    mapping.flipUpDown,
+    mapping.flipLeftRight,
+    mapping.reversed,
+    cloudYawRad,
+    cloud.offsetX,
+    cloud.offsetZ,
+    ledDisplayMode,
     buffers,
     dummy,
   ]);
@@ -217,224 +209,112 @@ export function Leds() {
     const manualBlend = sky.enabled
       ? 1 - (1 - MANUAL_BLEND_WHEN_SKY) * skyAmount
       : 1;
-    const breathMaster = clamp01(breath.masterAmount ?? 1);
 
-    const lights: ShadeLight[] = [
-      {
-        type: "ambient",
-        color: hexToVec3(ambient.color),
-        intensity: ambient.intensity * manualBlend,
-      },
-    ];
-    if (sky.enabled) {
-      lights.push(
+    const useBreathPipeline =
+      ledStreamPipeline.breathStage && ledViewMode !== "timeOfDay";
+    const useTimePipeline =
+      ledStreamPipeline.timeOfDayStage && ledViewMode !== "breathIntensity";
+
+    if (useTimePipeline) {
+      // Pipeline A: time-of-day lighting.
+      const timeLights: ShadeLight[] = [
         {
           type: "ambient",
-          color: hexToVec3(skyLighting.ambientColor),
-          intensity: skyLighting.ambientIntensity,
+          color: hexToVec3(ambient.color),
+          intensity: ambient.intensity * manualBlend,
         },
-        {
-          type: "directional",
-          direction: skyLighting.sunDirection,
-          color: hexToVec3(skyLighting.sunColor),
-          intensity: skyLighting.sunIntensity,
-          spread: 0.88,
-        },
-        {
-          type: "directional",
-          direction: skyLighting.moonDirection,
-          color: hexToVec3(skyLighting.moonColor),
-          intensity: skyLighting.moonIntensity,
-          spread: 0.94,
-        },
-      );
-    }
-    if (
-      ledViewMode === "breathPlusLight" &&
-      breath.enabled &&
-      breath.breathers.length > 0
-    ) {
-      const nowMs = performance.now();
-      const cycleSeconds =
-        breath.inhaleSeconds +
-        breath.holdPeakSeconds +
-        breath.exhaleSeconds +
-        breath.holdTroughSeconds;
-      const cycleMs = Math.max(1, cycleSeconds * 1000);
-      const perBreatherGain =
-        (breath.intensity * breathMaster) / Math.max(1, breath.breathers.length);
-      for (const breather of breath.breathers) {
-        const phaseMs = (breather.phaseOffset % 1) * cycleMs;
-        const level = breathLevelAt(breath, nowMs + phaseMs);
-        if (level <= 1e-5) continue;
-        lights.push({
-          type: "ambient",
-          color: hexToVec3(breather.color),
-          intensity: perBreatherGain * level,
-        });
+      ];
+      if (sky.enabled) {
+        timeLights.push(
+          {
+            type: "ambient",
+            color: hexToVec3(skyLighting.ambientColor),
+            intensity: skyLighting.ambientIntensity,
+          },
+          {
+            type: "directional",
+            direction: skyLighting.sunDirection,
+            color: hexToVec3(skyLighting.sunColor),
+            intensity: skyLighting.sunIntensity,
+            spread: clamp01(sky.sunSpread ?? 0.9),
+          },
+          {
+            type: "directional",
+            direction: skyLighting.moonDirection,
+            color: hexToVec3(skyLighting.moonColor),
+            intensity: skyLighting.moonIntensity,
+            spread: clamp01(sky.moonSpread ?? 0.9),
+          },
+        );
       }
-    }
-
-    shadeLeds(
-      buffers.positions,
-      buffers.normals,
-      buffers.n,
-      lights,
-      cloud.opacity,
-      buffers.colorBytes,
-      buffers.colorFloats,
-    );
-
-    // Update per-LED dynamic breath channels (stateful over time), then
-    // render according to selected LED view mode.
-    if (breath.enabled && breath.wind.enabled) {
-      const nowMs = performance.now();
-      const sample = sampleBreathAt(breath, nowMs);
-      const windOrigin = computeBreathWindOrigin(ellipsoid, {
-        sourceAzimuthDeg: breath.wind.sourceAzimuthDeg,
-        sourceElevationDeg: breath.wind.sourceElevationDeg,
-        distanceFromCloud: breath.wind.distanceFromCloud,
-      });
-      const field = {
-        origin: windOrigin as [number, number, number],
-        radius: breath.wind.radius,
-        falloffExponent: breath.wind.falloffExponent,
-      };
-      const dt = Math.min(0.1, Math.max(1 / 240, delta || 1 / 60));
-      const inhaleResponseSec = Math.max(
-        0.08,
-        breath.inhaleSeconds + breath.holdPeakSeconds * 0.35,
+      shadeLeds(
+        buffers.positions,
+        buffers.normals,
+        buffers.n,
+        timeLights,
+        cloud.opacity,
+        buffers.colorBytes,
+        buffers.timeColorFloats,
+        {
+          hemisphereAverage: true,
+          hemisphereFocusExponent: Math.max(0, strand.sensorHemisphereFocus),
+        },
       );
-      const exhaleResponseSec = Math.max(
-        0.08,
-        breath.exhaleSeconds + breath.holdTroughSeconds * 0.35,
-      );
-      const neutralDecaySec = Math.max(0.01, breath.wind.neutralDecaySeconds);
-
-      for (let i = 0; i < buffers.n; i++) {
-        const i3 = i * 3;
-        const px = buffers.positions[i3];
-        const py = buffers.positions[i3 + 1];
-        const pz = buffers.positions[i3 + 2];
-
-        const inhalePull = breathWindInfluenceAt(
-          [px, py, pz],
-          { ...field, maxIntensity: breath.wind.inhaleMaxIntensity },
-          sample.inhaleIntensity,
-        );
-        const exhalePush = breathWindInfluenceAt(
-          [px, py, pz],
-          { ...field, maxIntensity: breath.wind.maxIntensity },
-          sample.exhaleIntensity,
-        );
-
-        // Per-LED dynamic channels (stateful over time).
-        const inhaleTarget = inhalePull * breath.wind.inhaleDimAmount * breathMaster;
-        const exhaleTarget = exhalePush * breath.wind.exhaleExposureAmount * breathMaster;
-
-        const [inhaleParam, inhaleVel] = stepDynamicParam(
-          buffers.inhaleParam[i],
-          buffers.inhaleVelocity[i],
-          inhaleTarget,
-          inhaleResponseSec,
-          dt,
-        );
-        const [exhaleParam, exhaleVel] = stepDynamicParam(
-          buffers.exhaleParam[i],
-          buffers.exhaleVelocity[i],
-          exhaleTarget,
-          exhaleResponseSec,
-          dt,
-        );
-        buffers.inhaleParam[i] = inhaleParam;
-        buffers.inhaleVelocity[i] = inhaleVel;
-        buffers.exhaleParam[i] = exhaleParam;
-        buffers.exhaleVelocity[i] = exhaleVel;
-
-        // Explicit relaxation channel toward neutral over time.
-        buffers.inhaleParam[i] = applyNeutralDecay(
-          buffers.inhaleParam[i],
-          dt,
-          neutralDecaySec,
-        );
-        buffers.exhaleParam[i] = applyNeutralDecay(
-          buffers.exhaleParam[i],
-          dt,
-          neutralDecaySec,
-        );
-        buffers.inhaleVelocity[i] = applyNeutralVelocityDecay(
-          buffers.inhaleVelocity[i],
-          dt,
-          neutralDecaySec,
-        );
-        buffers.exhaleVelocity[i] = applyNeutralVelocityDecay(
-          buffers.exhaleVelocity[i],
-          dt,
-          neutralDecaySec,
-        );
-
-      }
     } else {
-      // Wind disabled: smoothly relax channels back to zero.
-      const dt = Math.min(0.1, Math.max(1 / 240, delta || 1 / 60));
-      const neutralDecaySec = Math.max(0.01, breath.wind.neutralDecaySeconds);
-      for (let i = 0; i < buffers.n; i++) {
-        const [inhaleParam, inhaleVel] = stepDynamicParam(
-          buffers.inhaleParam[i],
-          buffers.inhaleVelocity[i],
-          0,
-          neutralDecaySec,
-          dt,
-        );
-        const [exhaleParam, exhaleVel] = stepDynamicParam(
-          buffers.exhaleParam[i],
-          buffers.exhaleVelocity[i],
-          0,
-          neutralDecaySec,
-          dt,
-        );
-        buffers.inhaleParam[i] = applyNeutralDecay(inhaleParam, dt, neutralDecaySec);
-        buffers.inhaleVelocity[i] = applyNeutralVelocityDecay(
-          inhaleVel,
-          dt,
-          neutralDecaySec,
-        );
-        buffers.exhaleParam[i] = applyNeutralDecay(exhaleParam, dt, neutralDecaySec);
-        buffers.exhaleVelocity[i] = applyNeutralVelocityDecay(
-          exhaleVel,
-          dt,
-          neutralDecaySec,
-        );
-      }
+      buffers.timeColorFloats.fill(0);
     }
 
-    if (ledViewMode === "breathPlusLight") {
-      const breathTint = hexToVec3(breath.wind.tintColor);
+    if (useBreathPipeline) {
+      const sample = breath.enabled ? sampleBreathAt(breath, performance.now()) : null;
+      const breathStrength = sample ? sample.inhaleIntensity : 0;
+      const radius = Math.max(0.05, breath.area.radius);
+      const decay = Math.max(0.0001, breath.area.falloffExponent);
+      const breathLights: ShadeLight[] = [
+        {
+          type: "point",
+          position: offsetXZ(
+            rotateY(
+              computeBreathAreaOrigin(ellipsoid, {
+                sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
+                sourceElevationDeg: breath.area.sourceElevationDeg,
+                distanceFromCloud: breath.area.distanceFromCloud,
+              }),
+              cloudYawRad,
+            ),
+            cloud.offsetX,
+            cloud.offsetZ,
+          ),
+          color: hexToVec3(breath.area.tintColor),
+          intensity: Math.max(0, breath.area.tintAmount) * breathStrength,
+          decay,
+          distance: radius,
+          spread: 1,
+        },
+      ];
+      shadeLeds(
+        buffers.positions,
+        buffers.normals,
+        buffers.n,
+        breathLights,
+        cloud.opacity,
+        buffers.colorBytes,
+        buffers.breathColorFloats,
+        {
+          hemisphereAverage: true,
+          hemisphereFocusExponent: Math.max(0, strand.sensorHemisphereFocus),
+        },
+      );
+    } else {
+      buffers.breathColorFloats.fill(0);
+    }
+
+    // Select or blend pipelines per mode.
+    if (ledViewMode === "breathIntensity") {
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const dim = inhaleDimStrength(buffers.inhaleParam[i]);
-        const exposureBoost = Math.max(0, buffers.exhaleParam[i]);
-        const breathPresence = clamp01(buffers.inhaleParam[i] + buffers.exhaleParam[i]);
-        const dimScale = 1 - dim;
-        const dr = clamp01(buffers.colorFloats[i3] * dimScale);
-        const dg = clamp01(buffers.colorFloats[i3 + 1] * dimScale);
-        const db = clamp01(buffers.colorFloats[i3 + 2] * dimScale);
-        const er = clamp01(applyExposureLift(dr, exposureBoost));
-        const eg = clamp01(applyExposureLift(dg, exposureBoost));
-        const eb = clamp01(applyExposureLift(db, exposureBoost));
-        const tintMix = clamp01(breathPresence * breath.wind.tintAmount);
-        const keep = 1 - tintMix;
-        const tr = clamp01(er * keep + breathTint[0] * tintMix);
-        const tg = clamp01(eg * keep + breathTint[1] * tintMix);
-        const tb = clamp01(eb * keep + breathTint[2] * tintMix);
-
-        // Final stage: pull the current LED color toward black.
-        // This guarantees inhale dimming is obvious and can nearly switch
-        // LEDs off at full local inhale influence.
-        const darkPull = 1 - dim;
-        const r = clamp01(tr * darkPull);
-        const g = clamp01(tg * darkPull);
-        const b = clamp01(tb * darkPull);
+        const r = buffers.breathColorFloats[i3];
+        const g = buffers.breathColorFloats[i3 + 1];
+        const b = buffers.breathColorFloats[i3 + 2];
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;
@@ -442,46 +322,103 @@ export function Leds() {
         buffers.colorBytes[i3 + 1] = (g * 255 + 0.5) | 0;
         buffers.colorBytes[i3 + 2] = (b * 255 + 0.5) | 0;
       }
-    } else if (ledViewMode === "breathIntensity") {
+    } else if (ledViewMode === "timeOfDay") {
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const exhale = clamp01(buffers.exhaleParam[i]);
-        const inhale = clamp01(buffers.inhaleParam[i]);
-        const r = exhale;
-        const g = 0;
-        const b = inhale;
+        const r = buffers.timeColorFloats[i3];
+        const g = buffers.timeColorFloats[i3 + 1];
+        const b = buffers.timeColorFloats[i3 + 2];
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;
         buffers.colorBytes[i3] = (r * 255 + 0.5) | 0;
-        buffers.colorBytes[i3 + 1] = 0;
+        buffers.colorBytes[i3 + 1] = (g * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 2] = (b * 255 + 0.5) | 0;
+      }
+    } else {
+      const mix = ledStreamPipeline.breathStage
+        ? clamp01(breath.area.breathVsTimeMix)
+        : 0;
+      for (let i = 0; i < buffers.n; i++) {
+        const i3 = i * 3;
+        const tr = buffers.timeColorFloats[i3];
+        const tg = buffers.timeColorFloats[i3 + 1];
+        const tb = buffers.timeColorFloats[i3 + 2];
+        const br = buffers.breathColorFloats[i3];
+        const bg = buffers.breathColorFloats[i3 + 1];
+        const bb = buffers.breathColorFloats[i3 + 2];
+        const r = tr * (1 - mix) + br * mix;
+        const g = tg * (1 - mix) + bg * mix;
+        const b = tb * (1 - mix) + bb * mix;
+        buffers.colorFloats[i3] = r;
+        buffers.colorFloats[i3 + 1] = g;
+        buffers.colorFloats[i3 + 2] = b;
+        buffers.colorBytes[i3] = (r * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 1] = (g * 255 + 0.5) | 0;
         buffers.colorBytes[i3 + 2] = (b * 255 + 0.5) | 0;
       }
     }
 
     const locatorColor = hexToVec3(ledLocator.color);
-    for (let i = 0; i < buffers.n; i++) {
-      const i3 = i * 3;
-      if (ledLocator.enabled && locatedSet.has(i)) {
-        // Hard output override: bypass all prior processing and force this LED
-        // to locator yellow both in the 3D view and in streamed byte output.
-        buffers.colorFloats[i3] = locatorColor[0];
-        buffers.colorFloats[i3 + 1] = locatorColor[1];
-        buffers.colorFloats[i3 + 2] = locatorColor[2];
-        buffers.colorBytes[i3] = (locatorColor[0] * 255 + 0.5) | 0;
-        buffers.colorBytes[i3 + 1] = (locatorColor[1] * 255 + 0.5) | 0;
-        buffers.colorBytes[i3 + 2] = (locatorColor[2] * 255 + 0.5) | 0;
-        tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
-      } else {
-        tmpColor.setRGB(
-          buffers.colorFloats[i3],
-          buffers.colorFloats[i3 + 1],
-          buffers.colorFloats[i3 + 2],
-        );
+    if (ledDisplayMode === "leds") {
+      for (let i = 0; i < buffers.n; i++) {
+        const i3 = i * 3;
+        if (
+          ledStreamPipeline.locatorOverrideStage &&
+          ledLocator.enabled &&
+          locatedSet.has(i)
+        ) {
+          // Hard output override: bypass all prior processing and force this LED
+          // to locator yellow both in the 3D view and in streamed byte output.
+          buffers.colorFloats[i3] = locatorColor[0];
+          buffers.colorFloats[i3 + 1] = locatorColor[1];
+          buffers.colorFloats[i3 + 2] = locatorColor[2];
+          buffers.colorBytes[i3] = (locatorColor[0] * 255 + 0.5) | 0;
+          buffers.colorBytes[i3 + 1] = (locatorColor[1] * 255 + 0.5) | 0;
+          buffers.colorBytes[i3 + 2] = (locatorColor[2] * 255 + 0.5) | 0;
+          tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
+        } else {
+          tmpColor.setRGB(
+            buffers.colorFloats[i3],
+            buffers.colorFloats[i3 + 1],
+            buffers.colorFloats[i3 + 2],
+          );
+        }
+        mesh.setColorAt(i, tmpColor);
       }
-      mesh.setColorAt(i, tmpColor);
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    } else {
+      // Sensor display is physically-lit white geometry. InstancedMesh still
+      // multiplies by instanceColor when present, so explicitly write white
+      // every frame (with optional locator highlights) to avoid stale/zero
+      // instance colors making sensors appear black.
+      for (let i = 0; i < buffers.n; i++) {
+        if (ledLocator.enabled && locatedSet.has(i)) {
+          tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
+        }
+        else tmpColor.setRGB(1, 1, 1);
+        mesh.setColorAt(i, tmpColor);
+      }
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+    // Suppress 1-LSB chatter in streamed bytes. This removes tiny histogram
+    // flicker from floating-point noise while preserving meaningful motion.
+    const byteCount = buffers.n * 3;
+    if (!stableBytesRef.current || stableBytesRef.current.length !== byteCount) {
+      stableBytesRef.current = new Uint8Array(buffers.colorBytes);
+    } else {
+      const stable = stableBytesRef.current;
+      for (let i = 0; i < byteCount; i++) {
+        const next = buffers.colorBytes[i];
+        const prev = stable[i];
+        if (Math.abs(next - prev) <= STREAM_BYTE_DEADBAND) {
+          buffers.colorBytes[i] = prev;
+        } else {
+          stable[i] = next;
+        }
+      }
+    }
 
     publishFrame(buffers.colorBytes, buffers.n);
 
@@ -503,15 +440,48 @@ export function Leds() {
     toggleLocatedLed(e.instanceId);
   };
 
+  if (ledDisplayMode === "leds") {
+    return (
+      <instancedMesh
+        key="leds-emitters"
+        ref={meshRef}
+        args={[undefined, undefined, buffers.n]}
+        frustumCulled={false}
+        onPointerDown={onPointerDown}
+        renderOrder={5}
+      >
+        {/*
+          Narrow half-hemisphere: only the top ~π/3 of the sphere along
+          the pole. Renders as a small forward-facing cap oriented along
+          each LED's outward normal, with additive blending so the color
+          reads as light emission rather than a matte surface.
+        */}
+        <sphereGeometry args={[1, 20, 12, 0, Math.PI * 2, 0, Math.PI / 3]} />
+        <meshBasicMaterial
+          color="#ffffff"
+          toneMapped={false}
+          transparent
+          opacity={1}
+          side={FrontSide}
+          blending={AdditiveBlending}
+          depthTest={false}
+          depthWrite={false}
+        />
+      </instancedMesh>
+    );
+  }
+
   return (
     <instancedMesh
+      key="leds-sensors"
       ref={meshRef}
       args={[undefined, undefined, buffers.n]}
       frustumCulled={false}
       onPointerDown={onPointerDown}
     >
-      <sphereGeometry args={[1, 12, 8]} />
-      <meshBasicMaterial color="#ffffff" toneMapped={false} />
+      {/* Sensor cap: outward hemisphere embedded in the cloud surface. */}
+      <sphereGeometry args={[1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
+      <meshStandardMaterial color="#ffffff" roughness={1} metalness={0} />
     </instancedMesh>
   );
 }

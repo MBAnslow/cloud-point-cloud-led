@@ -24,8 +24,18 @@ export interface ShadeLightPoint {
   position: Vec3;
   color: Vec3;
   intensity: number;
-  /** Quadratic attenuation factor. */
+  /**
+   * Distance decay exponent, matching three.js `<pointLight>.decay`:
+   * attenuation ~ 1 / max(d^decay, eps). Use `2` for physical inverse
+   * square.
+   */
   decay: number;
+  /**
+   * Cutoff distance (like three.js `<pointLight>.distance`). When > 0
+   * the attenuation is multiplied by a smooth window that reaches 0 at
+   * this distance. Set to 0 for unbounded.
+   */
+  distance: number;
   /** Same semantics as the directional light's `spread`. */
   spread: number;
 }
@@ -138,7 +148,14 @@ export function shadeLeds(
   cloudOpacity: number,
   outBytes: Uint8Array,
   outFloats?: Float32Array,
+  options?: { hemisphereAverage?: boolean; hemisphereFocusExponent?: number },
 ): void {
+  const hemisphereAverage = options?.hemisphereAverage ?? false;
+  const focusExp = Math.max(0, options?.hemisphereFocusExponent ?? 0);
+  // Deterministic, near-uniform-area local +Z hemisphere samples
+  // (camera-independent). This avoids pole-biased averages.
+  const HEMI_SAMPLES = buildUniformHemisphereSamples(32);
+
   for (let i = 0; i < n; i++) {
     const i3 = i * 3;
     const px = positions[i3];
@@ -152,6 +169,29 @@ export function shadeLeds(
     let g = 0;
     let b = 0;
 
+    // Build an orthonormal basis around the sensor axis `n` when averaging.
+    let tx = 1;
+    let ty = 0;
+    let tz = 0;
+    if (hemisphereAverage) {
+      // Pick a helper axis least aligned with n to avoid degeneracy.
+      const ax = Math.abs(nx) < 0.7 ? 1 : 0;
+      const ay = Math.abs(nx) < 0.7 ? 0 : 1;
+      const az = 0;
+      // t = normalize(a x n)
+      tx = ay * nz - az * ny;
+      ty = az * nx - ax * nz;
+      tz = ax * ny - ay * nx;
+      const tl = Math.hypot(tx, ty, tz) || 1;
+      tx /= tl;
+      ty /= tl;
+      tz /= tl;
+    }
+    // b = n x t
+    const bx = ny * tz - nz * ty;
+    const by = nz * tx - nx * tz;
+    const bz = nx * ty - ny * tx;
+
     for (let li = 0; li < lights.length; li++) {
       const L = lights[li];
       if (L.type === "ambient") {
@@ -159,9 +199,27 @@ export function shadeLeds(
         g += L.color[1] * L.intensity;
         b += L.color[2] * L.intensity;
       } else if (L.type === "directional") {
-        const c =
-          nx * L.direction[0] + ny * L.direction[1] + nz * L.direction[2];
-        const k = L.intensity * shade(c, L.spread, cloudOpacity);
+        let k: number;
+        if (!hemisphereAverage) {
+          const c =
+            nx * L.direction[0] + ny * L.direction[1] + nz * L.direction[2];
+          k = L.intensity * shade(c, L.spread, cloudOpacity);
+        } else {
+          let accum = 0;
+          let wsum = 0;
+          for (let si = 0; si < HEMI_SAMPLES.length; si++) {
+            const s = HEMI_SAMPLES[si];
+            const w = focusExp > 0 ? Math.pow(s[2], focusExp) : 1;
+            // local sample (x,y,z) mapped to world: x*t + y*b + z*n
+            const sx = s[0] * tx + s[1] * bx + s[2] * nx;
+            const sy = s[0] * ty + s[1] * by + s[2] * ny;
+            const sz = s[0] * tz + s[1] * bz + s[2] * nz;
+            const c = sx * L.direction[0] + sy * L.direction[1] + sz * L.direction[2];
+            accum += shade(c, L.spread, cloudOpacity) * w;
+            wsum += w;
+          }
+          k = L.intensity * accum / Math.max(wsum, 1e-6);
+        }
         r += L.color[0] * k;
         g += L.color[1] * k;
         b += L.color[2] * k;
@@ -174,9 +232,36 @@ export function shadeLeds(
         const lx = dx * invDist;
         const ly = dy * invDist;
         const lz = dz * invDist;
-        const c = nx * lx + ny * ly + nz * lz;
-        const atten = 1 / (1 + L.decay * dist * dist);
-        const k = L.intensity * shade(c, L.spread, cloudOpacity) * atten;
+        // Match three.js physically-correct point-light attenuation:
+        //   distanceFalloff = 1 / max(d^decay, 0.01)
+        //   if (cutoff > 0) *= pow2(saturate(1 - pow4(d / cutoff)))
+        const distFall = 1 / Math.max(Math.pow(dist, L.decay), 0.01);
+        let window = 1;
+        if (L.distance > 0) {
+          const t = dist / L.distance;
+          const s = 1 - Math.min(1, t * t * t * t);
+          window = s * s;
+        }
+        const atten = distFall * window;
+        let k: number;
+        if (!hemisphereAverage) {
+          const c = nx * lx + ny * ly + nz * lz;
+          k = L.intensity * shade(c, L.spread, cloudOpacity) * atten;
+        } else {
+          let accum = 0;
+          let wsum = 0;
+          for (let si = 0; si < HEMI_SAMPLES.length; si++) {
+            const s = HEMI_SAMPLES[si];
+            const w = focusExp > 0 ? Math.pow(s[2], focusExp) : 1;
+            const sx = s[0] * tx + s[1] * bx + s[2] * nx;
+            const sy = s[0] * ty + s[1] * by + s[2] * ny;
+            const sz = s[0] * tz + s[1] * bz + s[2] * nz;
+            const c = sx * lx + sy * ly + sz * lz;
+            accum += shade(c, L.spread, cloudOpacity) * w;
+            wsum += w;
+          }
+          k = L.intensity * (accum / Math.max(wsum, 1e-6)) * atten;
+        }
         r += L.color[0] * k;
         g += L.color[1] * k;
         b += L.color[2] * k;
@@ -195,6 +280,19 @@ export function shadeLeds(
     outBytes[i3 + 1] = (cg * 255 + 0.5) | 0;
     outBytes[i3 + 2] = (cb * 255 + 0.5) | 0;
   }
+}
+
+function buildUniformHemisphereSamples(count: number): Array<[number, number, number]> {
+  const out: Array<[number, number, number]> = [];
+  const ga = Math.PI * (3 - Math.sqrt(5)); // golden angle
+  for (let i = 0; i < count; i++) {
+    // Uniform-in-area over hemisphere => z is uniform in [0,1].
+    const z = (i + 0.5) / count;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    const a = ga * i;
+    out.push([Math.cos(a) * r, Math.sin(a) * r, z]);
+  }
+  return out;
 }
 
 /**

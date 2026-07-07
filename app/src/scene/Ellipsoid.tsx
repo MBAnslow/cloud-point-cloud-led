@@ -6,22 +6,29 @@ export function Ellipsoid() {
 
   if (!cloud.showOpacity) return null;
 
-  // Map the physical opacity [0, 1] to a visual opacity that's never quite
-  // fully transparent and never quite fully opaque — so a high-α cloud still
-  // shows hints of the LEDs inside, and a low-α cloud still hints at its
-  // shape. The mapping is a simple linear remap into [0.04, 0.85].
-  const visOpacity = 0.04 + cloud.opacity * 0.81;
+  // Map the physical opacity [0, 1] to visual opacity. cloud.opacity = 1
+  // is now fully opaque so the mesh reads at the same brightness as an
+  // adjacent LED. Low values still hint at the shape via the 0.04 floor.
+  const visOpacity = 0.04 + cloud.opacity * 0.96;
+  const isOpaque = visOpacity >= 0.999;
+  const yawRad = (cloud.rotationYDeg * Math.PI) / 180;
 
   return (
-    <mesh scale={[rx, ry, rz]} castShadow={false} receiveShadow={false}>
+    <mesh
+      position={[cloud.offsetX, 0, cloud.offsetZ]}
+      scale={[rx, ry, rz]}
+      rotation={[0, yawRad, 0]}
+      castShadow={false}
+      receiveShadow={false}
+    >
       <sphereGeometry args={[1, 64, 48]} />
       <meshStandardMaterial
-        color="#cfd6e6"
-        transparent
+        color="#ffffff"
+        transparent={!isOpaque}
         opacity={visOpacity}
-        roughness={0.9}
+        roughness={1.0}
         metalness={0.0}
-        depthWrite={false}
+        depthWrite={isOpaque}
       />
     </mesh>
   );

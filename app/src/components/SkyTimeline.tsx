@@ -287,12 +287,12 @@ export function SkyTimeline() {
           </span>
         </div>
         <div style={{ opacity: 0.55, fontSize: 10 }}>
-          click empty track → add · drag pin → move · click pin → edit ·
-          shift-click → scrub time
+          drag altitude arc → scrub time · click empty track → add · drag pin →
+          move · click pin → edit
         </div>
       </div>
 
-      <SkyArc nowHour={nowHour} />
+      <SkyArc nowHour={nowHour} onScrub={setNow} />
 
       {/* Three independent channel tracks */}
       <div style={{ marginTop: 2 }}>
@@ -538,8 +538,56 @@ function ChannelTrack({
  * Sun + moon altitude arcs across the 24-hour day, with icons that
  * slide along the arcs at the current time.
  */
-function SkyArc({ nowHour }: { nowHour: number }) {
+function SkyArc({
+  nowHour,
+  onScrub,
+}: {
+  nowHour: number;
+  onScrub: (hour: number) => void;
+}) {
   const SAMPLES = 240;
+  const arcRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  const hourFromClientX = useCallback((clientX: number) => {
+    const el = arcRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const x = Math.min(Math.max(0, clientX - rect.left), rect.width);
+    return wrap24((x / Math.max(1, rect.width)) * HOURS);
+  }, []);
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      draggingRef.current = true;
+      onScrub(hourFromClientX(e.clientX));
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+      e.preventDefault();
+    },
+    [hourFromClientX, onScrub],
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingRef.current) return;
+      onScrub(hourFromClientX(e.clientX));
+      e.preventDefault();
+    },
+    [hourFromClientX, onScrub],
+  );
+
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    draggingRef.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const { sunPath, moonPath } = useMemo(() => {
     const sunPts: Array<[number, number]> = [];
@@ -593,7 +641,14 @@ function SkyArc({ nowHour }: { nowHour: number }) {
       >
         altitude
       </span>
-      <div style={{ position: "relative", flex: 1, height: ARC_HEIGHT }}>
+      <div
+        ref={arcRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        style={{ position: "relative", flex: 1, height: ARC_HEIGHT, cursor: "ew-resize" }}
+        title="Drag anywhere here to scrub time of day"
+      >
         <svg
           viewBox={`0 0 ${SAMPLES} ${ARC_HEIGHT}`}
           preserveAspectRatio="none"

@@ -4,18 +4,8 @@ import {
   applySnapshot,
   currentSnapshot,
   useSimStore,
-  type StartDirection,
 } from "../state";
 import { loadSnapshot, saveSnapshot } from "../state/persistence";
-
-const START_OPTIONS: Record<string, StartDirection> = {
-  top: "top",
-  bottom: "bottom",
-  left: "left",
-  right: "right",
-  front: "front",
-  back: "back",
-};
 
 /**
  * Renders no DOM itself — leva manages its own panel. We use the controls
@@ -28,7 +18,6 @@ const START_OPTIONS: Record<string, StartDirection> = {
  * settings and global intensity scales for the time-of-day visualization.
  */
 export function ControlPanel() {
-  const setEllipsoid = useSimStore((s) => s.setEllipsoid);
   const setCloud = useSimStore((s) => s.setCloud);
   const setStrand = useSimStore((s) => s.setStrand);
   const setAmbient = useSimStore((s) => s.setAmbient);
@@ -36,16 +25,6 @@ export function ControlPanel() {
   const setWled = useSimStore((s) => s.setWled);
 
   const initial = useSimStore.getState();
-
-  const [ell, setEll] = useControls(
-    "Ellipsoid (m)",
-    () => ({
-      rx: { value: initial.ellipsoid.rx, min: 0.1, max: 5, step: 0.05 },
-      ry: { value: initial.ellipsoid.ry, min: 0.1, max: 5, step: 0.05 },
-      rz: { value: initial.ellipsoid.rz, min: 0.1, max: 5, step: 0.05 },
-    }),
-    [],
-  );
 
   const [cl, setCl] = useControls(
     "Cloud",
@@ -58,6 +37,27 @@ export function ControlPanel() {
         label: "opacity (light)",
       },
       showOpacity: { value: initial.cloud.showOpacity, label: "show cloud" },
+      rotationYDeg: {
+        value: initial.cloud.rotationYDeg ?? 0,
+        min: -180,
+        max: 180,
+        step: 1,
+        label: "yaw (deg)",
+      },
+      offsetX: {
+        value: initial.cloud.offsetX ?? 0,
+        min: -5,
+        max: 5,
+        step: 0.01,
+        label: "offset x (m)",
+      },
+      offsetZ: {
+        value: initial.cloud.offsetZ ?? 0,
+        min: -5,
+        max: 5,
+        step: 0.01,
+        label: "offset z (m)",
+      },
     }),
     [],
   );
@@ -65,15 +65,19 @@ export function ControlPanel() {
   const [str, setStr] = useControls(
     "Strand",
     () => ({
-      count: { value: initial.strand.count, min: 2, max: 2000, step: 1 },
-      turns: { value: initial.strand.turns, min: 0, max: 50, step: 0.25 },
-      start: { value: initial.strand.start, options: START_OPTIONS },
       ledSize: {
         value: initial.strand.ledSize,
         min: 0.005,
         max: 0.2,
         step: 0.005,
         label: "LED size (m)",
+      },
+      sensorHemisphereFocus: {
+        value: initial.strand.sensorHemisphereFocus ?? 0,
+        min: 0,
+        max: 12,
+        step: 0.1,
+        label: "sensor focus",
       },
     }),
     [],
@@ -138,12 +142,40 @@ export function ControlPanel() {
         step: 0.01,
         label: "sun scale",
       },
+      sunSpread: {
+        value: initial.sky.sunSpread ?? 0.9,
+        min: 0,
+        max: 1,
+        step: 0.01,
+        label: "sun spread",
+      },
       moonScale: {
         value: initial.sky.moonScale,
         min: 0,
         max: 3,
         step: 0.01,
         label: "moon scale",
+      },
+      moonSpread: {
+        value: initial.sky.moonSpread ?? 0.9,
+        min: 0,
+        max: 1,
+        step: 0.01,
+        label: "moon spread",
+      },
+      horizonCutoffDeg: {
+        value: initial.sky.horizonCutoffDeg ?? -7,
+        min: -30,
+        max: 30,
+        step: 0.5,
+        label: "horizon cutoff (deg)",
+      },
+      horizonSoftnessDeg: {
+        value: initial.sky.horizonSoftnessDeg ?? 0,
+        min: 0,
+        max: 60,
+        step: 0.5,
+        label: "horizon softness (deg)",
       },
     }),
     [],
@@ -163,20 +195,18 @@ export function ControlPanel() {
       // The store is now in sync; mirror that into the leva controls so the
       // sliders/colour pickers reflect the loaded values. `enabled` is
       // deliberately forced off — see applySnapshot for the rationale.
-      setEll({
-        rx: snap.ellipsoid.rx,
-        ry: snap.ellipsoid.ry,
-        rz: snap.ellipsoid.rz,
-      });
+      // (Ellipsoid dimensions are owned by the LED-mapping app now, so they
+      // are applied via applySnapshot above and not mirrored here.)
       setCl({
         opacity: snap.cloud.opacity,
         showOpacity: snap.cloud.showOpacity,
+        rotationYDeg: snap.cloud.rotationYDeg ?? 0,
+        offsetX: snap.cloud.offsetX ?? 0,
+        offsetZ: snap.cloud.offsetZ ?? 0,
       });
       setStr({
-        count: snap.strand.count,
-        turns: snap.strand.turns,
-        start: snap.strand.start,
         ledSize: snap.strand.ledSize,
+        sensorHemisphereFocus: snap.strand.sensorHemisphereFocus ?? 0,
       });
       setLights({
         ambientColor: snap.ambient.color,
@@ -188,7 +218,11 @@ export function ControlPanel() {
         cycleSeconds: snap.sky?.cycleSeconds ?? 180,
         ambientScale: snap.sky?.ambientScale ?? 1,
         sunScale: snap.sky?.sunScale ?? 1,
+        sunSpread: snap.sky?.sunSpread ?? 0.9,
         moonScale: snap.sky?.moonScale ?? 1,
+        moonSpread: snap.sky?.moonSpread ?? 0.9,
+        horizonCutoffDeg: snap.sky?.horizonCutoffDeg ?? -7,
+        horizonSoftnessDeg: snap.sky?.horizonSoftnessDeg ?? 0,
       });
       setWledControls({
         enabled: false,
@@ -199,21 +233,21 @@ export function ControlPanel() {
   });
 
   useEffect(() => {
-    setEllipsoid({ rx: ell.rx, ry: ell.ry, rz: ell.rz });
-  }, [ell.rx, ell.ry, ell.rz, setEllipsoid]);
-
-  useEffect(() => {
-    setCloud({ opacity: cl.opacity, showOpacity: cl.showOpacity });
-  }, [cl.opacity, cl.showOpacity, setCloud]);
+    setCloud({
+      opacity: cl.opacity,
+      showOpacity: cl.showOpacity,
+      rotationYDeg: cl.rotationYDeg,
+      offsetX: cl.offsetX,
+      offsetZ: cl.offsetZ,
+    });
+  }, [cl.opacity, cl.showOpacity, cl.rotationYDeg, cl.offsetX, cl.offsetZ, setCloud]);
 
   useEffect(() => {
     setStrand({
-      count: str.count,
-      turns: str.turns,
-      start: str.start as StartDirection,
       ledSize: str.ledSize,
+      sensorHemisphereFocus: str.sensorHemisphereFocus,
     });
-  }, [str.count, str.turns, str.start, str.ledSize, setStrand]);
+  }, [str.ledSize, str.sensorHemisphereFocus, setStrand]);
 
   useEffect(() => {
     setAmbient({
@@ -232,7 +266,11 @@ export function ControlPanel() {
       cycleSeconds: skyControls.cycleSeconds,
       ambientScale: skyControls.ambientScale,
       sunScale: skyControls.sunScale,
+      sunSpread: skyControls.sunSpread,
       moonScale: skyControls.moonScale,
+      moonSpread: skyControls.moonSpread,
+      horizonCutoffDeg: skyControls.horizonCutoffDeg,
+      horizonSoftnessDeg: skyControls.horizonSoftnessDeg,
     });
   }, [
     skyControls.enabled,
@@ -240,7 +278,11 @@ export function ControlPanel() {
     skyControls.cycleSeconds,
     skyControls.ambientScale,
     skyControls.sunScale,
+    skyControls.sunSpread,
     skyControls.moonScale,
+    skyControls.moonSpread,
+    skyControls.horizonCutoffDeg,
+    skyControls.horizonSoftnessDeg,
     setSky,
   ]);
 
