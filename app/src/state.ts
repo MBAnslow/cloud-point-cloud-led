@@ -19,6 +19,7 @@ export type LedViewMode =
  *               gets streamed to WLED.
  */
 export type LedDisplayMode = "sensors" | "leds";
+export type BreathTimeCombineMode = "revealOnInhale" | "linearMix";
 
 export interface LedStreamPipeline {
   /** Enables the base time-of-day lighting stage. */
@@ -54,6 +55,8 @@ export interface CloudParams {
   showOpacity: boolean;
   /** Rotation of the cloud around world up axis, in degrees. */
   rotationYDeg: number;
+  /** Tilt of the cloud around world X axis, in degrees. */
+  rotationXDeg: number;
   /** World-space X offset of the cloud center, in metres. */
   offsetX: number;
   /** World-space Z offset of the cloud center, in metres. */
@@ -216,9 +219,9 @@ export interface BreathAreaParams {
   radius: number;
   /** Falloff exponent (>1 concentrates near source, <1 broadens). */
   falloffExponent: number;
-  /** Tint color applied over current LED color in the influenced area. */
+  /** Visualization color for breath area markers in Breath view. */
   tintColor: string;
-  /** How strongly inhale blends LEDs toward the tint color. */
+  /** Visualization intensity for breath area markers in Breath view. */
   tintAmount: number;
   /** Blend in combined mode: 0 = time of day, 1 = breath. */
   breathVsTimeMix: number;
@@ -239,6 +242,7 @@ interface SimState {
   breath: BreathParams;
   ledViewMode: LedViewMode;
   ledDisplayMode: LedDisplayMode;
+  breathTimeCombineMode: BreathTimeCombineMode;
   ledStreamPipeline: LedStreamPipeline;
   ledLocator: LedLocatorState;
   mapping: MappingParams;
@@ -252,6 +256,7 @@ interface SimState {
   setBreath: (b: BreathPatch) => void;
   setLedViewMode: (mode: LedViewMode) => void;
   setLedDisplayMode: (mode: LedDisplayMode) => void;
+  setBreathTimeCombineMode: (mode: BreathTimeCombineMode) => void;
   setLedStreamPipeline: (patch: Partial<LedStreamPipeline>) => void;
   setLedLocator: (patch: Partial<LedLocatorState>) => void;
   toggleLocatedLed: (index: number) => void;
@@ -362,6 +367,7 @@ const DEFAULTS = {
   cloud: {
     opacity: 0.6,
     showOpacity: true,
+    rotationXDeg: 0,
     rotationYDeg: 0,
     offsetX: 0,
     offsetZ: 0,
@@ -415,6 +421,7 @@ const DEFAULTS = {
   } as BreathParams,
   ledViewMode: "breathPlusTimeOfDay" as LedViewMode,
   ledDisplayMode: "sensors" as LedDisplayMode,
+  breathTimeCombineMode: "revealOnInhale" as BreathTimeCombineMode,
   ledStreamPipeline: {
     timeOfDayStage: true,
     breathStage: true,
@@ -606,6 +613,11 @@ function initialState() {
       saved.ledDisplayMode === "leds" || saved.ledDisplayMode === "sensors"
         ? saved.ledDisplayMode
         : DEFAULTS.ledDisplayMode,
+    breathTimeCombineMode:
+      saved.breathTimeCombineMode === "linearMix" ||
+      saved.breathTimeCombineMode === "revealOnInhale"
+        ? saved.breathTimeCombineMode
+        : DEFAULTS.breathTimeCombineMode,
     ledStreamPipeline: {
       ...DEFAULTS.ledStreamPipeline,
       ...saved.ledStreamPipeline,
@@ -635,6 +647,7 @@ export const useSimStore = create<SimState>((set) => ({
     })),
   setLedViewMode: (mode) => set({ ledViewMode: mode }),
   setLedDisplayMode: (mode) => set({ ledDisplayMode: mode }),
+  setBreathTimeCombineMode: (mode) => set({ breathTimeCombineMode: mode }),
   setLedStreamPipeline: (patch) =>
     set((s) => ({
       ledStreamPipeline: { ...s.ledStreamPipeline, ...patch },
@@ -716,6 +729,14 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   } else {
     s.setLedDisplayMode(DEFAULTS.ledDisplayMode);
   }
+  if (
+    snap.breathTimeCombineMode === "linearMix" ||
+    snap.breathTimeCombineMode === "revealOnInhale"
+  ) {
+    s.setBreathTimeCombineMode(snap.breathTimeCombineMode);
+  } else {
+    s.setBreathTimeCombineMode(DEFAULTS.breathTimeCombineMode);
+  }
   s.setLedStreamPipeline({
     ...DEFAULTS.ledStreamPipeline,
     ...snap.ledStreamPipeline,
@@ -739,6 +760,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     breath: s.breath,
     ledViewMode: s.ledViewMode,
     ledDisplayMode: s.ledDisplayMode,
+    breathTimeCombineMode: s.breathTimeCombineMode,
     ledStreamPipeline: s.ledStreamPipeline,
     ledLocator: s.ledLocator,
     mapping: s.mapping,

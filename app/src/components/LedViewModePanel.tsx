@@ -1,4 +1,9 @@
-import { useSimStore, type LedDisplayMode, type LedViewMode } from "../state";
+import {
+  useSimStore,
+  type BreathTimeCombineMode,
+  type LedDisplayMode,
+  type LedViewMode,
+} from "../state";
 
 const MODES: Array<{ id: LedViewMode; label: string; help: string }> = [
   {
@@ -33,11 +38,30 @@ const DISPLAY_MODES: Array<{ id: LedDisplayMode; label: string; help: string }> 
   },
 ];
 
+const BREATH_TIME_COMBINE_MODES: Array<{
+  id: BreathTimeCombineMode;
+  label: string;
+  help: string;
+}> = [
+  {
+    id: "revealOnInhale",
+    label: "Reveal Time-of-day On Inhale",
+    help: "Time-of-day stays hidden by default and appears only where inhale activates.",
+  },
+  {
+    id: "linearMix",
+    label: "Linear Mix",
+    help: "Classic parametric blend between time-of-day and breath pipelines.",
+  },
+];
+
 export function LedViewModePanel() {
   const mode = useSimStore((s) => s.ledViewMode);
   const setMode = useSimStore((s) => s.setLedViewMode);
   const displayMode = useSimStore((s) => s.ledDisplayMode);
   const setDisplayMode = useSimStore((s) => s.setLedDisplayMode);
+  const breathTimeCombineMode = useSimStore((s) => s.breathTimeCombineMode);
+  const setBreathTimeCombineMode = useSimStore((s) => s.setBreathTimeCombineMode);
   const streamPipeline = useSimStore((s) => s.ledStreamPipeline);
   const setStreamPipeline = useSimStore((s) => s.setLedStreamPipeline);
   const locator = useSimStore((s) => s.ledLocator);
@@ -110,6 +134,54 @@ export function LedViewModePanel() {
           </label>
         ))}
       </div>
+      {mode === "breathPlusTimeOfDay" && (
+        <div
+          style={{
+            marginTop: 8,
+            paddingTop: 8,
+            borderTop: "1px solid rgba(255,255,255,0.1)",
+            display: "grid",
+            gap: 6,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 10,
+              letterSpacing: 0.45,
+              textTransform: "uppercase",
+              opacity: 0.72,
+            }}
+          >
+            Breath + Time-of-day Mode
+          </div>
+          <select
+            value={breathTimeCombineMode}
+            onChange={(e) =>
+              setBreathTimeCombineMode(e.target.value as BreathTimeCombineMode)
+            }
+            style={{
+              background: "rgba(0,0,0,0.35)",
+              color: "inherit",
+              border: "1px solid rgba(255,255,255,0.15)",
+              borderRadius: 6,
+              padding: "6px 8px",
+              fontSize: 12,
+            }}
+            title={
+              BREATH_TIME_COMBINE_MODES.find((m) => m.id === breathTimeCombineMode)?.help
+            }
+          >
+            {BREATH_TIME_COMBINE_MODES.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 10, opacity: 0.72 }}>
+            {BREATH_TIME_COMBINE_MODES.find((m) => m.id === breathTimeCombineMode)?.help}
+          </div>
+        </div>
+      )}
       <div
         style={{
           marginTop: 8,

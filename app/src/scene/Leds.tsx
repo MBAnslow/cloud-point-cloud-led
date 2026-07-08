@@ -49,6 +49,20 @@ function rotateY(v: [number, number, number], radians: number): [number, number,
   return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
 }
 
+function rotateX(v: [number, number, number], radians: number): [number, number, number] {
+  const c = Math.cos(radians);
+  const s = Math.sin(radians);
+  return [v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c];
+}
+
+function rotateCloud(
+  v: [number, number, number],
+  tiltRad: number,
+  yawRad: number,
+): [number, number, number] {
+  return rotateY(rotateX(v, tiltRad), yawRad);
+}
+
 function offsetXZ(v: [number, number, number], x: number, z: number): [number, number, number] {
   return [v[0] + x, v[1], v[2] + z];
 }
@@ -63,10 +77,12 @@ export function Leds() {
   const breath = useSimStore((s) => s.breath);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
   const ledDisplayMode = useSimStore((s) => s.ledDisplayMode);
+  const breathTimeCombineMode = useSimStore((s) => s.breathTimeCombineMode);
   const ledStreamPipeline = useSimStore((s) => s.ledStreamPipeline);
   const ledLocator = useSimStore((s) => s.ledLocator);
   const toggleLocatedLed = useSimStore((s) => s.toggleLocatedLed);
   const wled = useSimStore((s) => s.wled);
+  const cloudTiltRad = (cloud.rotationXDeg * Math.PI) / 180;
   const cloudYawRad = (cloud.rotationYDeg * Math.PI) / 180;
   const MANUAL_BLEND_WHEN_SKY = 0.2;
 
@@ -110,8 +126,12 @@ export function Leds() {
       );
       const pos = surfacePoint(dir, ellipsoid);
       const nrm = ensureOutwardNormal(pos, surfaceNormal(dir, ellipsoid));
-      const rPos = offsetXZ(rotateY(pos, cloudYawRad), cloud.offsetX, cloud.offsetZ);
-      const rNrm = rotateY(nrm, cloudYawRad);
+      const rPos = offsetXZ(
+        rotateCloud(pos, cloudTiltRad, cloudYawRad),
+        cloud.offsetX,
+        cloud.offsetZ,
+      );
+      const rNrm = rotateCloud(nrm, cloudTiltRad, cloudYawRad);
       const i3 = i * 3;
       buffers.positions[i3] = rPos[0];
       buffers.positions[i3 + 1] = rPos[1];
@@ -167,6 +187,7 @@ export function Leds() {
     mapping.flipUpDown,
     mapping.flipLeftRight,
     mapping.reversed,
+    cloudTiltRad,
     cloudYawRad,
     cloud.offsetX,
     cloud.offsetZ,
@@ -211,7 +232,7 @@ export function Leds() {
       : 1;
 
     const useBreathPipeline =
-      ledStreamPipeline.breathStage && ledViewMode !== "timeOfDay";
+      ledStreamPipeline.breathStage && ledViewMode === "breathPlusTimeOfDay";
     const useTimePipeline =
       ledStreamPipeline.timeOfDayStage && ledViewMode !== "breathIntensity";
 
@@ -265,56 +286,83 @@ export function Leds() {
     }
 
     if (useBreathPipeline) {
+      // Breath is a filter mask (not a light): inhale gates an area-of-effect.
       const sample = breath.enabled ? sampleBreathAt(breath, performance.now()) : null;
-      const breathStrength = sample ? sample.inhaleIntensity : 0;
+      const strength = sample ? sample.inhaleIntensity : 0;
       const radius = Math.max(0.05, breath.area.radius);
-      const decay = Math.max(0.0001, breath.area.falloffExponent);
-      const breathLights: ShadeLight[] = [
-        {
-          type: "point",
-          position: offsetXZ(
-            rotateY(
-              computeBreathAreaOrigin(ellipsoid, {
-                sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
-                sourceElevationDeg: breath.area.sourceElevationDeg,
-                distanceFromCloud: breath.area.distanceFromCloud,
-              }),
-              cloudYawRad,
-            ),
-            cloud.offsetX,
-            cloud.offsetZ,
+      const invRadius = 1 / radius;
+      const falloffExp = Math.max(0.0001, breath.area.falloffExponent);
+      const origin = offsetXZ(
+        rotateY(
+          rotateX(
+            computeBreathAreaOrigin(ellipsoid, {
+              sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
+              sourceElevationDeg: breath.area.sourceElevationDeg,
+              distanceFromCloud: breath.area.distanceFromCloud,
+            }),
+            cloudTiltRad,
           ),
-          color: hexToVec3(breath.area.tintColor),
-          intensity: Math.max(0, breath.area.tintAmount) * breathStrength,
-          decay,
-          distance: radius,
-          spread: 1,
-        },
-      ];
-      shadeLeds(
-        buffers.positions,
-        buffers.normals,
-        buffers.n,
-        breathLights,
-        cloud.opacity,
-        buffers.colorBytes,
-        buffers.breathColorFloats,
-        {
-          hemisphereAverage: true,
-          hemisphereFocusExponent: Math.max(0, strand.sensorHemisphereFocus),
-        },
+          cloudYawRad,
+        ),
+        cloud.offsetX,
+        cloud.offsetZ,
       );
+      const ox = origin[0];
+      const oy = origin[1];
+      const oz = origin[2];
+      for (let i = 0; i < buffers.n; i++) {
+        const i3 = i * 3;
+        const dx = buffers.positions[i3] - ox;
+        const dy = buffers.positions[i3 + 1] - oy;
+        const dz = buffers.positions[i3 + 2] - oz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const prox = clamp01(1 - d * invRadius);
+        const mask = clamp01(strength * Math.pow(prox, falloffExp));
+        buffers.breathColorFloats[i3] = mask;
+        buffers.breathColorFloats[i3 + 1] = mask;
+        buffers.breathColorFloats[i3 + 2] = mask;
+      }
     } else {
       buffers.breathColorFloats.fill(0);
     }
 
     // Select or blend pipelines per mode.
     if (ledViewMode === "breathIntensity") {
+      const sample = breath.enabled ? sampleBreathAt(breath, performance.now()) : null;
+      const strength = sample ? sample.inhaleIntensity : 0;
+      const radius = Math.max(0.05, breath.area.radius);
+      const invRadius = 1 / radius;
+      const falloffExp = Math.max(0.0001, breath.area.falloffExponent);
+      const origin = offsetXZ(
+        rotateY(
+          rotateX(
+            computeBreathAreaOrigin(ellipsoid, {
+              sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
+              sourceElevationDeg: breath.area.sourceElevationDeg,
+              distanceFromCloud: breath.area.distanceFromCloud,
+            }),
+            cloudTiltRad,
+          ),
+          cloudYawRad,
+        ),
+        cloud.offsetX,
+        cloud.offsetZ,
+      );
+      const ox = origin[0];
+      const oy = origin[1];
+      const oz = origin[2];
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const r = buffers.breathColorFloats[i3];
-        const g = buffers.breathColorFloats[i3 + 1];
-        const b = buffers.breathColorFloats[i3 + 2];
+        const dx = buffers.positions[i3] - ox;
+        const dy = buffers.positions[i3 + 1] - oy;
+        const dz = buffers.positions[i3 + 2] - oz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const prox = clamp01(1 - d * invRadius);
+        const influence = strength * Math.pow(prox, falloffExp);
+        const v = clamp01(influence);
+        const r = v;
+        const g = v;
+        const b = v;
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;
@@ -336,9 +384,7 @@ export function Leds() {
         buffers.colorBytes[i3 + 2] = (b * 255 + 0.5) | 0;
       }
     } else {
-      const mix = ledStreamPipeline.breathStage
-        ? clamp01(breath.area.breathVsTimeMix)
-        : 0;
+      const mix = ledStreamPipeline.breathStage ? clamp01(breath.area.breathVsTimeMix) : 0;
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const tr = buffers.timeColorFloats[i3];
@@ -347,9 +393,22 @@ export function Leds() {
         const br = buffers.breathColorFloats[i3];
         const bg = buffers.breathColorFloats[i3 + 1];
         const bb = buffers.breathColorFloats[i3 + 2];
-        const r = tr * (1 - mix) + br * mix;
-        const g = tg * (1 - mix) + bg * mix;
-        const b = tb * (1 - mix) + bb * mix;
+        let r = tr;
+        let g = tg;
+        let b = tb;
+        const inhaleMask = clamp01((br + bg + bb) / 3);
+        if (breathTimeCombineMode === "revealOnInhale") {
+          // Hide time-of-day by default and reveal it where inhale activates.
+          r = tr * inhaleMask;
+          g = tg * inhaleMask;
+          b = tb * inhaleMask;
+        } else {
+          // Linear filter depth: 0 = unfiltered time-of-day, 1 = fully masked.
+          const filter = 1 - mix + mix * inhaleMask;
+          r = tr * filter;
+          g = tg * filter;
+          b = tb * filter;
+        }
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;

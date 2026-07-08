@@ -44,6 +44,13 @@ export function ControlPanel() {
         step: 1,
         label: "yaw (deg)",
       },
+      rotationXDeg: {
+        value: initial.cloud.rotationXDeg ?? 0,
+        min: -90,
+        max: 90,
+        step: 1,
+        label: "tilt (deg)",
+      },
       offsetX: {
         value: initial.cloud.offsetX ?? 0,
         min: -5,
@@ -200,6 +207,7 @@ export function ControlPanel() {
       setCl({
         opacity: snap.cloud.opacity,
         showOpacity: snap.cloud.showOpacity,
+        rotationXDeg: snap.cloud.rotationXDeg ?? 0,
         rotationYDeg: snap.cloud.rotationYDeg ?? 0,
         offsetX: snap.cloud.offsetX ?? 0,
         offsetZ: snap.cloud.offsetZ ?? 0,
@@ -236,11 +244,20 @@ export function ControlPanel() {
     setCloud({
       opacity: cl.opacity,
       showOpacity: cl.showOpacity,
+      rotationXDeg: cl.rotationXDeg,
       rotationYDeg: cl.rotationYDeg,
       offsetX: cl.offsetX,
       offsetZ: cl.offsetZ,
     });
-  }, [cl.opacity, cl.showOpacity, cl.rotationYDeg, cl.offsetX, cl.offsetZ, setCloud]);
+  }, [
+    cl.opacity,
+    cl.showOpacity,
+    cl.rotationXDeg,
+    cl.rotationYDeg,
+    cl.offsetX,
+    cl.offsetZ,
+    setCloud,
+  ]);
 
   useEffect(() => {
     setStrand({

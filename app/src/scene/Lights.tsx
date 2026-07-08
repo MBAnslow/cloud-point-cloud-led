@@ -1,20 +1,5 @@
-import { useRef } from "react";
-import { useFrame } from "@react-three/fiber";
-import type { PointLight } from "three";
 import { useSimStore } from "../state";
 import { computeSkyLighting } from "../lighting/skyCycle";
-import { sampleBreathAt } from "../lighting/breath";
-import { computeBreathAreaOrigin } from "../lighting/breathArea";
-
-function rotateY(v: [number, number, number], radians: number): [number, number, number] {
-  const c = Math.cos(radians);
-  const s = Math.sin(radians);
-  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
-}
-
-function offsetXZ(v: [number, number, number], x: number, z: number): [number, number, number] {
-  return [v[0] + x, v[1], v[2] + z];
-}
 
 function clamp01(v: number): number {
   if (v <= 0) return 0;
@@ -44,10 +29,9 @@ export function Lights() {
   const ledViewMode = useSimStore((s) => s.ledViewMode);
   const MANUAL_BLEND_WHEN_SKY = 0.2;
 
-  // Pure Breath mode: only the omni breath light illuminates the scene,
-  // matching the stream pipeline which uses a single point light.
+  // Pure Breath mode is now a non-lighting visualization pass.
   if (ledViewMode === "breathIntensity") {
-    return <BreathLight />;
+    return null;
   }
 
   const skyLighting = computeSkyLighting(sky);
@@ -110,57 +94,6 @@ export function Lights() {
           </mesh>
         </>
       )}
-      {ledViewMode === "breathPlusTimeOfDay" && <BreathLight />}
     </>
-  );
-}
-
-/**
- * Real three.js omni point light for the breath stage. Position/decay
- * mirror the `point` light fed to `shadeLeds` in `Leds.tsx`, and the
- * intensity is updated every frame from the breath cycle so the 3D
- * ball-sensor view matches the streamed LED values.
- */
-function BreathLight() {
-  const ellipsoid = useSimStore((s) => s.ellipsoid);
-  const breath = useSimStore((s) => s.breath);
-  const cloud = useSimStore((s) => s.cloud);
-  const lightRef = useRef<PointLight>(null);
-  const yawRad = (cloud.rotationYDeg * Math.PI) / 180;
-
-  const origin = offsetXZ(
-    rotateY(
-      computeBreathAreaOrigin(ellipsoid, {
-        sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
-        sourceElevationDeg: breath.area.sourceElevationDeg,
-        distanceFromCloud: breath.area.distanceFromCloud,
-      }),
-      yawRad,
-    ),
-    cloud.offsetX,
-    cloud.offsetZ,
-  );
-  const radius = Math.max(0.05, breath.area.radius);
-  const decay = Math.max(0.0001, breath.area.falloffExponent);
-  const tintGain = Math.max(0, breath.area.tintAmount);
-
-  useFrame(() => {
-    const light = lightRef.current;
-    if (!light) return;
-    const strength = breath.enabled
-      ? sampleBreathAt(breath, performance.now()).inhaleIntensity
-      : 0;
-    light.intensity = tintGain * strength;
-  });
-
-  return (
-    <pointLight
-      ref={lightRef}
-      color={breath.area.tintColor}
-      position={origin}
-      distance={radius}
-      decay={decay}
-      intensity={0}
-    />
   );
 }

@@ -11,13 +11,14 @@ export function Ellipsoid() {
   // adjacent LED. Low values still hint at the shape via the 0.04 floor.
   const visOpacity = 0.04 + cloud.opacity * 0.96;
   const isOpaque = visOpacity >= 0.999;
+  const tiltRad = (cloud.rotationXDeg * Math.PI) / 180;
   const yawRad = (cloud.rotationYDeg * Math.PI) / 180;
 
   return (
     <mesh
       position={[cloud.offsetX, 0, cloud.offsetZ]}
       scale={[rx, ry, rz]}
-      rotation={[0, yawRad, 0]}
+      rotation={[tiltRad, yawRad, 0]}
       castShadow={false}
       receiveShadow={false}
     >

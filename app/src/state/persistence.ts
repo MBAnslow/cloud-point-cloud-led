@@ -1,5 +1,6 @@
 import type {
   AmbientLightParams,
+  BreathTimeCombineMode,
   BreathParams,
   CloudParams,
   DirectionalLightParams,
@@ -30,6 +31,7 @@ export interface Snapshot {
   breath?: BreathParams;
   ledViewMode?: LedViewMode;
   ledDisplayMode?: LedDisplayMode;
+  breathTimeCombineMode?: BreathTimeCombineMode;
   ledStreamPipeline?: LedStreamPipeline;
   ledLocator?: LedLocatorState;
   mapping?: MappingParams;

@@ -54,9 +54,9 @@ const PARAM_HELP = {
   areaFalloff:
     "How quickly influence drops from the center of the area. Higher means sharper, lower means broader.",
   breathTintColor:
-    "Color blended over LEDs inside the area of effect, proportional to inhale amount.",
+    "Marker/guide color used to visualize the breath area in Breath view.",
   breathTintAmount:
-    "How strongly inhale blends LEDs toward the selected tint color.",
+    "Marker/guide intensity for breath-area visualization only (does not change streamed LED lighting).",
   breathTimeMix:
     "Blend in Breath + Time of Day mode. 0 = time-of-day only, 1 = breath-only.",
   sourceAzimuth:
@@ -356,15 +356,15 @@ export function BreathOscillator() {
           />
         </Section>
 
-        <Section title="LED Response">
+        <Section title="Breath View Visualization">
           <ColorField
-            label="tint"
+            label="marker color"
             tooltip={PARAM_HELP.breathTintColor}
             value={breath.area.tintColor}
             onChange={(v) => setBreath({ area: { tintColor: v } })}
           />
           <SliderField
-            label="tint amount"
+            label="marker intensity"
             tooltip={PARAM_HELP.breathTintAmount}
             value={breath.area.tintAmount}
             min={0}
