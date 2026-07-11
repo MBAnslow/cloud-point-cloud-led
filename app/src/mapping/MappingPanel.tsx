@@ -106,6 +106,20 @@ export function MappingPanel({ selected, setSelected }: Props) {
           LED Mapping
         </span>
         <Link
+          to="/drones"
+          style={{
+            color: "inherit",
+            textDecoration: "none",
+            background: "rgba(255,255,255,0.06)",
+            border: "1px solid rgba(255,255,255,0.15)",
+            borderRadius: 6,
+            padding: "2px 8px",
+            fontSize: 11,
+          }}
+        >
+          Drones →
+        </Link>
+        <Link
           to="/"
           style={{
             color: "inherit",

@@ -4,11 +4,16 @@ import type {
   BreathParams,
   CloudParams,
   DirectionalLightParams,
+  DayCycleParams,
+  DroneParams,
+  PadParams,
+  SamplesParams,
   EllipsoidParams,
   LedDisplayMode,
   LedStreamPipeline,
   LedLocatorState,
   LedViewMode,
+  LightningParams,
   MappingParams,
   SkyParams,
   StrandParams,
@@ -29,6 +34,11 @@ export interface Snapshot {
   sky?: SkyParams;
   wled: WledParams;
   breath?: BreathParams;
+  lightning?: LightningParams;
+  drone?: DroneParams;
+  pad?: PadParams;
+  samples?: SamplesParams;
+  dayCycle?: DayCycleParams;
   ledViewMode?: LedViewMode;
   ledDisplayMode?: LedDisplayMode;
   breathTimeCombineMode?: BreathTimeCombineMode;

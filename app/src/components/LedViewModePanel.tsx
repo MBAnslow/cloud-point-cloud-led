@@ -282,6 +282,14 @@ export function LedViewModePanel() {
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}>
             <input
               type="checkbox"
+              checked={streamPipeline.lightningStage}
+              onChange={(e) => setStreamPipeline({ lightningStage: e.target.checked })}
+            />
+            enable lightning stage
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+            <input
+              type="checkbox"
               checked={streamPipeline.locatorOverrideStage}
               onChange={(e) =>
                 setStreamPipeline({ locatorOverrideStage: e.target.checked })}

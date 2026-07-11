@@ -92,24 +92,8 @@ export function SkyTimeline() {
 
   const [selected, setSelected] = useState<Selection | null>(null);
 
-  // Auto-play tick: advance `timeHours` at RAF rate, wrapping at 24h.
-  useEffect(() => {
-    if (!sky.enabled || !sky.autoPlay) return;
-    let raf = 0;
-    let last = performance.now();
-    const step = (now: number) => {
-      raf = requestAnimationFrame(step);
-      const dtMs = now - last;
-      last = now;
-      const hoursPerMs = HOURS / (Math.max(1, sky.cycleSeconds) * 1000);
-      const state = useSimStore.getState();
-      state.setSky({
-        timeHours: wrap24(state.sky.timeHours + dtMs * hoursPerMs),
-      });
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [sky.enabled, sky.autoPlay, sky.cycleSeconds]);
+  // Auto-play tick lives in <DroneRuntime /> (mounted at app root) so
+  // the Play button works on every route, not just the sim view.
 
   // Selected stop no longer exists after edit/delete? Clear the selection.
   useEffect(() => {

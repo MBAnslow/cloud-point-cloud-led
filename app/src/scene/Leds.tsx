@@ -26,6 +26,7 @@ import {
 } from "../lighting/shade";
 import { useSimStore } from "../state";
 import { computeSkyLighting } from "../lighting/skyCycle";
+import { sharedLightningController } from "../lighting/lightning";
 import { WledStreamClient } from "../wled/client";
 import { publishFrame } from "../stream/frameBuffer";
 
@@ -75,6 +76,7 @@ export function Leds() {
   const ambient = useSimStore((s) => s.ambient);
   const sky = useSimStore((s) => s.sky);
   const breath = useSimStore((s) => s.breath);
+  const lightning = useSimStore((s) => s.lightning);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
   const ledDisplayMode = useSimStore((s) => s.ledDisplayMode);
   const breathTimeCombineMode = useSimStore((s) => s.breathTimeCombineMode);
@@ -108,6 +110,7 @@ export function Leds() {
       colorFloats: new Float32Array(n * 3),
       timeColorFloats: new Float32Array(n * 3),
       breathColorFloats: new Float32Array(n * 3),
+      lightningColorFloats: new Float32Array(n * 3),
       colorBytes: new Uint8Array(n * 3),
     };
   }, [ledCount]);
@@ -196,7 +199,9 @@ export function Leds() {
     dummy,
   ]);
 
-  // Long-lived WLED streaming client.
+  // Long-lived WLED streaming client. Lightning uses a shared controller
+  // so the 3D bolt visualisation sees the same active strikes.
+  const lightningCtrl = sharedLightningController;
   const wledClient = useMemo(() => new WledStreamClient(), []);
   useEffect(() => {
     if (wled.enabled) wledClient.start();
@@ -326,6 +331,33 @@ export function Leds() {
       buffers.breathColorFloats.fill(0);
     }
 
+    // Lightning: additive contribution independent of view mode. Runs only
+    // when both the effect and the stream pipeline stage are enabled, and
+    // only in views where time-of-day is visible (so Breath view stays a
+    // pure visualization pass).
+    const useLightning =
+      lightning.enabled &&
+      ledStreamPipeline.lightningStage &&
+      ledViewMode !== "breathIntensity";
+    if (useLightning) {
+      const now = performance.now();
+      lightningCtrl.update(now, lightning, ellipsoid, {
+        tiltRad: cloudTiltRad,
+        yawRad: cloudYawRad,
+        offsetX: cloud.offsetX,
+        offsetZ: cloud.offsetZ,
+      });
+      lightningCtrl.contribute(
+        buffers.positions,
+        buffers.n,
+        buffers.lightningColorFloats,
+        now,
+        lightning,
+      );
+    } else {
+      buffers.lightningColorFloats.fill(0);
+    }
+
     // Select or blend pipelines per mode.
     if (ledViewMode === "breathIntensity") {
       const sample = breath.enabled ? sampleBreathAt(breath, performance.now()) : null;
@@ -373,9 +405,9 @@ export function Leds() {
     } else if (ledViewMode === "timeOfDay") {
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const r = buffers.timeColorFloats[i3];
-        const g = buffers.timeColorFloats[i3 + 1];
-        const b = buffers.timeColorFloats[i3 + 2];
+        const r = clamp01(buffers.timeColorFloats[i3] + buffers.lightningColorFloats[i3]);
+        const g = clamp01(buffers.timeColorFloats[i3 + 1] + buffers.lightningColorFloats[i3 + 1]);
+        const b = clamp01(buffers.timeColorFloats[i3 + 2] + buffers.lightningColorFloats[i3 + 2]);
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;
@@ -409,6 +441,9 @@ export function Leds() {
           g = tg * filter;
           b = tb * filter;
         }
+        r = clamp01(r + buffers.lightningColorFloats[i3]);
+        g = clamp01(g + buffers.lightningColorFloats[i3 + 1]);
+        b = clamp01(b + buffers.lightningColorFloats[i3 + 2]);
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;
