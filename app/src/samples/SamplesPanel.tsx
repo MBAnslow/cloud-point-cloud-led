@@ -3,14 +3,15 @@ import { Link } from "react-router-dom";
 import { useSimStore, type Sample, type SampleClip } from "../state";
 import { putSampleBlob, deleteSampleBlob } from "./sampleStorage";
 import { getSampleEngine } from "../audio/SampleEngine";
-import { clipWidthHours } from "../audio/sampleCycle";
 import { SampleClipEditor } from "./SampleClipEditor";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
 
 const HOURS = 24;
 const LANE_HEIGHT = 40;
 const LIBRARY_WIDTH = 220;
-const RESIZE_EDGE_PX = 6;
+/** Fixed on-screen width of a trigger block, in pixels. Independent
+ *  of sample duration — clips are triggers, not spans. */
+const CLIP_BLOCK_PX = 56;
 
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
@@ -42,14 +43,13 @@ async function decodeDuration(arrayBuffer: ArrayBuffer): Promise<number> {
 }
 
 interface DragState {
-  kind: "move" | "resize-right" | "library";
-  // For move / resize-right: the clip id being modified.
+  kind: "move" | "library";
+  // For move: the clip id being modified.
   clipId?: string;
   // For library drops: the sample being dropped.
   librarySampleId?: string;
   originHour: number;
   originStart: number;
-  originEnd: number;
   originLane: number;
 }
 
@@ -70,7 +70,6 @@ export function SamplesPanel() {
   const removeSampleClip = useSimStore((s) => s.removeSampleClip);
   const clearSampleClips = useSimStore((s) => s.clearSampleClips);
   const timeHours = useSimStore((s) => s.sky.timeHours);
-  const cycleSeconds = useSimStore((s) => s.sky.cycleSeconds);
   const sky = useSimStore((s) => s.sky);
   const setSky = useSimStore((s) => s.setSky);
 
@@ -157,23 +156,15 @@ export function SamplesPanel() {
     [removeSample],
   );
 
-  const beginClipDrag = (
-    e: React.PointerEvent,
-    kind: "move" | "resize-right",
-    clipId: string,
-  ) => {
+  const beginClipDrag = (e: React.PointerEvent, clipId: string) => {
     const clip = samples.clips.find((c) => c.id === clipId);
     if (!clip) return;
-    const sample = sampleById.get(clip.sampleId);
-    if (!sample) return;
     const { hour } = clientToHourLane(e.clientX, e.clientY);
-    const width = clipWidthHours(sample, clip, cycleSeconds);
     dragRef.current = {
-      kind,
+      kind: "move",
       clipId,
       originHour: hour,
       originStart: clip.startHour,
-      originEnd: clip.startHour + width,
       originLane: laneIndexBySampleId.get(clip.sampleId) ?? 0,
     };
     setSelectedId(clipId);
@@ -194,33 +185,8 @@ export function SamplesPanel() {
       const { hour } = clientToHourLane(e.clientX, e.clientY);
       const dHour = hour - drag.originHour;
       if (drag.kind === "move" && drag.clipId) {
-        const clip = samples.clips.find((c) => c.id === drag.clipId);
-        if (!clip) return;
-        const sample = sampleById.get(clip.sampleId);
-        if (!sample) return;
-        const width = clipWidthHours(sample, clip, cycleSeconds);
-        const start = Math.max(0, Math.min(HOURS - width, drag.originStart + dHour));
+        const start = Math.max(0, Math.min(HOURS, drag.originStart + dHour));
         updateSampleClip(drag.clipId, { startHour: start });
-      } else if (drag.kind === "resize-right" && drag.clipId) {
-        // Resize-right modifies playbackRate as a time-stretch: new
-        // widthHours = originalWidthHours * originalRate / newRate.
-        const clip = samples.clips.find((c) => c.id === drag.clipId);
-        if (!clip) return;
-        const sample = sampleById.get(clip.sampleId);
-        if (!sample) return;
-        const newEnd = Math.max(
-          drag.originStart + 0.02,
-          Math.min(HOURS, drag.originEnd + dHour),
-        );
-        const newWidth = newEnd - drag.originStart;
-        // widthHours = durationSec/rate * (24/cycleSeconds) ⇒
-        // rate = durationSec * (24/cycleSeconds) / widthHours.
-        const hoursPerSec = 24 / Math.max(1, cycleSeconds);
-        const rate = Math.max(
-          0.1,
-          Math.min(4, (sample.durationSec * hoursPerSec) / newWidth),
-        );
-        updateSampleClip(drag.clipId, { playbackRate: rate });
       }
     };
     const onUp = () => {
@@ -233,7 +199,7 @@ export function SamplesPanel() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [clientToHourLane, cycleSeconds, sampleById, samples.clips, setSky, updateSampleClip]);
+  }, [clientToHourLane, samples.clips, setSky, updateSampleClip]);
 
   // Delete key removes selected clip.
   useEffect(() => {
@@ -398,8 +364,8 @@ export function SamplesPanel() {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <strong style={{ fontSize: 12 }}>Arrangement</strong>
             <span style={{ fontSize: 11, opacity: 0.6 }}>
-              drag a sample from the library onto a lane · drag body to move ·
-              drag right edge to stretch · Del to remove · drag ruler to scrub
+              drag a sample from the library onto a lane · drag block to move
+              its trigger point · Del to remove · drag ruler to scrub
             </span>
             <button
               style={{ ...btn, marginLeft: "auto" }}
@@ -573,37 +539,32 @@ export function SamplesPanel() {
                     pointerEvents: "none",
                   }}
                 />
-                {/* Clips */}
+                {/* Clip triggers — fixed-width blocks, positioned by
+                    their `startHour`. The block's left edge is the
+                    trigger point. */}
                 {samples.clips.map((c) => {
                   const sample = sampleById.get(c.sampleId);
                   if (!sample) return null;
                   const lane = laneIndexBySampleId.get(c.sampleId);
                   if (lane === undefined) return null;
-                  const width = clipWidthHours(sample, c, cycleSeconds);
                   const leftPct = (c.startHour / HOURS) * 100;
-                  const widthPct = (width / HOURS) * 100;
                   const isSel = c.id === selectedId;
                   return (
                     <div
                       key={c.id}
                       data-clip-id={c.id}
-                      onPointerDown={(e) => {
-                        const rect = (
-                          e.currentTarget as HTMLDivElement
-                        ).getBoundingClientRect();
-                        const nearRight = e.clientX > rect.right - RESIZE_EDGE_PX;
-                        beginClipDrag(e, nearRight ? "resize-right" : "move", c.id);
-                      }}
+                      onPointerDown={(e) => beginClipDrag(e, c.id)}
                       style={{
                         position: "absolute",
                         top: lane * LANE_HEIGHT + 2,
                         left: `${leftPct}%`,
-                        width: `${widthPct}%`,
+                        width: CLIP_BLOCK_PX,
                         height: LANE_HEIGHT - 4,
                         background: isSel
                           ? "linear-gradient(180deg,#fb923c,#ea580c)"
                           : "linear-gradient(180deg,#fb923caa,#ea580caa)",
                         border: `1px solid ${isSel ? "#fff" : "#7c2d12"}`,
+                        borderLeft: `3px solid ${isSel ? "#fff" : "#fdba74"}`,
                         borderRadius: 3,
                         cursor: "grab",
                         boxSizing: "border-box",
@@ -616,9 +577,9 @@ export function SamplesPanel() {
                         overflow: "hidden",
                         whiteSpace: "nowrap",
                       }}
-                      title={`${sample.name}  @ ${fmtTime(c.startHour)}  rate ${c.playbackRate.toFixed(2)}× gain ${c.gain.toFixed(2)}`}
+                      title={`${sample.name}  @ ${fmtTime(c.startHour)}  rate ${c.playbackRate.toFixed(2)}× gain ${c.gain.toFixed(2)}  · ${sample.durationSec.toFixed(2)}s`}
                     >
-                      {sample.name}
+                      ▶ {sample.name}
                     </div>
                   );
                 })}

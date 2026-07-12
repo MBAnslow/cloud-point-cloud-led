@@ -8,6 +8,8 @@ export interface ActivePadVoice {
   gain: number;
   /** Per-note pitch offset in cents. Resolves to 0 when unset. */
   detuneCents: number;
+  /** Probability the note fires on entry; 0..1. Resolves to 1. */
+  triggerProbability: number;
 }
 
 function normalizeHour(hour: number): number {
@@ -33,6 +35,10 @@ export function activePadVoicesAt(
         note: n.note,
         gain: Math.max(0, Math.min(1, n.gain ?? 1)),
         detuneCents: n.detuneCents ?? 0,
+        triggerProbability: Math.max(
+          0,
+          Math.min(1, n.triggerProbability ?? 1),
+        ),
       });
     }
   }

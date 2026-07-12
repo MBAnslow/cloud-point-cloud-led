@@ -135,10 +135,6 @@ export class DroneEngine {
   private saturationMix: Tone.CrossFade | null = null;
   private tremoloGain: Tone.Gain | null = null;
   private tremoloLfo: Tone.LFO | null = null;
-  private filter: Tone.Filter | null = null;
-  private filterLfo: Tone.LFO | null = null;
-  private highPass: Tone.Filter | null = null;
-  private peak: Tone.Filter | null = null;
   private bus: Tone.Gain | null = null;
 
   private voices = new Map<string, Voice>();
@@ -146,7 +142,6 @@ export class DroneEngine {
   private previewNote: string | null = null;
   private currentWaveform: DroneWaveform = "triangle";
   private currentTremoloShape: DroneLfoShape = "sine";
-  private currentFilterLfoShape: DroneLfoShape = "sine";
   private currentDistortionDrive = -1;
   private currentReverbDecay = -1;
   private currentReverbPreDelay = -1;
@@ -192,7 +187,10 @@ export class DroneEngine {
   async start(): Promise<void> {
     if (this.started) return;
     await Tone.start();
-    this.master = new Tone.Gain(0).toDestination();
+    // Master output is intentionally left disconnected here; the shared
+    // MasterFxBus decides whether to route it through the EQ chain or
+    // directly to destination via `setRouting`.
+    this.master = new Tone.Gain(0);
     this.reverb = new Tone.Reverb({
       decay: 4.5,
       preDelay: 0.03,
@@ -215,23 +213,17 @@ export class DroneEngine {
     this.tremoloGain.connect(this.distortion);
     // --- Master saturation: tanh soft-clip waveshaper crossfaded with
     // the dry signal. amount=0 → 100% dry (bypass), amount=1 → fully
-    // shaped. Sits between the master EQ and the tremolo gain so it
-    // colors the summed drone before amplitude modulation.
+    // shaped. Sits between the bus and the tremolo gain so it colors
+    // the summed drone before amplitude modulation. The static
+    // low-pass / high-pass EQ chain lives in the shared MasterFxBus
+    // downstream of `master`.
     this.saturation = new Tone.WaveShaper((x) => Math.tanh(3 * x), 4096);
     this.saturationMix = new Tone.CrossFade(0);
     this.saturation.connect(this.saturationMix.b);
     this.saturationMix.connect(this.tremoloGain);
-    // Master EQ chain: bus -> highPass -> peak -> lowpass -> saturation
-    //   -> tremolo -> distortion -> reverb.
-    this.filter = new Tone.Filter({ type: "lowpass", frequency: 20000, Q: 0.7 });
-    this.filter.connect(this.saturationMix.a);
-    this.filter.connect(this.saturation);
-    this.peak = new Tone.Filter({ type: "peaking", frequency: 800, Q: 3, gain: 0 });
-    this.peak.connect(this.filter);
-    this.highPass = new Tone.Filter({ type: "highpass", frequency: 20, Q: 0.7 });
-    this.highPass.connect(this.peak);
     this.bus = new Tone.Gain(1);
-    this.bus.connect(this.highPass);
+    this.bus.connect(this.saturationMix.a);
+    this.bus.connect(this.saturation);
     // Tremolo LFO: min/max is the absolute gain range. With depth=0 we
     // set both to 1 so the "LFO" is a DC 1 → passthrough.
     this.tremoloLfo = new Tone.LFO({
@@ -241,16 +233,22 @@ export class DroneEngine {
       type: "sine",
     }).start();
     this.tremoloLfo.connect(this.tremoloGain.gain);
-    // Filter LFO: min/max is the absolute cutoff range. With depth=0
-    // both = base cutoff so filter is held at the slider value.
-    this.filterLfo = new Tone.LFO({
-      frequency: 4,
-      min: 4000,
-      max: 4000,
-      type: "sine",
-    }).start();
-    this.filterLfo.connect(this.filter.frequency);
     this.started = true;
+  }
+
+  /**
+   * Repatch the master output. Pass a node to route into, or `null` to
+   * revert to a raw destination connection. Safe to call every frame —
+   * we track the current target and no-op when it doesn't change.
+   */
+  private currentRoutingTarget: Tone.InputNode | null | undefined = undefined;
+  setRouting(target: Tone.InputNode | null): void {
+    if (!this.started || !this.master) return;
+    if (this.currentRoutingTarget === target) return;
+    this.master.disconnect();
+    if (target) this.master.connect(target);
+    else this.master.toDestination();
+    this.currentRoutingTarget = target;
   }
 
   isStarted(): boolean {
@@ -267,10 +265,6 @@ export class DroneEngine {
       !this.master ||
       !this.tremoloGain ||
       !this.tremoloLfo ||
-      !this.filter ||
-      !this.filterLfo ||
-      !this.highPass ||
-      !this.peak ||
       !this.saturationMix ||
       !this.distortion ||
       !this.reverb ||
@@ -300,42 +294,6 @@ export class DroneEngine {
       this.tremoloLfo.type = p.tremoloShape;
       this.currentTremoloShape = p.tremoloShape;
     }
-
-    // --- Master low-pass filter. When disabled we open it all the way.
-    const lpEnabled = p.filterEnabled !== false;
-    this.filter.Q.rampTo(Math.max(0.1, p.filterQ), 0.08);
-
-    // Filter LFO drives the cutoff. Sweeps DOWN in log space from the
-    // base cutoff by up to `MAX_WOBBLE_OCTAVES * depth` octaves so the
-    // wobble sounds musical regardless of where the base cutoff sits.
-    const flDepth = lpEnabled ? Math.max(0, Math.min(1, p.filterLfoDepth)) : 0;
-    const base = lpEnabled ? Math.max(20, p.filterHz) : 20000;
-    const wobbleMin = flDepth > 0
-      ? Math.max(20, base / Math.pow(2, flDepth * MAX_WOBBLE_OCTAVES))
-      : base;
-    this.filterLfo.frequency.rampTo(
-      Math.max(0.05, p.filterLfoRateHz || 0.05),
-      0.05,
-    );
-    this.filterLfo.min = wobbleMin;
-    this.filterLfo.max = base;
-    if (p.filterLfoShape !== this.currentFilterLfoShape) {
-      this.filterLfo.type = p.filterLfoShape;
-      this.currentFilterLfoShape = p.filterLfoShape;
-    }
-
-    // --- Master high-pass filter. Disabled -> cutoff clamped to 20 Hz.
-    const hpHz = p.highPassEnabled ? Math.max(20, Math.min(20000, p.highPassHz)) : 20;
-    this.highPass.frequency.rampTo(hpHz, 0.08);
-    this.highPass.Q.rampTo(Math.max(0.1, p.highPassQ), 0.08);
-
-    // --- Master peak (bell) filter. Disabled -> gain flat.
-    this.peak.frequency.rampTo(Math.max(20, Math.min(20000, p.peakHz)), 0.08);
-    this.peak.Q.rampTo(Math.max(0.1, p.peakQ), 0.08);
-    (this.peak as unknown as { gain: Tone.Signal<"decibels"> }).gain.rampTo(
-      p.peakEnabled ? Math.max(-24, Math.min(24, p.peakGainDb)) : 0,
-      0.1,
-    );
 
     // Master saturation: crossfade between dry (a) and shaped (b).
     this.saturationMix.fade.rampTo(

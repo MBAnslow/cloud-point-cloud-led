@@ -690,6 +690,22 @@ function SelectedPadNoteEditor({
         />
         <span style={{ opacity: 0.6 }}>c</span>
       </label>
+      <label>
+        Trigger
+        <select
+          value={note.triggerProbability ?? 1}
+          onChange={(e) =>
+            onChange({ triggerProbability: parseFloat(e.target.value) })
+          }
+          style={{ ...numInput, marginLeft: 4, width: 64 }}
+          title="Odds this note fires each time the playhead enters its window"
+        >
+          <option value={1}>1</option>
+          <option value={0.5}>1/2</option>
+          <option value={0.25}>1/4</option>
+          <option value={0.125}>1/8</option>
+        </select>
+      </label>
       <span style={{ opacity: 0.7 }}>
         {fmtTime(note.startHour)} – {fmtTime(note.endHour)} ·{" "}
         {(note.endHour - note.startHour).toFixed(2)}h

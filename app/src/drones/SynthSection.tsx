@@ -74,33 +74,6 @@ export function SynthSection() {
           />
         </Card>
 
-        <Card title="Low-pass wobble (LFO)">
-          <Slider label="LFO rate" value={drone.filterLfoRateHz} min={0.05} max={20} step={0.01} unit="Hz" logScale onChange={(v) => setDrone({ filterLfoRateHz: v })} />
-          <Slider label="LFO depth" value={drone.filterLfoDepth} min={0} max={1} step={0.01} onChange={(v) => setDrone({ filterLfoDepth: v })} />
-          <label style={inlineLabel}>
-            <span style={{ width: 60 }}>Shape</span>
-            <select
-              value={drone.filterLfoShape}
-              onChange={(e) => setDrone({ filterLfoShape: e.target.value as DroneLfoShape })}
-              style={selectStyle}
-            >
-              {LFO_SHAPES.map((w) => (
-                <option key={w} value={w}>{w}</option>
-              ))}
-            </select>
-          </label>
-          <LfoScope
-            rateHz={drone.filterLfoRateHz}
-            depth={drone.filterLfoDepth}
-            shape={drone.filterLfoShape}
-            colorStroke="#38bdf8"
-            colorFill="rgba(56,189,248,0.15)"
-            label={`cutoff ${drone.filterHz.toFixed(0)} Hz ↓ ${(drone.filterLfoDepth * 5).toFixed(1)} oct`}
-          />
-          <div style={{ fontSize: 10, opacity: 0.6 }}>
-            Modulates the master low-pass cutoff set in Master frequency.
-          </div>
-        </Card>
       </div>
     </section>
   );

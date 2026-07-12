@@ -1,4 +1,5 @@
 import { useSimStore, type PadWaveform } from "../state";
+import { PadFilterResponse } from "./PadFilterResponse";
 
 const WAVEFORMS: PadWaveform[] = ["sine", "sawtooth", "square", "triangle"];
 
@@ -46,6 +47,29 @@ export function PadSynthPanel() {
             unit="c"
             onChange={(v) => setPad({ unisonDetuneCents: v })}
           />
+          <Slider
+            label="Drift rate"
+            value={pad.driftRateHz}
+            min={0.02}
+            max={6}
+            step={0.01}
+            unit="Hz"
+            logScale
+            onChange={(v) => setPad({ driftRateHz: v })}
+          />
+          <Slider
+            label="Drift depth"
+            value={pad.driftDepthCents}
+            min={0}
+            max={30}
+            step={0.5}
+            unit="c"
+            onChange={(v) => setPad({ driftDepthCents: v })}
+          />
+          <div style={hint}>
+            Each unison osc gets its own random phase — drift feels
+            organic instead of in lock-step.
+          </div>
         </Card>
 
         <Card title="Envelope">
@@ -126,6 +150,43 @@ export function PadSynthPanel() {
           <div style={hint}>
             Env pushes cutoff up while any note is sounding — larger
             values give a more pronounced pad "swell".
+          </div>
+          <Slider
+            label="LFO rate"
+            value={pad.filterLfoRateHz}
+            min={0.02}
+            max={8}
+            step={0.01}
+            unit="Hz"
+            logScale
+            onChange={(v) => setPad({ filterLfoRateHz: v })}
+          />
+          <Slider
+            label="LFO depth"
+            value={pad.filterLfoDepth}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setPad({ filterLfoDepth: v })}
+          />
+          <div style={hint}>
+            LFO sweeps cutoff down from base by up to one octave.
+          </div>
+          <PadFilterResponse pad={pad} />
+        </Card>
+
+        <Card title="Saturation">
+          <Slider
+            label="Drive"
+            value={pad.saturation}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setPad({ saturation: v })}
+          />
+          <div style={hint}>
+            Waveshaper drive; 0 is transparent. Adds warmth and edge
+            before the chorus / reverb.
           </div>
         </Card>
 

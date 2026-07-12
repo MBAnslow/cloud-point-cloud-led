@@ -6,6 +6,7 @@ import type {
   DirectionalLightParams,
   DayCycleParams,
   DroneParams,
+  MasterFxParams,
   PadParams,
   SamplesParams,
   EllipsoidParams,
@@ -39,6 +40,7 @@ export interface Snapshot {
   pad?: PadParams;
   samples?: SamplesParams;
   dayCycle?: DayCycleParams;
+  masterFx?: MasterFxParams;
   ledViewMode?: LedViewMode;
   ledDisplayMode?: LedDisplayMode;
   breathTimeCombineMode?: BreathTimeCombineMode;

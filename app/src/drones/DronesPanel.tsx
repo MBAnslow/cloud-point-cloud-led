@@ -3,7 +3,6 @@ import { Link } from "react-router-dom";
 import { useSimStore, type DroneNote } from "../state";
 import { getDroneEngine } from "../audio/DroneEngine";
 import { SynthSection } from "./SynthSection";
-import { MasterFrequencySection } from "./MasterFrequencySection";
 import { PostFxSection } from "./PostFxSection";
 import { NoteEffectsPanel } from "./NoteEffectsPanel";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
@@ -644,7 +643,6 @@ export function DronesPanel() {
       </section>
 
       <SynthSection />
-      <MasterFrequencySection />
       <PostFxSection />
       </div>
       {/* Suppress unused variable warning: pxPerHour reserved for potential

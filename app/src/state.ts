@@ -450,31 +450,6 @@ export interface DroneParams {
   /** Tremolo depth, [0, 1]. 0 = off, 1 = full modulation to silence. */
   tremoloDepth: number;
   tremoloShape: DroneLfoShape;
-  /** Master low-pass filter enabled. */
-  filterEnabled: boolean;
-  /** Low-pass filter cutoff, Hz (20–20000). */
-  filterHz: number;
-  /** Filter Q (resonance), 0.1–12. */
-  filterQ: number;
-  /** Filter LFO rate, Hz. */
-  filterLfoRateHz: number;
-  /** Filter LFO depth, [0, 1]. 0 = off. */
-  filterLfoDepth: number;
-  filterLfoShape: DroneLfoShape;
-  /** Master high-pass filter enabled. */
-  highPassEnabled: boolean;
-  /** High-pass filter cutoff, Hz (20–20000). */
-  highPassHz: number;
-  /** High-pass filter Q (resonance), 0.1–12. */
-  highPassQ: number;
-  /** Master peak (bell) filter enabled. */
-  peakEnabled: boolean;
-  /** Peak filter center frequency, Hz (20–20000). */
-  peakHz: number;
-  /** Peak filter Q (bandwidth), 0.1–20. */
-  peakQ: number;
-  /** Peak filter gain, dB (-24..+24). */
-  peakGainDb: number;
   /** Master saturation amount, [0, 1]. 0 = clean, 1 = fully saturated. */
   saturation: number;
   /** Post-FX: distortion (single soft-clip waveshaper). */
@@ -510,6 +485,13 @@ export interface PadNote {
   gain?: number;
   /** Per-note pitch offset in cents. Defaults to 0. */
   detuneCents?: number;
+  /**
+   * Probability the note will actually fire when the playhead enters
+   * its window. The roll happens once per entry; if it fails the note
+   * stays silent for that whole pass and re-rolls on the next entry.
+   * Undefined = 1 (always fire).
+   */
+  triggerProbability?: number;
 }
 
 export type PadWaveform = "sine" | "sawtooth" | "square" | "triangle";
@@ -544,6 +526,22 @@ export interface PadParams {
   chorusRateHz: number;
   /** Chorus wet mix, [0, 1]. */
   chorusDepth: number;
+  /**
+   * Per-oscillator pitch-drift LFO rate, Hz. Each unison osc gets its
+   * own randomised phase so drift feels organic rather than in lock-step.
+   */
+  driftRateHz: number;
+  /** Peak drift depth, cents. 0 disables. */
+  driftDepthCents: number;
+  /** Filter cutoff LFO rate, Hz. */
+  filterLfoRateHz: number;
+  /**
+   * Filter cutoff LFO depth, [0, 1]. 1 sweeps the cutoff down by a
+   * full octave from the base at the LFO's trough; 0 disables.
+   */
+  filterLfoDepth: number;
+  /** Waveshaper drive, [0, 1]. 0 = clean. */
+  saturation: number;
   /** Reverb wet mix, [0, 1]. */
   reverbMix: number;
   /** Reverb tail length in seconds. */
@@ -600,6 +598,11 @@ export interface SampleClip {
   delayFeedback?: number;
   /** Delay wet mix, [0, 1]. */
   delayMix?: number;
+  /**
+   * Probability the clip fires when the playhead crosses `startHour`.
+   * Rolled per crossing. Undefined = 1 (always fire).
+   */
+  triggerProbability?: number;
 }
 
 /**
@@ -633,6 +636,33 @@ export interface DayPeriod {
 export interface DayCycleParams {
   periods: DayPeriod[];
   activePeriodId: string;
+}
+
+/**
+ * Shared master frequency processing applied downstream of each
+ * instrument's own master gain. A single HPF + LPF is shared by all
+ * engines that opt in via the corresponding `applyTo*` flag; opted-out
+ * engines route around the EQ to a direct destination path.
+ */
+export interface MasterFxParams {
+  /** Low-pass filter enabled. */
+  lpEnabled: boolean;
+  /** Low-pass cutoff, Hz (20–20000). */
+  lpHz: number;
+  /** Low-pass Q, 0.1–12. */
+  lpQ: number;
+  /** High-pass filter enabled. */
+  hpEnabled: boolean;
+  /** High-pass cutoff, Hz (20–20000). */
+  hpHz: number;
+  /** High-pass Q, 0.1–12. */
+  hpQ: number;
+  /** Route drone through the shared EQ chain. */
+  applyToDrone: boolean;
+  /** Route pad through the shared EQ chain. */
+  applyToPad: boolean;
+  /** Route samples through the shared EQ chain. */
+  applyToSamples: boolean;
 }
 
 /** Length of a period in decimal hours, handling wrap-around. */
@@ -724,6 +754,7 @@ interface SimState {
   pad: PadParams;
   samples: SamplesParams;
   dayCycle: DayCycleParams;
+  masterFx: MasterFxParams;
   ledViewMode: LedViewMode;
   ledDisplayMode: LedDisplayMode;
   breathTimeCombineMode: BreathTimeCombineMode;
@@ -757,6 +788,7 @@ interface SimState {
   removeSampleClip: (id: string) => void;
   clearSampleClips: () => void;
   setDayCycle: (patch: Partial<DayCycleParams>) => void;
+  setMasterFx: (patch: Partial<MasterFxParams>) => void;
   updateDayPeriod: (id: string, patch: Partial<DayPeriod>) => void;
   setActivePeriod: (id: string) => void;
   advancePeriod: () => void;
@@ -951,19 +983,6 @@ const DEFAULTS = {
     tremoloRateHz: 4,
     tremoloDepth: 0,
     tremoloShape: "sine",
-    filterEnabled: true,
-    filterHz: 20000,
-    filterQ: 0.7,
-    filterLfoRateHz: 2,
-    filterLfoDepth: 0,
-    filterLfoShape: "sine",
-    highPassEnabled: false,
-    highPassHz: 40,
-    highPassQ: 0.7,
-    peakEnabled: false,
-    peakHz: 800,
-    peakQ: 3,
-    peakGainDb: 0,
     saturation: 0,
     distortionEnabled: false,
     distortionDrive: 0.5,
@@ -1003,6 +1022,11 @@ const DEFAULTS = {
     filterEnvAmount: 1200,
     chorusRateHz: 0.3,
     chorusDepth: 0.4,
+    driftRateHz: 0.25,
+    driftDepthCents: 4,
+    filterLfoRateHz: 0.4,
+    filterLfoDepth: 0,
+    saturation: 0.15,
     reverbMix: 0.35,
     reverbDecay: 3.0,
     notes: [],
@@ -1022,6 +1046,17 @@ const DEFAULTS = {
     ],
     activePeriodId: "dawn",
   } as DayCycleParams,
+  masterFx: {
+    lpEnabled: false,
+    lpHz: 20000,
+    lpQ: 0.7,
+    hpEnabled: false,
+    hpHz: 40,
+    hpQ: 0.7,
+    applyToDrone: true,
+    applyToPad: true,
+    applyToSamples: true,
+  } as MasterFxParams,
   ledViewMode: "breathPlusTimeOfDay" as LedViewMode,
   ledDisplayMode: "sensors" as LedDisplayMode,
   breathTimeCombineMode: "revealOnInhale" as BreathTimeCombineMode,
@@ -1217,28 +1252,6 @@ function resolveDroneParams(
     tremoloRateHz: pick("tremoloRateHz"),
     tremoloDepth: pick("tremoloDepth"),
     tremoloShape: pick("tremoloShape"),
-    filterEnabled:
-      typeof saved.filterEnabled === "boolean"
-        ? saved.filterEnabled
-        : DEFAULTS.drone.filterEnabled,
-    filterHz: pick("filterHz"),
-    filterQ: pick("filterQ"),
-    filterLfoRateHz: pick("filterLfoRateHz"),
-    filterLfoDepth: pick("filterLfoDepth"),
-    filterLfoShape: pick("filterLfoShape"),
-    highPassEnabled:
-      typeof saved.highPassEnabled === "boolean"
-        ? saved.highPassEnabled
-        : DEFAULTS.drone.highPassEnabled,
-    highPassHz: pick("highPassHz"),
-    highPassQ: pick("highPassQ"),
-    peakEnabled:
-      typeof saved.peakEnabled === "boolean"
-        ? saved.peakEnabled
-        : DEFAULTS.drone.peakEnabled,
-    peakHz: pick("peakHz"),
-    peakQ: pick("peakQ"),
-    peakGainDb: pick("peakGainDb"),
     saturation:
       typeof saved.saturation === "number"
         ? saved.saturation
@@ -1309,6 +1322,11 @@ function resolvePadParams(
     filterEnvAmount: pick("filterEnvAmount"),
     chorusRateHz: pick("chorusRateHz"),
     chorusDepth: pick("chorusDepth"),
+    driftRateHz: pick("driftRateHz"),
+    driftDepthCents: pick("driftDepthCents"),
+    filterLfoRateHz: pick("filterLfoRateHz"),
+    filterLfoDepth: pick("filterLfoDepth"),
+    saturation: pick("saturation"),
     reverbMix: pick("reverbMix"),
     reverbDecay: pick("reverbDecay"),
     notes,
@@ -1398,6 +1416,52 @@ function resolveDayCycle(
   return { periods, activePeriodId };
 }
 
+/**
+ * Reconcile a saved `masterFx` payload. If missing, tries to migrate
+ * values from the legacy drone-scoped LPF/HPF fields so users don't
+ * lose their previously-tuned master EQ. Peak filter fields are
+ * dropped entirely.
+ */
+function resolveMasterFx(
+  saved: Partial<MasterFxParams> | undefined,
+  legacyDrone?: Record<string, unknown>,
+): MasterFxParams {
+  const d = DEFAULTS.masterFx;
+  const pickBool = (
+    v: unknown,
+    fallback: boolean,
+  ): boolean => (typeof v === "boolean" ? v : fallback);
+  const pickNum = (v: unknown, fallback: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  if (saved && typeof saved === "object") {
+    return {
+      lpEnabled: pickBool(saved.lpEnabled, d.lpEnabled),
+      lpHz: pickNum(saved.lpHz, d.lpHz),
+      lpQ: pickNum(saved.lpQ, d.lpQ),
+      hpEnabled: pickBool(saved.hpEnabled, d.hpEnabled),
+      hpHz: pickNum(saved.hpHz, d.hpHz),
+      hpQ: pickNum(saved.hpQ, d.hpQ),
+      applyToDrone: pickBool(saved.applyToDrone, d.applyToDrone),
+      applyToPad: pickBool(saved.applyToPad, d.applyToPad),
+      applyToSamples: pickBool(saved.applyToSamples, d.applyToSamples),
+    };
+  }
+  if (legacyDrone) {
+    return {
+      lpEnabled: pickBool(legacyDrone.filterEnabled, d.lpEnabled),
+      lpHz: pickNum(legacyDrone.filterHz, d.lpHz),
+      lpQ: pickNum(legacyDrone.filterQ, d.lpQ),
+      hpEnabled: pickBool(legacyDrone.highPassEnabled, d.hpEnabled),
+      hpHz: pickNum(legacyDrone.highPassHz, d.hpHz),
+      hpQ: pickNum(legacyDrone.highPassQ, d.hpQ),
+      applyToDrone: d.applyToDrone,
+      applyToPad: d.applyToPad,
+      applyToSamples: d.applyToSamples,
+    };
+  }
+  return d;
+}
+
 /** Seed the store from a localStorage snapshot if one exists. */
 function initialState() {
   const saved = loadSnapshot();
@@ -1450,6 +1514,10 @@ function initialState() {
         | undefined,
     ),
     dayCycle: resolveDayCycle(saved.dayCycle),
+    masterFx: resolveMasterFx(
+      saved.masterFx as Partial<MasterFxParams> | undefined,
+      saved.drone as Record<string, unknown> | undefined,
+    ),
     ledViewMode: normalizeLedViewMode(saved.ledViewMode),
     ledDisplayMode:
       saved.ledDisplayMode === "leds" || saved.ledDisplayMode === "sensors"
@@ -1559,6 +1627,8 @@ export const useSimStore = create<SimState>((set) => ({
     set((s) => ({ samples: { ...s.samples, clips: [] } })),
   setDayCycle: (patch) =>
     set((s) => ({ dayCycle: { ...s.dayCycle, ...patch } })),
+  setMasterFx: (patch) =>
+    set((s) => ({ masterFx: { ...s.masterFx, ...patch } })),
   updateDayPeriod: (id, patch) =>
     set((s) => ({
       dayCycle: {
@@ -1704,6 +1774,12 @@ export function applySnapshot(snap: Snapshot): Snapshot {
     ),
   );
   s.setDayCycle(resolveDayCycle(snap.dayCycle));
+  s.setMasterFx(
+    resolveMasterFx(
+      snap.masterFx as Partial<MasterFxParams> | undefined,
+      snap.drone as Record<string, unknown> | undefined,
+    ),
+  );
   s.setLedViewMode(normalizeLedViewMode(snap.ledViewMode));
   if (snap.ledDisplayMode === "leds" || snap.ledDisplayMode === "sensors") {
     s.setLedDisplayMode(snap.ledDisplayMode);
@@ -1744,6 +1820,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     pad: s.pad,
     samples: s.samples,
     dayCycle: s.dayCycle,
+    masterFx: s.masterFx,
     ledViewMode: s.ledViewMode,
     ledDisplayMode: s.ledDisplayMode,
     breathTimeCombineMode: s.breathTimeCombineMode,

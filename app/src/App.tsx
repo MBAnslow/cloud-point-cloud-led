@@ -8,6 +8,7 @@ import { StreamMatrix } from "./components/StreamMatrix";
 import { BreathOscillator } from "./components/BreathOscillator";
 import { DayCyclePanel } from "./components/DayCyclePanel";
 import { LedViewModePanel } from "./components/LedViewModePanel";
+import { MasterFrequencyPanel } from "./components/MasterFrequencyPanel";
 import { SkyTimeline } from "./components/SkyTimeline";
 import { Ellipsoid } from "./scene/Ellipsoid";
 import { BreathArea } from "./scene/BreathArea";
@@ -60,6 +61,7 @@ export default function App() {
       <DayCyclePanel />
       <SkyTimeline />
       <LedViewModePanel />
+      <MasterFrequencyPanel />
       <BreathOscillator />
       <Histogram />
       <StreamMatrix />

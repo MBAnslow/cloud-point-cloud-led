@@ -32,7 +32,32 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
           {sample ? `${sample.durationSec.toFixed(2)}s` : ""}
           {sample ? ` · plays ${(sample.durationSec / clip.playbackRate).toFixed(2)}s @ rate ${clip.playbackRate.toFixed(2)}` : ""}
         </span>
-        <button onClick={onDelete} style={{ ...btn, marginLeft: "auto" }}>
+        <label
+          style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}
+          title="Odds this clip fires each time the playhead crosses its trigger point"
+        >
+          <span style={{ opacity: 0.75 }}>Trigger</span>
+          <select
+            value={clip.triggerProbability ?? 1}
+            onChange={(e) =>
+              onChange({ triggerProbability: parseFloat(e.target.value) })
+            }
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              color: "inherit",
+              border: "1px solid rgba(255,255,255,0.2)",
+              borderRadius: 3,
+              padding: "2px 4px",
+              fontSize: 11,
+            }}
+          >
+            <option value={1}>1</option>
+            <option value={0.5}>1/2</option>
+            <option value={0.25}>1/4</option>
+            <option value={0.125}>1/8</option>
+          </select>
+        </label>
+        <button onClick={onDelete} style={btn}>
           Delete
         </button>
       </div>

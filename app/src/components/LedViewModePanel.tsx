@@ -62,8 +62,6 @@ export function LedViewModePanel() {
   const setDisplayMode = useSimStore((s) => s.setLedDisplayMode);
   const breathTimeCombineMode = useSimStore((s) => s.breathTimeCombineMode);
   const setBreathTimeCombineMode = useSimStore((s) => s.setBreathTimeCombineMode);
-  const streamPipeline = useSimStore((s) => s.ledStreamPipeline);
-  const setStreamPipeline = useSimStore((s) => s.setLedStreamPipeline);
   const locator = useSimStore((s) => s.ledLocator);
   const setLocator = useSimStore((s) => s.setLedLocator);
   const clearLocated = useSimStore((s) => s.clearLocatedLeds);
@@ -240,64 +238,6 @@ export function LedViewModePanel() {
           </label>
         ))}
       </div>
-      {displayMode === "leds" && (
-        <div
-          style={{
-            marginTop: 8,
-            paddingTop: 8,
-            borderTop: "1px solid rgba(255,255,255,0.1)",
-            display: "grid",
-            gap: 6,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 10,
-              letterSpacing: 0.45,
-              textTransform: "uppercase",
-              opacity: 0.72,
-            }}
-          >
-            LED Stream Pipeline
-          </div>
-          <div style={{ fontSize: 11, opacity: 0.78 }}>
-            time of day → breath → locator override → stream
-          </div>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={streamPipeline.timeOfDayStage}
-              onChange={(e) => setStreamPipeline({ timeOfDayStage: e.target.checked })}
-            />
-            enable time-of-day stage
-          </label>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={streamPipeline.breathStage}
-              onChange={(e) => setStreamPipeline({ breathStage: e.target.checked })}
-            />
-            enable breath stage
-          </label>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={streamPipeline.lightningStage}
-              onChange={(e) => setStreamPipeline({ lightningStage: e.target.checked })}
-            />
-            enable lightning stage
-          </label>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={streamPipeline.locatorOverrideStage}
-              onChange={(e) =>
-                setStreamPipeline({ locatorOverrideStage: e.target.checked })}
-            />
-            enable locator override stage
-          </label>
-        </div>
-      )}
       <div
         style={{
           marginTop: 8,
