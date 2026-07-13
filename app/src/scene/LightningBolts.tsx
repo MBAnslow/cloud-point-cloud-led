@@ -2,13 +2,18 @@ import { useState } from "react";
 import { useFrame } from "@react-three/fiber";
 import { AdditiveBlending } from "three";
 import { Line } from "@react-three/drei";
-import { sharedLightningController, type BoltStrike } from "../lighting/lightning";
+import {
+  boltTravelHead,
+  sharedLightningController,
+  type BoltStrike,
+} from "../lighting/lightning";
 import { useSimStore } from "../state";
 
 interface VisibleBolt {
   id: number;
   points: Array<[number, number, number]>;
   opacity: number;
+  head: number;
 }
 
 let nextId = 1;
@@ -40,7 +45,10 @@ export function LightningBolts() {
         id = nextId++;
         idByStrike.set(s, id);
       }
-      next.push({ id, points: bufferToTriplets(s.path), opacity: Math.min(1, env) });
+      const head = boltTravelHead(now - s.bornMs, s.durationMs);
+      const points = partialPath(s.path, head);
+      if (points.length < 2) continue;
+      next.push({ id, points, opacity: Math.min(1, env), head });
     }
     // Cheap change check: compare counts + ids + rounded opacities.
     let changed = next.length !== bolts.length;
@@ -48,7 +56,8 @@ export function LightningBolts() {
       for (let i = 0; i < next.length; i++) {
         if (
           next[i].id !== bolts[i].id ||
-          Math.abs(next[i].opacity - bolts[i].opacity) > 0.02
+          Math.abs(next[i].opacity - bolts[i].opacity) > 0.02 ||
+          Math.abs(next[i].head - bolts[i].head) > 0.02
         ) {
           changed = true;
           break;
@@ -80,10 +89,33 @@ export function LightningBolts() {
   );
 }
 
-function bufferToTriplets(buf: Float32Array): Array<[number, number, number]> {
+/**
+ * Return the first `head` fraction of the polyline as an array of
+ * points, interpolating along the "current" segment so the tip lands
+ * exactly at the deployed position rather than snapping to vertices.
+ */
+function partialPath(
+  buf: Float32Array,
+  head: number,
+): Array<[number, number, number]> {
+  const totalSegs = buf.length / 3 - 1;
+  if (totalSegs < 1) return [];
+  const activeF = Math.max(0, Math.min(1, head)) * totalSegs;
+  const fullSegs = Math.floor(activeF);
+  const tipT = activeF - fullSegs;
   const out: Array<[number, number, number]> = [];
-  for (let i = 0; i < buf.length; i += 3) {
-    out.push([buf[i], buf[i + 1], buf[i + 2]]);
+  for (let i = 0; i <= fullSegs && i <= totalSegs; i++) {
+    const idx = i * 3;
+    out.push([buf[idx], buf[idx + 1], buf[idx + 2]]);
+  }
+  if (fullSegs < totalSegs && tipT > 0) {
+    const a3 = fullSegs * 3;
+    const b3 = a3 + 3;
+    out.push([
+      buf[a3] + (buf[b3] - buf[a3]) * tipT,
+      buf[a3 + 1] + (buf[b3 + 1] - buf[a3 + 1]) * tipT,
+      buf[a3 + 2] + (buf[b3 + 2] - buf[a3 + 2]) * tipT,
+    ]);
   }
   return out;
 }

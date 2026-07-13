@@ -6,7 +6,12 @@ import { getFrame } from "../stream/frameBuffer";
  * pipeline. This is intentionally independent from 3D materials/lights so
  * debugging output correctness is straightforward.
  */
-export function StreamMatrix() {
+export function StreamMatrix({ visible = true }: { visible?: boolean } = {}) {
+  if (!visible) return null;
+  return <StreamMatrixInner />;
+}
+
+function StreamMatrixInner() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [visible, setVisible] = useState(true);
   const [count, setCount] = useState(0);

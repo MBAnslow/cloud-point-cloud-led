@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { breathLevelAt, sampleBreathAt } from "../lighting/breath";
 import { computeBreathAreaOrigin } from "../lighting/breathArea";
 import { useSimStore, type Breather } from "../state";
+import { useDraggable } from "./useDraggable";
 
 const PRESET_COLORS = [
   "#77d5ff",
@@ -67,11 +68,14 @@ const PARAM_HELP = {
     "Offset of the area center from the cloud surface along the selected direction.",
 };
 
-export function BreathOscillator() {
+export function BreathOscillator({ visible: mounted = true }: { visible?: boolean } = {}) {
   const breath = useSimStore((s) => s.breath);
   const ellipsoid = useSimStore((s) => s.ellipsoid);
   const setBreath = useSimStore((s) => s.setBreath);
   const [nowMs, setNowMs] = useState(() => performance.now());
+  const [visible, setVisible] = useState(true);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const { pos, handleProps } = useDraggable(panelRef);
 
   useEffect(() => {
     let raf = 0;
@@ -167,27 +171,29 @@ export function BreathOscillator() {
     });
   };
 
+  const baseStyle: React.CSSProperties = {
+    position: "fixed",
+    left: pos ? pos.left : "50%",
+    top: pos ? pos.top : undefined,
+    bottom: pos ? undefined : 200,
+    transform: pos ? undefined : "translateX(-50%)",
+    width: "min(820px, calc(100vw - 390px))",
+    zIndex: 9,
+    pointerEvents: "auto",
+    background: "rgba(10, 12, 20, 0.72)",
+    backdropFilter: "blur(8px)",
+    borderRadius: 12,
+    color: "rgba(207,214,230,0.95)",
+    boxShadow: "0 1px 0 rgba(255,255,255,0.05) inset",
+    padding: "10px 12px",
+    fontFamily:
+      "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+  };
+  if (!mounted) return null;
   return (
-    <div
-      style={{
-        position: "fixed",
-        left: "50%",
-        bottom: 140,
-        transform: "translateX(-50%)",
-        width: "min(820px, calc(100vw - 390px))",
-        zIndex: 9,
-        pointerEvents: "auto",
-        background: "rgba(10, 12, 20, 0.72)",
-        backdropFilter: "blur(8px)",
-        borderRadius: 12,
-        color: "rgba(207,214,230,0.95)",
-        boxShadow: "0 1px 0 rgba(255,255,255,0.05) inset",
-        padding: "10px 12px",
-        fontFamily:
-          "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-      }}
-    >
+    <div ref={panelRef} style={baseStyle}>
       <div
+        onPointerDown={handleProps.onPointerDown}
         style={{
           display: "flex",
           alignItems: "center",
@@ -195,9 +201,26 @@ export function BreathOscillator() {
           gap: 10,
           marginBottom: 8,
           fontSize: 11,
+          cursor: "move",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={() => setVisible((v) => !v)}
+            title={visible ? "Hide panel body" : "Show panel body"}
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              color: "inherit",
+              border: "1px solid rgba(255,255,255,0.15)",
+              borderRadius: 4,
+              padding: "1px 6px",
+              cursor: "pointer",
+              fontSize: 11,
+              lineHeight: 1,
+            }}
+          >
+            {visible ? "▾" : "▸"}
+          </button>
           <span style={{ textTransform: "uppercase", letterSpacing: 0.6, opacity: 0.7 }}>
             Breath Oscillator
           </span>
@@ -209,11 +232,13 @@ export function BreathOscillator() {
             />
             enabled
           </label>
-          <span style={{ opacity: 0.75 }}>
-            cycle {fmtS(cycleSeconds)} · level {currentLevel.toFixed(2)} · exhale{" "}
-            {exhaleLevel.toFixed(2)} · inhale {inhaleLevel.toFixed(2)} · mode{" "}
-            {sample.phase}
-          </span>
+          {visible && (
+            <span style={{ opacity: 0.75 }}>
+              cycle {fmtS(cycleSeconds)} · level {currentLevel.toFixed(2)} · exhale{" "}
+              {exhaleLevel.toFixed(2)} · inhale {inhaleLevel.toFixed(2)} · mode{" "}
+              {sample.phase}
+            </span>
+          )}
         </div>
         <button
           onClick={addBreather}
@@ -231,6 +256,8 @@ export function BreathOscillator() {
         </button>
       </div>
 
+      {visible && (
+      <>
       <BreathCurve
         breath={breath}
         cycleSeconds={cycleSeconds}
@@ -538,6 +565,8 @@ export function BreathOscillator() {
           );
         })}
       </div>
+      </>
+      )}
     </div>
   );
 }

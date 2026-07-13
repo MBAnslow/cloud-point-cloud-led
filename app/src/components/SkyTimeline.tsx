@@ -278,6 +278,8 @@ export function SkyTimeline() {
 
       <SkyArc nowHour={nowHour} onScrub={setNow} />
 
+      <LightningWindowStrip />
+
       {/* Three independent channel tracks */}
       <div style={{ marginTop: 2 }}>
         {CHANNELS.map((channel) => (
@@ -965,6 +967,149 @@ function ColorInput({
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * Thin 24h strip showing the active lightning window. A filled yellow
+ * bolt marks the start; a hollow (white-outline) bolt marks the end.
+ * The connecting bar highlights the "on" arc, wrapping past midnight
+ * when end < start.
+ */
+function LightningWindowStrip() {
+  const lightning = useSimStore((s) => s.lightning);
+  const setLightning = useSimStore((s) => s.setLightning);
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<"start" | "end" | null>(null);
+  const start = wrap24(lightning.activeStartHour);
+  const end = wrap24(lightning.activeEndHour);
+
+  const clientToHour = (clientX: number): number => {
+    const el = stripRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const x = Math.min(Math.max(0, clientX - rect.left), rect.width);
+    return (x / Math.max(1, rect.width)) * HOURS;
+  };
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!dragRef.current) return;
+      const h = wrap24(clientToHour(e.clientX));
+      if (dragRef.current === "start") setLightning({ activeStartHour: h });
+      else setLightning({ activeEndHour: h });
+    };
+    const onUp = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [setLightning]);
+
+  const startPct = (start / HOURS) * 100;
+  const endPct = (end / HOURS) * 100;
+  const wraps = end < start;
+  return (
+    <div style={{ marginTop: 6, marginBottom: 2 }}>
+      <div
+        ref={stripRef}
+        style={{
+          position: "relative",
+          height: 20,
+          background: "rgba(0,0,0,0.30)",
+          borderRadius: 4,
+          border: "1px solid rgba(255,255,255,0.08)",
+        }}
+        title="Lightning active window (drag the bolts to reshape)"
+      >
+        {/* Active window band(s). */}
+        {!wraps ? (
+          <div style={activeBandStyle(startPct, endPct - startPct)} />
+        ) : (
+          <>
+            <div style={activeBandStyle(startPct, 100 - startPct)} />
+            <div style={activeBandStyle(0, endPct)} />
+          </>
+        )}
+        {/* Start bolt (filled yellow). */}
+        <BoltMarker
+          leftPct={startPct}
+          filled
+          onPointerDown={(e) => {
+            dragRef.current = "start";
+            e.preventDefault();
+          }}
+          title={`Lightning on @ ${fmtTime(start)}`}
+        />
+        {/* End bolt (white outline). */}
+        <BoltMarker
+          leftPct={endPct}
+          filled={false}
+          onPointerDown={(e) => {
+            dragRef.current = "end";
+            e.preventDefault();
+          }}
+          title={`Lightning off @ ${fmtTime(end)}`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function activeBandStyle(leftPct: number, widthPct: number): React.CSSProperties {
+  return {
+    position: "absolute",
+    left: `${leftPct}%`,
+    width: `${widthPct}%`,
+    top: 0,
+    bottom: 0,
+    background: "rgba(250,204,21,0.14)",
+    borderTop: "1px dashed rgba(250,204,21,0.35)",
+    borderBottom: "1px dashed rgba(250,204,21,0.35)",
+    pointerEvents: "none",
+  };
+}
+
+function BoltMarker({
+  leftPct,
+  filled,
+  onPointerDown,
+  title,
+}: {
+  leftPct: number;
+  filled: boolean;
+  onPointerDown: (e: React.PointerEvent) => void;
+  title: string;
+}) {
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      title={title}
+      style={{
+        position: "absolute",
+        left: `calc(${leftPct}% - 8px)`,
+        top: 1,
+        width: 16,
+        height: 18,
+        cursor: "ew-resize",
+        touchAction: "none",
+        zIndex: 2,
+      }}
+    >
+      <svg width={16} height={18} viewBox="0 0 16 18" style={{ display: "block" }}>
+        <path
+          d="M9 1 L3 10 L7 10 L6 17 L13 7 L9 7 Z"
+          fill={filled ? "#facc15" : "none"}
+          stroke={filled ? "#78350f" : "#ffffff"}
+          strokeWidth={filled ? 0.8 : 1.2}
+          strokeLinejoin="round"
+        />
+      </svg>
     </div>
   );
 }

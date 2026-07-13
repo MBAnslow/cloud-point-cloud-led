@@ -50,9 +50,6 @@ interface PadVoice {
 export class PadEngine {
   private started = false;
   private master: Tone.Gain | null = null;
-  private reverb: Tone.Reverb | null = null;
-  private reverbDryGain: Tone.Gain | null = null;
-  private reverbWetGain: Tone.Gain | null = null;
   private chorus: Tone.Chorus | null = null;
   private filter: Tone.Filter | null = null;
   private saturation: Tone.Distortion | null = null;
@@ -66,28 +63,17 @@ export class PadEngine {
    */
   private probGate = new Map<string, boolean>();
   private currentWaveform: PadWaveform = "sawtooth";
-  private currentReverbDecay = -1;
-
   async start(): Promise<void> {
     if (this.started) return;
     await Tone.start();
     this.master = new Tone.Gain(0);
-    this.reverb = new Tone.Reverb({ decay: 3, preDelay: 0.02, wet: 1 });
-    this.reverb.generate().catch(() => undefined);
-    this.reverbDryGain = new Tone.Gain(1);
-    this.reverbWetGain = new Tone.Gain(0);
-    this.reverbDryGain.connect(this.master);
-    this.reverbWetGain.connect(this.master);
-    this.reverb.connect(this.reverbWetGain);
-    // Chorus feeds both the dry send and the reverb input.
     this.chorus = new Tone.Chorus({
       frequency: 0.3,
       delayTime: 3.5,
       depth: 0.6,
       wet: 0.4,
     }).start();
-    this.chorus.connect(this.reverbDryGain);
-    this.chorus.connect(this.reverb);
+    this.chorus.connect(this.master);
     // Waveshaper for warmth / drive. `wet` is scaled from p.saturation
     // in update(), so at 0 the chain is transparent.
     this.saturation = new Tone.Distortion({ distortion: 0, wet: 0 });
@@ -118,9 +104,6 @@ export class PadEngine {
     if (
       !this.started ||
       !this.master ||
-      !this.reverb ||
-      !this.reverbDryGain ||
-      !this.reverbWetGain ||
       !this.chorus ||
       !this.filter ||
       !this.saturation ||
@@ -178,18 +161,6 @@ export class PadEngine {
     );
     // `wet` scales the amount of chorus in the parallel chain.
     this.chorus.wet.rampTo(Math.max(0, Math.min(1, p.chorusDepth)), 0.1);
-
-    // Reverb: regen IR only when decay actually moves — generation
-    // allocates a fresh Float32 IR.
-    const decay = Math.max(0.1, p.reverbDecay);
-    if (Math.abs(decay - this.currentReverbDecay) > 0.01) {
-      this.reverb.decay = decay;
-      this.reverb.generate().catch(() => undefined);
-      this.currentReverbDecay = decay;
-    }
-    const reverbMix = Math.max(0, Math.min(1, p.reverbMix));
-    this.reverbDryGain.gain.rampTo(1 - reverbMix, 0.1);
-    this.reverbWetGain.gain.rampTo(reverbMix, 0.1);
 
     if (!p.enabled) {
       for (const v of this.voices.values()) this.release(v, p);

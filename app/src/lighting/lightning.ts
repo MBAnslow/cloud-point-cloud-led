@@ -83,13 +83,29 @@ function sampleBoltPath(
 
   const count = Math.max(2, Math.floor(segments) + 1);
   const path = new Float32Array(count * 3);
+  // High-frequency jaggedness (per-vertex noise).
   const lateral = jitter * len * 0.35;
+  // Low-frequency wander so the bolt curves left/right/up/down along
+  // its length rather than just zig-zagging along a straight axis.
+  // Random amplitude, phase and 1..3 half-waves per bolt in each of
+  // the two lateral basis directions.
+  const waveAmpU = (rand() * 2 - 1) * jitter * len * 0.6;
+  const waveAmpV = (rand() * 2 - 1) * jitter * len * 0.6;
+  const waveFreqU = 1 + Math.floor(rand() * 3);
+  const waveFreqV = 1 + Math.floor(rand() * 3);
+  const wavePhaseU = rand() * Math.PI * 2;
+  const wavePhaseV = rand() * Math.PI * 2;
   for (let i = 0; i < count; i++) {
     const t = i / (count - 1);
-    // Weight jitter with sin(pi t) so endpoints stay anchored.
-    const w = Math.sin(t * Math.PI) * lateral;
-    const ru = (rand() * 2 - 1) * w;
-    const rv = (rand() * 2 - 1) * w;
+    // Weight everything with sin(pi t) so endpoints stay anchored.
+    const anchor = Math.sin(t * Math.PI);
+    const w = anchor * lateral;
+    const jitU = (rand() * 2 - 1) * w;
+    const jitV = (rand() * 2 - 1) * w;
+    const waveU = Math.sin(t * Math.PI * waveFreqU + wavePhaseU) * waveAmpU * anchor;
+    const waveV = Math.sin(t * Math.PI * waveFreqV + wavePhaseV) * waveAmpV * anchor;
+    const ru = jitU + waveU;
+    const rv = jitV + waveV;
     const px = ax + dx * t + ux2 * ru + vx * rv;
     const py = ay + dy * t + uy2 * ru + vy * rv;
     const pz = az + dz * t + uz2 * ru + vz * rv;
@@ -136,6 +152,18 @@ function pointSegmentDistSq(
  * couple of secondary flickers within the window driven by subOffsets.
  * Returns a value in [0, ~1.2] which is clamped by the caller.
  */
+/**
+ * Fraction of the bolt polyline that is "lit" at `age` ms into the
+ * flash. The tip races from the origin to the destination during the
+ * first ~25% of the flash window, then stays fully deployed for the
+ * remainder. Returns a value in [0, 1].
+ */
+export function boltTravelHead(age: number, durationMs: number): number {
+  if (age < 0) return 0;
+  const travelMs = Math.max(30, durationMs * 0.25);
+  return Math.min(1, age / travelMs);
+}
+
 function envelope(
   age: number,
   durationMs: number,
@@ -170,6 +198,11 @@ export class LightningController {
 
   getStrikes(): BoltStrike[] {
     return this.strikes;
+  }
+
+  /** Timestamp of the last `update` tick; 0 before the first tick. */
+  getLastUpdateMs(): number {
+    return this.lastUpdateMs;
   }
 
   update(
@@ -256,31 +289,51 @@ export class LightningController {
       const cg = s.color[1] * scale;
       const cb = s.color[2] * scale;
       const path = s.path;
-      const segCount = path.length / 3 - 1;
+      const totalSegs = path.length / 3 - 1;
+      // Progressive travel: only the first `head` fraction of the
+      // polyline emits light. LEDs beyond the tip get no contribution
+      // yet, so a bolt visibly propagates rather than lighting the
+      // whole path at once.
+      const head = boltTravelHead(age, s.durationMs);
+      const activeF = head * totalSegs;
+      const fullSegs = Math.floor(activeF);
+      const tipT = activeF - fullSegs;
+      // Precompute tip endpoint by interpolating along the "current" segment.
+      let tipX = 0, tipY = 0, tipZ = 0;
+      if (fullSegs < totalSegs) {
+        const a3 = fullSegs * 3;
+        const b3 = a3 + 3;
+        tipX = path[a3] + (path[b3] - path[a3]) * tipT;
+        tipY = path[a3 + 1] + (path[b3 + 1] - path[a3 + 1]) * tipT;
+        tipZ = path[a3 + 2] + (path[b3 + 2] - path[a3 + 2]) * tipT;
+      }
 
       for (let i = 0; i < n; i++) {
         const i3 = i * 3;
         const px = positions[i3];
         const py = positions[i3 + 1];
         const pz = positions[i3 + 2];
-        // Find min distance to polyline.
         let minSq = Infinity;
-        for (let seg = 0; seg < segCount; seg++) {
+        for (let seg = 0; seg < fullSegs; seg++) {
           const a3 = seg * 3;
           const b3 = a3 + 3;
           const d2 = pointSegmentDistSq(
-            px,
-            py,
-            pz,
-            path[a3],
-            path[a3 + 1],
-            path[a3 + 2],
-            path[b3],
-            path[b3 + 1],
-            path[b3 + 2],
+            px, py, pz,
+            path[a3], path[a3 + 1], path[a3 + 2],
+            path[b3], path[b3 + 1], path[b3 + 2],
           );
           if (d2 < minSq) minSq = d2;
           if (minSq <= rFullSq) break;
+        }
+        // Partial trailing segment ending at the interpolated tip.
+        if (fullSegs < totalSegs && tipT > 0 && minSq > rFullSq) {
+          const a3 = fullSegs * 3;
+          const d2 = pointSegmentDistSq(
+            px, py, pz,
+            path[a3], path[a3 + 1], path[a3 + 2],
+            tipX, tipY, tipZ,
+          );
+          if (d2 < minSq) minSq = d2;
         }
         let prox: number;
         if (minSq <= rFullSq) prox = 1;

@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useSimStore, type MasterFxParams } from "../state";
+import { useDraggable } from "./useDraggable";
 
 const PLOT_W = 360;
 const PLOT_H = 70;
@@ -16,17 +17,26 @@ const DB_MAX = 12;
  * response plot summarizes the combined LPF+HPF curve so the user can
  * see the shape at a glance.
  */
-export function MasterFrequencyPanel() {
+export function MasterFrequencyPanel({ visible = true }: { visible?: boolean }) {
   const fx = useSimStore((s) => s.masterFx);
   const setMasterFx = useSimStore((s) => s.setMasterFx);
   const upd = useCallback(
     (patch: Partial<MasterFxParams>) => setMasterFx(patch),
     [setMasterFx],
   );
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const { pos, handleProps } = useDraggable(panelRef);
+  const dynStyle: React.CSSProperties = pos
+    ? { top: pos.top, left: pos.left, bottom: "auto" }
+    : {};
+  if (!visible) return null;
   return (
-    <div style={panelStyle}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={titleStyle}>Master Frequency</div>
+    <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
+      <div
+        style={{ display: "flex", alignItems: "center", gap: 10, ...handleProps.style }}
+        onPointerDown={handleProps.onPointerDown}
+      >
+        <div style={titleStyle}>Master volume controls</div>
         <EngineToggle
           label="Drone"
           apply={fx.applyToDrone}
@@ -66,6 +76,144 @@ export function MasterFrequencyPanel() {
       <div style={{ marginTop: 4 }}>
         <ResponsePlot fx={fx} />
       </div>
+      <DroneSubmenu />
+      <PadSubmenu />
+      <SamplesSubmenu />
+    </div>
+  );
+}
+
+/**
+ * Collapsible per-engine sections for controls that don't belong in
+ * the shared EQ chain — currently just master volume for each engine,
+ * plus saturation for the drone. Handy for balancing levels without
+ * hopping between the /drones, /pads and /samples pages.
+ */
+function DroneSubmenu() {
+  const masterGain = useSimStore((s) => s.drone.masterGain);
+  const saturation = useSimStore((s) => s.drone.saturation);
+  const setDrone = useSimStore((s) => s.setDrone);
+  return (
+    <Submenu label="Drone">
+      <SliderRow
+        label="Volume"
+        min={0}
+        max={1}
+        step={0.01}
+        value={masterGain}
+        onChange={(v) => setDrone({ masterGain: v })}
+      />
+      <SliderRow
+        label="Saturation"
+        min={0}
+        max={1}
+        step={0.01}
+        value={saturation}
+        onChange={(v) => setDrone({ saturation: v })}
+      />
+    </Submenu>
+  );
+}
+
+function PadSubmenu() {
+  const master = useSimStore((s) => s.pad.master);
+  const setPad = useSimStore((s) => s.setPad);
+  return (
+    <Submenu label="Pad">
+      <SliderRow
+        label="Volume"
+        min={0}
+        max={1}
+        step={0.01}
+        value={master}
+        onChange={(v) => setPad({ master: v })}
+      />
+    </Submenu>
+  );
+}
+
+function SamplesSubmenu() {
+  const master = useSimStore((s) => s.samples.master);
+  const setSamples = useSimStore((s) => s.setSamples);
+  return (
+    <Submenu label="Samples">
+      <SliderRow
+        label="Volume"
+        min={0}
+        max={1}
+        step={0.01}
+        value={master}
+        onChange={(v) => setSamples({ master: v })}
+      />
+    </Submenu>
+  );
+}
+
+function Submenu({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div
+      style={{
+        marginTop: 6,
+        borderTop: "1px solid rgba(255,255,255,0.1)",
+        paddingTop: 6,
+      }}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          ...pillStyle,
+          background: "transparent",
+          borderColor: "transparent",
+          fontSize: 11,
+          padding: 0,
+          opacity: 0.9,
+          fontWeight: 600,
+          letterSpacing: 0.3,
+        }}
+        title={label}
+      >
+        {open ? "▾" : "▸"} {label}
+      </button>
+      {open && (
+        <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SliderRow({
+  label,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+      <span style={{ width: 72, opacity: 0.85 }}>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        style={{ flex: 1 }}
+      />
+      <span style={{ width: 40, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+        {value.toFixed(2)}
+      </span>
     </div>
   );
 }
@@ -279,7 +427,7 @@ function formatHz(v: number): string {
 
 const panelStyle: React.CSSProperties = {
   position: "fixed",
-  bottom: 12,
+  bottom: 60,
   left: 12,
   zIndex: 15,
   background: "rgba(10, 12, 20, 0.82)",

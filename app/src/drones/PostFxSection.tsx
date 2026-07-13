@@ -1,9 +1,9 @@
 import { useSimStore } from "../state";
 
 /**
- * Post-processing effect stack. Reverb + a single soft-clip
- * distortion, both mixable and togglable. Chain:
- *   voices → master EQ → tremolo → distortion → reverb → master.
+ * Post-processing effect stack. A single soft-clip distortion,
+ * mixable and togglable. Chain:
+ *   voices → master EQ → tremolo → distortion → master.
  */
 export function PostFxSection() {
   const drone = useSimStore((s) => s.drone);
@@ -19,42 +19,6 @@ export function PostFxSection() {
         flexWrap: "wrap",
       }}
     >
-      <FxCard
-        title="Reverb"
-        titleIcon="≈"
-        enabled={drone.reverbEnabled}
-        onToggle={(v) => setDrone({ reverbEnabled: v })}
-        accent="#22c55e"
-      >
-        <FxSlider
-          label="Mix"
-          icon="☕"
-          value={drone.reverbMix}
-          onChange={(v) => setDrone({ reverbMix: v })}
-          accent="#22c55e"
-        />
-        <FxSlider
-          label="Decay"
-          icon="⏱"
-          value={drone.reverbDecay}
-          min={0.1}
-          max={12}
-          step={0.1}
-          onChange={(v) => setDrone({ reverbDecay: v })}
-          accent="#22c55e"
-        />
-        <FxSlider
-          label="Pre-delay"
-          icon="⇢"
-          value={drone.reverbPreDelay}
-          min={0}
-          max={0.2}
-          step={0.001}
-          onChange={(v) => setDrone({ reverbPreDelay: v })}
-          accent="#22c55e"
-        />
-      </FxCard>
-
       <FxCard
         title="Distortion"
         titleIcon="⚡"

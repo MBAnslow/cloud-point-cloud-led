@@ -24,7 +24,7 @@ import {
   shadeLeds,
   type ShadeLight,
 } from "../lighting/shade";
-import { useSimStore } from "../state";
+import { hourInRange, useSimStore } from "../state";
 import { computeSkyLighting } from "../lighting/skyCycle";
 import { sharedLightningController } from "../lighting/lightning";
 import { WledStreamClient } from "../wled/client";
@@ -338,15 +338,30 @@ export function Leds() {
     const useLightning =
       lightning.enabled &&
       ledStreamPipeline.lightningStage &&
-      ledViewMode !== "breathIntensity";
+      ledViewMode !== "breathIntensity" &&
+      hourInRange(sky.timeHours, lightning.activeStartHour, lightning.activeEndHour);
     if (useLightning) {
       const now = performance.now();
-      lightningCtrl.update(now, lightning, ellipsoid, {
+      const substeps = Math.max(
+        1,
+        Math.min(20, Math.round(lightning.updatesPerFrame || 1)),
+      );
+      // Feed the controller N intermediate timestamps so the Poisson
+      // process runs `substeps` times per frame instead of once. Same
+      // total rate, but strikes are less clumped and the bolt
+      // population refreshes more often within a single render.
+      const lastMs = lightningCtrl.getLastUpdateMs();
+      const prev = lastMs > 0 ? lastMs : now;
+      const stepDt = (now - prev) / substeps;
+      const cloudXform = {
         tiltRad: cloudTiltRad,
         yawRad: cloudYawRad,
         offsetX: cloud.offsetX,
         offsetZ: cloud.offsetZ,
-      });
+      };
+      for (let s = 1; s <= substeps; s++) {
+        lightningCtrl.update(prev + stepDt * s, lightning, ellipsoid, cloudXform);
+      }
       lightningCtrl.contribute(
         buffers.positions,
         buffers.n,

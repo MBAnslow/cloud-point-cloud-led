@@ -9,6 +9,7 @@ import { DroneRuntime } from "./audio/DroneRuntime";
 import { PadRuntime } from "./audio/PadRuntime";
 import { SampleRuntime } from "./audio/SampleRuntime";
 import { MasterFxRuntime } from "./audio/MasterFxRuntime";
+import { LightningAudioRuntime } from "./audio/LightningAudioRuntime";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <HashRouter>
@@ -16,6 +17,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <PadRuntime />
     <SampleRuntime />
     <MasterFxRuntime />
+    <LightningAudioRuntime />
     <Routes>
       <Route path="/" element={<App />} />
       <Route path="/mapping" element={<MappingApp />} />

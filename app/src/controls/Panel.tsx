@@ -23,7 +23,6 @@ export function ControlPanel() {
   const setAmbient = useSimStore((s) => s.setAmbient);
   const setSky = useSimStore((s) => s.setSky);
   const setWled = useSimStore((s) => s.setWled);
-  const setLightning = useSimStore((s) => s.setLightning);
 
   const initial = useSimStore.getState();
 
@@ -189,71 +188,6 @@ export function ControlPanel() {
     [],
   );
 
-  const [lightningControls, setLightningControls] = useControls(
-    "Lightning",
-    () => ({
-      enabled: { value: initial.lightning.enabled, label: "enable" },
-      color: { value: initial.lightning.color, label: "color" },
-      intensity: {
-        value: initial.lightning.intensity,
-        min: 0,
-        max: 3,
-        step: 0.01,
-        label: "intensity",
-      },
-      strikesPerMinute: {
-        value: initial.lightning.strikesPerMinute,
-        min: 0,
-        max: 120,
-        step: 1,
-        label: "strikes / min",
-      },
-      boltRadius: {
-        value: initial.lightning.boltRadius,
-        min: 0.02,
-        max: 2,
-        step: 0.01,
-        label: "bolt radius (m)",
-      },
-      boltSegments: {
-        value: initial.lightning.boltSegments,
-        min: 4,
-        max: 24,
-        step: 1,
-        label: "bolt segments",
-      },
-      boltJitter: {
-        value: initial.lightning.boltJitter,
-        min: 0,
-        max: 1,
-        step: 0.01,
-        label: "bolt jitter",
-      },
-      flashDurationMs: {
-        value: initial.lightning.flashDurationMs,
-        min: 60,
-        max: 800,
-        step: 10,
-        label: "flash duration (ms)",
-      },
-      subFlashes: {
-        value: initial.lightning.subFlashes,
-        min: 0,
-        max: 4,
-        step: 1,
-        label: "sub-flashes",
-      },
-      spanScale: {
-        value: initial.lightning.spanScale,
-        min: 0.1,
-        max: 1,
-        step: 0.01,
-        label: "span scale",
-      },
-    }),
-    [],
-  );
-
   useControls("Presets", {
     save: button(() => {
       saveSnapshot(currentSnapshot());
@@ -302,19 +236,6 @@ export function ControlPanel() {
         enabled: false,
         host: snap.wled.host,
         fps: snap.wled.fps,
-      });
-      const ln = snap.lightning ?? initial.lightning;
-      setLightningControls({
-        enabled: ln.enabled,
-        color: ln.color,
-        intensity: ln.intensity,
-        strikesPerMinute: ln.strikesPerMinute,
-        boltRadius: ln.boltRadius,
-        boltSegments: ln.boltSegments,
-        boltJitter: ln.boltJitter,
-        flashDurationMs: ln.flashDurationMs,
-        subFlashes: ln.subFlashes,
-        spanScale: ln.spanScale,
       });
     }),
   });
@@ -389,33 +310,6 @@ export function ControlPanel() {
       fps: wledControls.fps,
     });
   }, [wledControls.enabled, wledControls.host, wledControls.fps, setWled]);
-
-  useEffect(() => {
-    setLightning({
-      enabled: lightningControls.enabled,
-      color: lightningControls.color,
-      intensity: lightningControls.intensity,
-      strikesPerMinute: lightningControls.strikesPerMinute,
-      boltRadius: lightningControls.boltRadius,
-      boltSegments: lightningControls.boltSegments,
-      boltJitter: lightningControls.boltJitter,
-      flashDurationMs: lightningControls.flashDurationMs,
-      subFlashes: lightningControls.subFlashes,
-      spanScale: lightningControls.spanScale,
-    });
-  }, [
-    lightningControls.enabled,
-    lightningControls.color,
-    lightningControls.intensity,
-    lightningControls.strikesPerMinute,
-    lightningControls.boltRadius,
-    lightningControls.boltSegments,
-    lightningControls.boltJitter,
-    lightningControls.flashDurationMs,
-    lightningControls.subFlashes,
-    lightningControls.spanScale,
-    setLightning,
-  ]);
 
   return null;
 }

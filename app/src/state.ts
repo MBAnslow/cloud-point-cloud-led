@@ -52,6 +52,43 @@ export interface LightningParams {
   subFlashes: number;
   /** Portion of the ellipsoid extents the bolt endpoints span, [0,1]. */
   spanScale: number;
+  /** Hour in [0, 24) at which lightning activity switches on. */
+  activeStartHour: number;
+  /** Hour in [0, 24) at which lightning activity switches off. */
+  activeEndHour: number;
+  /** Uploaded bolt-sound library. One is chosen at random per strike. */
+  boltSamples: LightningSample[];
+  /** Optional looping background ambience (rain, thunder rumble, …). */
+  backgroundSample: LightningSample | null;
+  /** Playback gain for bolt sounds, [0, 1]. */
+  boltGain: number;
+  /** Playback gain for the background loop, [0, 1]. */
+  backgroundGain: number;
+  /**
+   * ± range in cents for a random pitch shift applied to each bolt
+   * trigger (uniform in [-range, +range]). 0 = deterministic.
+   */
+  boltPitchJitterCents: number;
+  /**
+   * Substeps for the strike scheduler per animation frame. Larger
+   * values de-clump the Poisson process at high strike rates and
+   * refresh the bolt population more often within a single frame.
+   * Range 1..20.
+   */
+  updatesPerFrame: number;
+}
+
+/**
+ * Metadata for a lightning audio asset. The binary blob lives in
+ * IndexedDB (shared with the samples panel storage) keyed by `id`;
+ * only these lightweight fields make it into the localStorage
+ * snapshot. `durationSec` is optional (background loop doesn't need
+ * it) and populated at upload time when known.
+ */
+export interface LightningSample {
+  id: string;
+  name: string;
+  durationSec?: number;
 }
 
 /** Ellipsoid semi-axes in metres. */
@@ -458,14 +495,6 @@ export interface DroneParams {
   distortionDrive: number;
   /** Distortion wet mix, [0, 1]. */
   distortionMix: number;
-  /** Post-FX: reverb. */
-  reverbEnabled: boolean;
-  /** Reverb wet mix, [0, 1]. */
-  reverbMix: number;
-  /** Reverb tail length in seconds. */
-  reverbDecay: number;
-  /** Reverb pre-delay in seconds. */
-  reverbPreDelay: number;
   notes: DroneNote[];
 }
 
@@ -542,10 +571,6 @@ export interface PadParams {
   filterLfoDepth: number;
   /** Waveshaper drive, [0, 1]. 0 = clean. */
   saturation: number;
-  /** Reverb wet mix, [0, 1]. */
-  reverbMix: number;
-  /** Reverb tail length in seconds. */
-  reverbDecay: number;
   notes: PadNote[];
 }
 
@@ -681,6 +706,23 @@ export function periodContainsHour(p: DayPeriod, hour: number): boolean {
   return p.endHour >= p.startHour
     ? n >= p.startHour && n < p.endHour
     : n >= p.startHour || n < p.endHour;
+}
+
+/**
+ * True when `hour` sits inside `[startHour, endHour)` on the cyclic
+ * 24h axis. When `endHour < startHour` the range wraps midnight
+ * (e.g. 20 → 4 covers 20..24 and 0..4).
+ */
+export function hourInRange(
+  hour: number,
+  startHour: number,
+  endHour: number,
+): boolean {
+  const n = ((hour % 24) + 24) % 24;
+  if (endHour === startHour) return false;
+  return endHour > startHour
+    ? n >= startHour && n < endHour
+    : n >= startHour || n < endHour;
 }
 
 export interface WledParams {
@@ -969,6 +1011,14 @@ const DEFAULTS = {
     flashDurationMs: 220,
     subFlashes: 2,
     spanScale: 0.85,
+    activeStartHour: 20,
+    activeEndHour: 4,
+    boltSamples: [],
+    backgroundSample: null,
+    boltGain: 0.8,
+    backgroundGain: 0.35,
+    boltPitchJitterCents: 200,
+    updatesPerFrame: 1,
   } as LightningParams,
   drone: {
     enabled: false,
@@ -987,10 +1037,6 @@ const DEFAULTS = {
     distortionEnabled: false,
     distortionDrive: 0.5,
     distortionMix: 0.5,
-    reverbEnabled: false,
-    reverbMix: 0.35,
-    reverbDecay: 4.5,
-    reverbPreDelay: 0.03,
     // A single C1 sustained through the whole 24h so the app makes
     // sound out of the box; users layer more notes on top.
     notes: [
@@ -1027,8 +1073,6 @@ const DEFAULTS = {
     filterLfoRateHz: 0.4,
     filterLfoDepth: 0,
     saturation: 0.15,
-    reverbMix: 0.35,
-    reverbDecay: 3.0,
     notes: [],
   } as PadParams,
   samples: {
@@ -1237,7 +1281,6 @@ function resolveDroneParams(
   };
   const attackLegacy = (saved as Record<string, unknown>).attackSec;
   const releaseLegacy = (saved as Record<string, unknown>).releaseSec;
-  const legacyReverbType = (saved as Record<string, unknown>).reverbType;
   return {
     enabled:
       typeof saved.enabled === "boolean" ? saved.enabled : DEFAULTS.drone.enabled,
@@ -1259,34 +1302,6 @@ function resolveDroneParams(
     distortionEnabled: pick("distortionEnabled"),
     distortionDrive: pick("distortionDrive"),
     distortionMix: pick("distortionMix"),
-    reverbEnabled: pick("reverbEnabled"),
-    reverbMix: pick("reverbMix"),
-    reverbDecay:
-      typeof saved.reverbDecay === "number"
-        ? saved.reverbDecay
-        : typeof legacyReverbType === "string"
-          ? (
-              {
-                hall: 4.5,
-                plate: 2.2,
-                spring: 1.2,
-                cosmic: 9,
-              } as const
-            )[legacyReverbType] ?? DEFAULTS.drone.reverbDecay
-          : pick("reverbDecay"),
-    reverbPreDelay:
-      typeof saved.reverbPreDelay === "number"
-        ? saved.reverbPreDelay
-        : typeof legacyReverbType === "string"
-          ? (
-              {
-                hall: 0.03,
-                plate: 0.01,
-                spring: 0.005,
-                cosmic: 0.12,
-              } as const
-            )[legacyReverbType] ?? DEFAULTS.drone.reverbPreDelay
-          : pick("reverbPreDelay"),
     notes,
   };
 }
@@ -1327,8 +1342,6 @@ function resolvePadParams(
     filterLfoRateHz: pick("filterLfoRateHz"),
     filterLfoDepth: pick("filterLfoDepth"),
     saturation: pick("saturation"),
-    reverbMix: pick("reverbMix"),
-    reverbDecay: pick("reverbDecay"),
     notes,
   };
 }

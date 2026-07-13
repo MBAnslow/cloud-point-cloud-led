@@ -4,8 +4,8 @@ import { PadFilterResponse } from "./PadFilterResponse";
 const WAVEFORMS: PadWaveform[] = ["sine", "sawtooth", "square", "triangle"];
 
 /**
- * Warm-pad synth controls: voicing, envelope, filter, chorus, reverb,
- * master. Intentionally simpler than the drone synth panel — the pad
+ * Warm-pad synth controls: voicing, envelope, filter, chorus, master.
+ * Intentionally simpler than the drone synth panel — the pad
  * uses one global patch and no per-note effects.
  */
 export function PadSynthPanel() {
@@ -186,7 +186,7 @@ export function PadSynthPanel() {
           />
           <div style={hint}>
             Waveshaper drive; 0 is transparent. Adds warmth and edge
-            before the chorus / reverb.
+            before the chorus.
           </div>
         </Card>
 
@@ -208,26 +208,6 @@ export function PadSynthPanel() {
             max={1}
             step={0.01}
             onChange={(v) => setPad({ chorusDepth: v })}
-          />
-        </Card>
-
-        <Card title="Reverb">
-          <Slider
-            label="Mix"
-            value={pad.reverbMix}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => setPad({ reverbMix: v })}
-          />
-          <Slider
-            label="Decay"
-            value={pad.reverbDecay}
-            min={0.2}
-            max={10}
-            step={0.05}
-            unit="s"
-            onChange={(v) => setPad({ reverbDecay: v })}
           />
         </Card>
 

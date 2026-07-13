@@ -127,9 +127,6 @@ interface Voice {
 export class DroneEngine {
   private started = false;
   private master: Tone.Gain | null = null;
-  private reverb: Tone.Reverb | null = null;
-  private reverbDryGain: Tone.Gain | null = null;
-  private reverbWetGain: Tone.Gain | null = null;
   private distortion: Tone.Distortion | null = null;
   private saturation: Tone.WaveShaper | null = null;
   private saturationMix: Tone.CrossFade | null = null;
@@ -143,8 +140,6 @@ export class DroneEngine {
   private currentWaveform: DroneWaveform = "triangle";
   private currentTremoloShape: DroneLfoShape = "sine";
   private currentDistortionDrive = -1;
-  private currentReverbDecay = -1;
-  private currentReverbPreDelay = -1;
 
   private shapeSample(shape: DroneLfoShape, phase01: number): number {
     const p = phase01 - Math.floor(phase01);
@@ -191,24 +186,8 @@ export class DroneEngine {
     // MasterFxBus decides whether to route it through the EQ chain or
     // directly to destination via `setRouting`.
     this.master = new Tone.Gain(0);
-    this.reverb = new Tone.Reverb({
-      decay: 4.5,
-      preDelay: 0.03,
-      // Keep reverb itself fully wet; we control dry/wet with explicit
-      // parallel gain nodes for deterministic behavior across Tone versions.
-      wet: 1,
-    });
-    // Reverb IRs are async to generate; ignore errors — the node
-    // still passes audio through even before the IR is ready.
-    this.reverb.generate().catch(() => undefined);
-    this.reverbDryGain = new Tone.Gain(1);
-    this.reverbWetGain = new Tone.Gain(0);
-    this.reverbDryGain.connect(this.master);
-    this.reverbWetGain.connect(this.master);
-    this.reverb.connect(this.reverbWetGain);
     this.distortion = new Tone.Distortion({ distortion: 0, wet: 0, oversample: "2x" });
-    this.distortion.connect(this.reverbDryGain);
-    this.distortion.connect(this.reverb);
+    this.distortion.connect(this.master);
     this.tremoloGain = new Tone.Gain(1);
     this.tremoloGain.connect(this.distortion);
     // --- Master saturation: tanh soft-clip waveshaper crossfaded with
@@ -266,10 +245,7 @@ export class DroneEngine {
       !this.tremoloGain ||
       !this.tremoloLfo ||
       !this.saturationMix ||
-      !this.distortion ||
-      !this.reverb ||
-      !this.reverbDryGain ||
-      !this.reverbWetGain
+      !this.distortion
     )
       return;
     this.master.gain.rampTo(p.enabled ? p.masterGain : 0, 0.05);
@@ -312,23 +288,6 @@ export class DroneEngine {
       p.distortionEnabled ? Math.max(0, Math.min(1, p.distortionMix)) : 0,
       0.1,
     );
-
-    // Reverb: regenerate IR only when params change.
-    const decay = Math.max(0.1, p.reverbDecay);
-    const preDelay = Math.max(0, p.reverbPreDelay);
-    if (
-      Math.abs(decay - this.currentReverbDecay) > 0.01 ||
-      Math.abs(preDelay - this.currentReverbPreDelay) > 0.001
-    ) {
-      this.reverb.decay = decay;
-      this.reverb.preDelay = preDelay;
-      this.reverb.generate().catch(() => undefined);
-      this.currentReverbDecay = decay;
-      this.currentReverbPreDelay = preDelay;
-    }
-    const reverbMix = p.reverbEnabled ? Math.max(0, Math.min(1, p.reverbMix)) : 0;
-    this.reverbDryGain.gain.rampTo(1 - reverbMix, 0.1);
-    this.reverbWetGain.gain.rampTo(reverbMix, 0.1);
 
     if (!p.enabled) {
       for (const v of this.voices.values()) this.release(v, p);
