@@ -40,20 +40,28 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           enabled
         </label>
         <label style={inlineLabel}>
-          color
-          <input
-            type="color"
-            value={lightning.color}
-            onChange={(e) => upd({ color: e.target.value })}
-            style={{
-              width: 26,
-              height: 20,
-              padding: 0,
-              border: "1px solid rgba(255,255,255,0.15)",
-              borderRadius: 3,
-              background: "transparent",
-            }}
-          />
+          colors
+          {[0, 1, 2].map((i) => (
+            <input
+              key={i}
+              type="color"
+              value={lightning.colors[i]}
+              onChange={(e) => {
+                const next = [...lightning.colors] as [string, string, string];
+                next[i] = e.target.value;
+                upd({ colors: next });
+              }}
+              style={{
+                width: 26,
+                height: 20,
+                padding: 0,
+                marginLeft: i === 0 ? 0 : 2,
+                border: "1px solid rgba(255,255,255,0.15)",
+                borderRadius: 3,
+                background: "transparent",
+              }}
+            />
+          ))}
         </label>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>

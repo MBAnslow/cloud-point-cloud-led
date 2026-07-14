@@ -7,7 +7,16 @@ export interface BoltStrike {
   durationMs: number;
   /** Flat [x0,y0,z0, x1,y1,z1, ...] world-space bolt polyline. */
   path: Float32Array;
-  color: [number, number, number];
+  /**
+   * Three RGB stops. The effective bolt color interpolates through
+   * these across the flash: stop0 at u=0, stop1 at u=0.5, stop2 at
+   * u=1. Order is shuffled per strike.
+   */
+  colorStops: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ];
   /** Randomised sub-flash offsets in [0,1] within the flash window. */
   subOffsets: number[];
   /** Sampled per-strike intensity (from `intensityRange`). */
@@ -25,6 +34,60 @@ function sampleRange(range: [number, number]): number {
 
 function rand(): number {
   return Math.random();
+}
+
+function shuffledColorStops(
+  colors: [string, string, string],
+): [
+  [number, number, number],
+  [number, number, number],
+  [number, number, number],
+] {
+  const idx = [0, 1, 2];
+  for (let i = idx.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = idx[i];
+    idx[i] = idx[j];
+    idx[j] = tmp;
+  }
+  return [
+    hexToVec3(colors[idx[0]]),
+    hexToVec3(colors[idx[1]]),
+    hexToVec3(colors[idx[2]]),
+  ];
+}
+
+/**
+ * Interpolate through a 3-stop color ramp at u in [0,1]. u=0 -> stop0,
+ * u=0.5 -> stop1, u=1 -> stop2. Linear between adjacent stops.
+ */
+function sampleColorRamp(
+  stops: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ],
+  u: number,
+): [number, number, number] {
+  const uu = u < 0 ? 0 : u > 1 ? 1 : u;
+  if (uu <= 0.5) {
+    const t = uu * 2;
+    const a = stops[0];
+    const b = stops[1];
+    return [
+      a[0] + (b[0] - a[0]) * t,
+      a[1] + (b[1] - a[1]) * t,
+      a[2] + (b[2] - a[2]) * t,
+    ];
+  }
+  const t = (uu - 0.5) * 2;
+  const a = stops[1];
+  const b = stops[2];
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+  ];
 }
 
 /**
@@ -287,7 +350,7 @@ export class LightningController {
         bornMs: nowMs,
         durationMs: duration,
         path,
-        color: hexToVec3(params.color),
+        colorStops: shuffledColorStops(params.colors),
         subOffsets: subs,
         intensity,
         radius,
@@ -342,9 +405,10 @@ export class LightningController {
       }
       const brightness = 1 + subBump;
       const strikeGain = Math.max(0, s.intensity) * brightness;
-      const cr0 = s.color[0] * strikeGain;
-      const cg0 = s.color[1] * strikeGain;
-      const cb0 = s.color[2] * strikeGain;
+      const rampColor = sampleColorRamp(s.colorStops, u);
+      const cr0 = rampColor[0] * strikeGain;
+      const cg0 = rampColor[1] * strikeGain;
+      const cb0 = rampColor[2] * strikeGain;
 
       // Precompute per-segment envelope so the inner LED loop only does
       // distance + multiply-add work.
@@ -413,6 +477,16 @@ export class LightningController {
   strikeEnvelope(strike: BoltStrike, nowMs: number): number {
     const age = nowMs - strike.bornMs;
     return envelope(age, strike.durationMs, strike.subOffsets);
+  }
+
+  /**
+   * Effective 3-stop-interpolated color for a strike at `nowMs`, matched
+   * to the color used by `contribute` at the same instant.
+   */
+  strikeColor(strike: BoltStrike, nowMs: number): [number, number, number] {
+    const age = nowMs - strike.bornMs;
+    const u = strike.durationMs > 0 ? age / strike.durationMs : 0;
+    return sampleColorRamp(strike.colorStops, u);
   }
 }
 

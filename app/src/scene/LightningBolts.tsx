@@ -14,6 +14,15 @@ interface VisibleBolt {
   points: Array<[number, number, number]>;
   opacity: number;
   head: number;
+  color: string;
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const c = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v * 255)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${c(r)}${c(g)}${c(b)}`;
 }
 
 let nextId = 1;
@@ -54,7 +63,14 @@ export function LightningBolts() {
       const head = boltTravelHead(now - s.bornMs, s.durationMs);
       const points = partialPath(s.path, head);
       if (points.length < 2) continue;
-      next.push({ id, points, opacity: Math.min(1, env), head });
+      const c = sharedLightningController.strikeColor(s, now);
+      next.push({
+        id,
+        points,
+        opacity: Math.min(1, env),
+        head,
+        color: rgbToHex(c[0], c[1], c[2]),
+      });
     }
     // Cheap change check: compare counts + ids + rounded opacities.
     let changed = next.length !== bolts.length;
@@ -81,7 +97,7 @@ export function LightningBolts() {
         <Line
           key={b.id}
           points={b.points}
-          color={lightning.color}
+          color={b.color}
           lineWidth={2}
           transparent
           opacity={b.opacity}

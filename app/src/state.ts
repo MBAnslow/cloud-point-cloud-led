@@ -34,8 +34,12 @@ export interface LedStreamPipeline {
 
 export interface LightningParams {
   enabled: boolean;
-  /** Bolt tint color. */
-  color: string;
+  /**
+   * Three bolt tint colors. Each strike shuffles the order and
+   * interpolates through them across its flash so the color varies
+   * mid-strike (start → mid → end).
+   */
+  colors: [string, string, string];
   /**
    * Per-strike additive gain range applied to the per-LED
    * contribution. Each strike samples a random value from this
@@ -1019,7 +1023,7 @@ const DEFAULTS = {
   } as BreathParams,
   lightning: {
     enabled: false,
-    color: "#cfe7ff",
+    colors: ["#cfe7ff", "#a8c8ff", "#fff2c9"],
     intensityRange: [0.9, 1.5],
     strikesPerMinute: 12,
     boltRadius: 0.25,
@@ -1526,6 +1530,23 @@ function resolveLightning(input: unknown): LightningParams {
   return {
     ...d,
     ...saved,
+    colors: (() => {
+      const c = (saved as Record<string, unknown>).colors;
+      if (
+        Array.isArray(c) &&
+        c.length === 3 &&
+        typeof c[0] === "string" &&
+        typeof c[1] === "string" &&
+        typeof c[2] === "string"
+      ) {
+        return [c[0], c[1], c[2]] as [string, string, string];
+      }
+      const legacy = (saved as Record<string, unknown>).color;
+      if (typeof legacy === "string") {
+        return [legacy, legacy, legacy] as [string, string, string];
+      }
+      return d.colors;
+    })(),
     intensityRange: asPairFromScalar(
       "intensityRange",
       "intensity",
