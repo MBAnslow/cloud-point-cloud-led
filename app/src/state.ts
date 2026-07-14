@@ -36,22 +36,35 @@ export interface LightningParams {
   enabled: boolean;
   /** Bolt tint color. */
   color: string;
-  /** Additive gain applied to the per-LED contribution. */
-  intensity: number;
+  /**
+   * Per-strike additive gain range applied to the per-LED
+   * contribution. Each strike samples a random value from this
+   * `[min, max]` window at birth time.
+   */
+  intensityRange: [number, number];
   /** Average number of strikes per minute (Poisson-ish scheduling). */
   strikesPerMinute: number;
-  /** Radius (m) where an LED gets full contribution; fades to zero at 2x. */
+  /**
+   * Radius (m) around the bolt where an LED gets full contribution;
+   * fades to zero at 2x. Fixed value (not sampled per strike).
+   */
   boltRadius: number;
   /** Number of samples in a bolt polyline (jaggedness). */
   boltSegments: number;
-  /** Lateral randomness of segment midpoints, [0,1]. */
-  boltJitter: number;
-  /** Duration of the flash envelope, ms. */
-  flashDurationMs: number;
+  /** Per-strike lateral randomness range, [0,1]. Sampled per strike. */
+  boltJitterRange: [number, number];
+  /** Per-strike flash-envelope duration range, ms. Sampled per strike. */
+  flashDurationMsRange: [number, number];
   /** Number of flicker sub-pulses within a single strike. */
   subFlashes: number;
-  /** Portion of the ellipsoid extents the bolt endpoints span, [0,1]. */
+  /** Max portion of the ellipsoid extents the bolt endpoints span, [0,1]. */
   spanScale: number;
+  /**
+   * Minimum bolt length as a fraction of the mean ellipsoid radius.
+   * If randomly sampled endpoints fall closer than this, we resample
+   * so bolts don't degenerate into a tiny spark.
+   */
+  minSpanScale: number;
   /** Hour in [0, 24) at which lightning activity switches on. */
   activeStartHour: number;
   /** Hour in [0, 24) at which lightning activity switches off. */
@@ -60,7 +73,11 @@ export interface LightningParams {
   boltSamples: LightningSample[];
   /** Optional looping background ambience (rain, thunder rumble, …). */
   backgroundSample: LightningSample | null;
-  /** Playback gain for bolt sounds, [0, 1]. */
+  /**
+   * Base playback gain for bolt sounds. The actual per-trigger gain
+   * is scaled by the strike's sampled intensity so louder flashes get
+   * louder bolts and gentler flashes fade toward this floor.
+   */
   boltGain: number;
   /** Playback gain for the background loop, [0, 1]. */
   backgroundGain: number;
@@ -70,12 +87,12 @@ export interface LightningParams {
    */
   boltPitchJitterCents: number;
   /**
-   * Substeps for the strike scheduler per animation frame. Larger
-   * values de-clump the Poisson process at high strike rates and
-   * refresh the bolt population more often within a single frame.
-   * Range 1..20.
+   * Target simulation FPS for lightning updates + LED contribution.
+   * Lower values create a stroboscopic, film-like flicker by
+   * refreshing bolt state less often than the render loop.
+   * Range 1..60.
    */
-  updatesPerFrame: number;
+  simFps: number;
 }
 
 /**
@@ -1003,14 +1020,15 @@ const DEFAULTS = {
   lightning: {
     enabled: false,
     color: "#cfe7ff",
-    intensity: 1.2,
+    intensityRange: [0.9, 1.5],
     strikesPerMinute: 12,
     boltRadius: 0.25,
     boltSegments: 10,
-    boltJitter: 0.35,
-    flashDurationMs: 220,
+    boltJitterRange: [0.25, 0.55],
+    flashDurationMsRange: [160, 320],
     subFlashes: 2,
     spanScale: 0.85,
+    minSpanScale: 0.5,
     activeStartHour: 20,
     activeEndHour: 4,
     boltSamples: [],
@@ -1018,7 +1036,7 @@ const DEFAULTS = {
     boltGain: 0.8,
     backgroundGain: 0.35,
     boltPitchJitterCents: 200,
-    updatesPerFrame: 1,
+    simFps: 60,
   } as LightningParams,
   drone: {
     enabled: false,
@@ -1475,6 +1493,66 @@ function resolveMasterFx(
   return d;
 }
 
+/**
+ * Reconcile a saved `lightning` payload. Any missing range field is
+ * back-filled from its legacy scalar so previously-saved snapshots
+ * (before the ranges existed) keep working with sensible values.
+ */
+function resolveLightning(input: unknown): LightningParams {
+  const d = DEFAULTS.lightning;
+  if (!input || typeof input !== "object") return d;
+  const saved = input as Partial<LightningParams> & Record<string, unknown>;
+  const asPair = (
+    v: unknown,
+    fallback: [number, number],
+  ): [number, number] => {
+    if (Array.isArray(v) && v.length === 2 &&
+        typeof v[0] === "number" && typeof v[1] === "number") {
+      return [Math.min(v[0], v[1]), Math.max(v[0], v[1])];
+    }
+    return fallback;
+  };
+  const asPairFromScalar = (
+    rangeKey: keyof LightningParams,
+    legacyKey: string,
+    fallback: [number, number],
+  ): [number, number] => {
+    const explicit = (saved as Record<string, unknown>)[rangeKey as string];
+    if (Array.isArray(explicit)) return asPair(explicit, fallback);
+    const scalar = (saved as Record<string, unknown>)[legacyKey];
+    if (typeof scalar === "number") return [scalar, scalar];
+    return fallback;
+  };
+  return {
+    ...d,
+    ...saved,
+    intensityRange: asPairFromScalar(
+      "intensityRange",
+      "intensity",
+      d.intensityRange,
+    ),
+    boltRadius: (() => {
+      const v = (saved as Record<string, unknown>).boltRadius;
+      if (typeof v === "number") return v;
+      const r = (saved as Record<string, unknown>).boltRadiusRange;
+      if (Array.isArray(r) && typeof r[0] === "number" && typeof r[1] === "number") {
+        return (r[0] + r[1]) / 2;
+      }
+      return d.boltRadius;
+    })(),
+    boltJitterRange: asPairFromScalar(
+      "boltJitterRange",
+      "boltJitter",
+      d.boltJitterRange,
+    ),
+    flashDurationMsRange: asPairFromScalar(
+      "flashDurationMsRange",
+      "flashDurationMs",
+      d.flashDurationMsRange,
+    ),
+  };
+}
+
 /** Seed the store from a localStorage snapshot if one exists. */
 function initialState() {
   const saved = loadSnapshot();
@@ -1510,7 +1588,7 @@ function initialState() {
         ...saved.breath?.area,
       },
     },
-    lightning: { ...DEFAULTS.lightning, ...saved.lightning },
+    lightning: resolveLightning(saved.lightning),
     drone: resolveDroneParams(
       saved.drone as
         | (Partial<DroneParams> & Record<string, unknown>)
@@ -1764,7 +1842,7 @@ export function applySnapshot(snap: Snapshot): Snapshot {
       ...snap.breath?.area,
     },
   });
-  s.setLightning({ ...DEFAULTS.lightning, ...snap.lightning });
+  s.setLightning(resolveLightning(snap.lightning));
   s.setDrone(
     resolveDroneParams(
       snap.drone as

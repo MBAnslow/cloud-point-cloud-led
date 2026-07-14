@@ -5,6 +5,7 @@ import {
   type LightningSample,
 } from "../state";
 import { useDraggable } from "./useDraggable";
+import { RangeSlider } from "./RangeSlider";
 import { putSampleBlob, deleteSampleBlob } from "../samples/sampleStorage";
 
 /**
@@ -56,13 +57,15 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
         </label>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
-        <SliderRow
+        <RangeRow
           label="Intensity"
-          value={lightning.intensity}
           min={0}
           max={3}
           step={0.01}
-          onChange={(v) => upd({ intensity: v })}
+          low={lightning.intensityRange[0]}
+          high={lightning.intensityRange[1]}
+          onChange={(lo, hi) => upd({ intensityRange: [lo, hi] })}
+          format={(lo, hi) => `${lo.toFixed(2)} – ${hi.toFixed(2)}`}
         />
         <SliderRow
           label="Strikes / min"
@@ -75,11 +78,12 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
         />
         <SliderRow
           label="Bolt radius"
-          value={lightning.boltRadius}
           min={0.02}
           max={2}
           step={0.01}
+          value={lightning.boltRadius}
           onChange={(v) => upd({ boltRadius: v })}
+          formatValue={(v) => v.toFixed(2)}
         />
         <SliderRow
           label="Segments"
@@ -90,22 +94,25 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           onChange={(v) => upd({ boltSegments: Math.round(v) })}
           formatValue={(v) => v.toFixed(0)}
         />
-        <SliderRow
+        <RangeRow
           label="Jitter"
-          value={lightning.boltJitter}
           min={0}
           max={1}
           step={0.01}
-          onChange={(v) => upd({ boltJitter: v })}
+          low={lightning.boltJitterRange[0]}
+          high={lightning.boltJitterRange[1]}
+          onChange={(lo, hi) => upd({ boltJitterRange: [lo, hi] })}
+          format={(lo, hi) => `${lo.toFixed(2)} – ${hi.toFixed(2)}`}
         />
-        <SliderRow
+        <RangeRow
           label="Flash (ms)"
-          value={lightning.flashDurationMs}
           min={60}
           max={2000}
           step={10}
-          onChange={(v) => upd({ flashDurationMs: v })}
-          formatValue={(v) => v.toFixed(0)}
+          low={lightning.flashDurationMsRange[0]}
+          high={lightning.flashDurationMsRange[1]}
+          onChange={(lo, hi) => upd({ flashDurationMsRange: [lo, hi] })}
+          format={(lo, hi) => `${lo.toFixed(0)} – ${hi.toFixed(0)}`}
         />
         <SliderRow
           label="Sub-flashes"
@@ -116,22 +123,24 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           onChange={(v) => upd({ subFlashes: Math.round(v) })}
           formatValue={(v) => v.toFixed(0)}
         />
-        <SliderRow
-          label="Span scale"
-          value={lightning.spanScale}
-          min={0.1}
+        <RangeRow
+          label="Span"
+          min={0}
           max={1}
           step={0.01}
-          onChange={(v) => upd({ spanScale: v })}
+          low={Math.min(1, lightning.minSpanScale)}
+          high={lightning.spanScale}
+          onChange={(lo, hi) => upd({ minSpanScale: lo, spanScale: hi })}
+          format={(lo, hi) => `${lo.toFixed(2)} – ${hi.toFixed(2)}`}
         />
         <SliderRow
-          label="Updates/frame"
-          value={lightning.updatesPerFrame}
+          label="Sim FPS"
+          value={lightning.simFps}
           min={1}
-          max={20}
+          max={60}
           step={1}
-          onChange={(v) => upd({ updatesPerFrame: Math.round(v) })}
-          formatValue={(v) => v.toFixed(0)}
+          onChange={(v) => upd({ simFps: Math.round(v) })}
+          formatValue={(v) => `${v.toFixed(0)} fps`}
         />
         <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", marginTop: 4, paddingTop: 4 }}>
           <div style={{ fontSize: 10, opacity: 0.7, marginBottom: 4 }}>
@@ -218,7 +227,7 @@ function AudioSection({
         label="Bolt gain"
         value={lightning.boltGain}
         min={0}
-        max={1}
+        max={3}
         step={0.01}
         onChange={(v) => upd({ boltGain: v })}
       />
@@ -358,6 +367,48 @@ async function ingestFile(file: File): Promise<LightningSample | null> {
     console.warn("[lightning] file ingest failed", err);
     return null;
   }
+}
+
+function RangeRow({
+  label,
+  min,
+  max,
+  step,
+  low,
+  high,
+  onChange,
+  format,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  low: number;
+  high: number;
+  onChange: (low: number, high: number) => void;
+  format?: (low: number, high: number) => string;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+      <span style={{ width: 82, opacity: 0.85 }}>{label}</span>
+      <RangeSlider
+        min={min}
+        max={max}
+        step={step}
+        value={[low, high]}
+        onChange={([lo, hi]) => onChange(lo, hi)}
+      />
+      <span
+        style={{
+          width: 90,
+          textAlign: "right",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {format ? format(low, high) : `${low.toFixed(2)}–${high.toFixed(2)}`}
+      </span>
+    </div>
+  );
 }
 
 const miniBtn: React.CSSProperties = {

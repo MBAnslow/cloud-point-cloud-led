@@ -61,7 +61,7 @@ export function LightningAudioRuntime(): null {
       let newMax = lastMaxBorn;
       for (const s of strikes) {
         if (s.bornMs > lastMaxBorn) {
-          engine.triggerBolt(p);
+          engine.triggerBolt(p, s.intensity);
           if (s.bornMs > newMax) newMax = s.bornMs;
         }
       }

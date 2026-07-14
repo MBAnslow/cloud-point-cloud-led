@@ -50,8 +50,11 @@ export class LightningAudioEngine {
   /**
    * Trigger a bolt sound. Called once per newly-spawned strike from
    * the runtime. Chooses a random sample and applies pitch jitter.
+   * `strikeIntensity` is the per-strike value sampled from the
+   * lightning intensity range; used to scale the base `boltGain` so
+   * louder flashes get louder bolts.
    */
-  triggerBolt(p: LightningParams): void {
+  triggerBolt(p: LightningParams, strikeIntensity: number): void {
     if (!this.started || !this.out) return;
     if (!p.enabled) return;
     if (p.boltSamples.length === 0) return;
@@ -60,18 +63,18 @@ export class LightningAudioEngine {
     if (!sample) return;
     const buf = this.boltBuffers.get(sample.id);
     if (!buf) {
-      // Kick off a load for next time, then skip this trigger.
       void this.ensureBoltBuffer(sample.id);
       return;
     }
     const cents =
       (Math.random() * 2 - 1) * Math.max(0, p.boltPitchJitterCents);
     const rate = Math.pow(2, cents / 1200);
+    const gain = Math.max(0, p.boltGain) * Math.max(0, strikeIntensity);
     const player = new Tone.Player();
     (player as unknown as { buffer: Tone.ToneAudioBuffer }).buffer =
       new Tone.ToneAudioBuffer(buf);
     player.playbackRate = rate;
-    player.volume.value = Tone.gainToDb(Math.max(0.0001, p.boltGain));
+    player.volume.value = Tone.gainToDb(Math.max(0.0001, gain));
     player.connect(this.out);
     try {
       player.start();

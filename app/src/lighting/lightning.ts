@@ -10,6 +10,17 @@ export interface BoltStrike {
   color: [number, number, number];
   /** Randomised sub-flash offsets in [0,1] within the flash window. */
   subOffsets: number[];
+  /** Sampled per-strike intensity (from `intensityRange`). */
+  intensity: number;
+  /** Radius (m) at strike time (copied from `boltRadius`). */
+  radius: number;
+}
+
+function sampleRange(range: [number, number]): number {
+  const lo = Math.min(range[0], range[1]);
+  const hi = Math.max(range[0], range[1]);
+  if (hi <= lo) return lo;
+  return lo + Math.random() * (hi - lo);
 }
 
 function rand(): number {
@@ -50,9 +61,23 @@ function sampleBoltPath(
   segments: number,
   jitter: number,
   spanScale: number,
+  minSpanScale: number,
 ): Float32Array {
-  const a = samplePointInEllipsoid(ellipsoid, spanScale);
-  const b = samplePointInEllipsoid(ellipsoid, spanScale);
+  const meanR = (ellipsoid.rx + ellipsoid.ry + ellipsoid.rz) / 3;
+  const minLen = Math.max(0, minSpanScale) * meanR;
+  let a = samplePointInEllipsoid(ellipsoid, spanScale);
+  let b = samplePointInEllipsoid(ellipsoid, spanScale);
+  // Resample until the endpoints are at least `minLen` apart so bolts
+  // don't degenerate into a tiny spark. Bounded retries so a degenerate
+  // ellipsoid or overly-strict minimum can't spin forever.
+  for (let tries = 0; tries < 12; tries++) {
+    const ddx = b[0] - a[0];
+    const ddy = b[1] - a[1];
+    const ddz = b[2] - a[2];
+    if (ddx * ddx + ddy * ddy + ddz * ddz >= minLen * minLen) break;
+    a = samplePointInEllipsoid(ellipsoid, spanScale);
+    b = samplePointInEllipsoid(ellipsoid, spanScale);
+  }
   const ax = a[0];
   const ay = a[1];
   const az = a[2];
@@ -238,12 +263,20 @@ export class LightningController {
     if (rand() < remaining) toSpawn += 1;
 
     for (let i = 0; i < toSpawn; i++) {
+      // Per-strike parameter sampling: each strike freezes a random
+      // draw from every configured range so the strike keeps stable
+      // values through its whole flash envelope.
+      const jitter = Math.max(0, sampleRange(params.boltJitterRange));
+      const duration = Math.max(30, sampleRange(params.flashDurationMsRange));
+      const intensity = Math.max(0, sampleRange(params.intensityRange));
+      const radius = Math.max(0.01, params.boltRadius);
       const path = sampleBoltPath(
         ellipsoid,
         transform,
         Math.max(2, Math.floor(params.boltSegments)),
-        Math.max(0, params.boltJitter),
+        jitter,
         Math.max(0.05, Math.min(1, params.spanScale)),
+        Math.max(0, Math.min(2, params.minSpanScale ?? 0)),
       );
       const subs: number[] = [];
       const subCount = Math.max(0, Math.floor(params.subFlashes));
@@ -252,10 +285,12 @@ export class LightningController {
       }
       this.strikes.push({
         bornMs: nowMs,
-        durationMs: Math.max(30, params.flashDurationMs),
+        durationMs: duration,
         path,
         color: hexToVec3(params.color),
         subOffsets: subs,
+        intensity,
+        radius,
       });
     }
   }
@@ -273,39 +308,64 @@ export class LightningController {
   ): void {
     out.fill(0);
     if (!params.enabled || this.strikes.length === 0) return;
-    const radius = Math.max(0.01, params.boltRadius);
-    const rFull = radius;
-    const rFade = radius * 2;
-    const rFullSq = rFull * rFull;
-    const rFadeSq = rFade * rFade;
-    const gain = Math.max(0, params.intensity);
 
     for (const s of this.strikes) {
       const age = nowMs - s.bornMs;
-      const env = envelope(age, s.durationMs, s.subOffsets);
-      if (env <= 0) continue;
-      const scale = env * gain;
-      const cr = s.color[0] * scale;
-      const cg = s.color[1] * scale;
-      const cb = s.color[2] * scale;
+      if (age < 0 || age > s.durationMs) continue;
+      // Per-strike radius + intensity (sampled at birth from ranges).
+      const radius = Math.max(0.01, s.radius);
+      const rFull = radius;
+      const rFade = radius * 2;
+      const rFullSq = rFull * rFull;
+      const rFadeSq = rFade * rFade;
       const path = s.path;
       const totalSegs = path.length / 3 - 1;
-      // Progressive travel: only the first `head` fraction of the
-      // polyline emits light. LEDs beyond the tip get no contribution
-      // yet, so a bolt visibly propagates rather than lighting the
-      // whole path at once.
-      const head = boltTravelHead(age, s.durationMs);
-      const activeF = head * totalSegs;
-      const fullSegs = Math.floor(activeF);
-      const tipT = activeF - fullSegs;
-      // Precompute tip endpoint by interpolating along the "current" segment.
-      let tipX = 0, tipY = 0, tipZ = 0;
-      if (fullSegs < totalSegs) {
-        const a3 = fullSegs * 3;
-        const b3 = a3 + 3;
-        tipX = path[a3] + (path[b3] - path[a3]) * tipT;
-        tipY = path[a3 + 1] + (path[b3 + 1] - path[a3 + 1]) * tipT;
-        tipZ = path[a3 + 2] + (path[b3 + 2] - path[a3 + 2]) * tipT;
+      if (totalSegs <= 0) continue;
+
+      // Progressive travel: the tip races along the polyline during the
+      // first ~25% of the flash. Each segment "ignites" as the tip enters
+      // it and then fades independently until the strike expires. This
+      // gives the visual of a spark travelling with a fading trail.
+      const travelMs = Math.max(30, s.durationMs * 0.25);
+      const segTravel = travelMs / totalSegs;
+
+      // Sub-flashes act as a global brightness pulse on the whole
+      // currently-lit channel (all lit segments brighten together).
+      let subBump = 0;
+      const u = age / s.durationMs;
+      for (const off of s.subOffsets) {
+        const w = 0.12;
+        const d = u - off;
+        if (d > -w && d < w) {
+          subBump += Math.max(0, 1 - Math.abs(d) / w) * 0.7;
+        }
+      }
+      const brightness = 1 + subBump;
+      const strikeGain = Math.max(0, s.intensity) * brightness;
+      const cr0 = s.color[0] * strikeGain;
+      const cg0 = s.color[1] * strikeGain;
+      const cb0 = s.color[2] * strikeGain;
+
+      // Precompute per-segment envelope so the inner LED loop only does
+      // distance + multiply-add work.
+      const litSegs =
+        Math.min(totalSegs, Math.ceil(age / Math.max(1e-3, segTravel)));
+      if (litSegs <= 0) continue;
+      const segEnv = new Float32Array(litSegs);
+      const attack = 0.06;
+      for (let seg = 0; seg < litSegs; seg++) {
+        const arrival = seg * segTravel; // tip enters this segment
+        const localAge = age - arrival;
+        const localLife = Math.max(1, s.durationMs - arrival);
+        const lu = localAge / localLife;
+        if (lu < 0 || lu > 1) {
+          segEnv[seg] = 0;
+          continue;
+        }
+        segEnv[seg] =
+          lu < attack
+            ? lu / attack
+            : Math.exp(-3.5 * (lu - attack) / (1 - attack));
       }
 
       for (let i = 0; i < n; i++) {
@@ -313,8 +373,13 @@ export class LightningController {
         const px = positions[i3];
         const py = positions[i3 + 1];
         const pz = positions[i3 + 2];
-        let minSq = Infinity;
-        for (let seg = 0; seg < fullSegs; seg++) {
+        // Accumulate contributions from every lit segment so overlapping
+        // segments (bends, jitter loops) produce a bright, continuous
+        // channel rather than intermittent gaps.
+        let acc = 0;
+        for (let seg = 0; seg < litSegs; seg++) {
+          const e = segEnv[seg];
+          if (e <= 1e-3) continue;
           const a3 = seg * 3;
           const b3 = a3 + 3;
           const d2 = pointSegmentDistSq(
@@ -322,31 +387,21 @@ export class LightningController {
             path[a3], path[a3 + 1], path[a3 + 2],
             path[b3], path[b3 + 1], path[b3 + 2],
           );
-          if (d2 < minSq) minSq = d2;
-          if (minSq <= rFullSq) break;
+          if (d2 >= rFadeSq) continue;
+          let prox: number;
+          if (d2 <= rFullSq) prox = 1;
+          else {
+            const d = Math.sqrt(d2);
+            prox = 1 - (d - rFull) / (rFade - rFull);
+          }
+          acc += e * prox;
         }
-        // Partial trailing segment ending at the interpolated tip.
-        if (fullSegs < totalSegs && tipT > 0 && minSq > rFullSq) {
-          const a3 = fullSegs * 3;
-          const d2 = pointSegmentDistSq(
-            px, py, pz,
-            path[a3], path[a3 + 1], path[a3 + 2],
-            tipX, tipY, tipZ,
-          );
-          if (d2 < minSq) minSq = d2;
-        }
-        let prox: number;
-        if (minSq <= rFullSq) prox = 1;
-        else if (minSq >= rFadeSq) prox = 0;
-        else {
-          const d = Math.sqrt(minSq);
-          const t = (d - rFull) / (rFade - rFull);
-          prox = 1 - t;
-        }
-        if (prox <= 0) continue;
-        out[i3] += cr * prox;
-        out[i3 + 1] += cg * prox;
-        out[i3 + 2] += cb * prox;
+        if (acc <= 0) continue;
+        // Soft clamp so heavy overlap doesn't blow past ~1 core intensity.
+        const k = acc > 1 ? 1 + Math.log(acc) * 0.35 : acc;
+        out[i3] += cr0 * k;
+        out[i3 + 1] += cg0 * k;
+        out[i3 + 2] += cb0 * k;
       }
     }
   }

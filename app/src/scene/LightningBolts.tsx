@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useFrame } from "@react-three/fiber";
 import { AdditiveBlending } from "three";
 import { Line } from "@react-three/drei";
@@ -28,6 +28,7 @@ const idByStrike = new WeakMap<BoltStrike, number>();
 export function LightningBolts() {
   const lightning = useSimStore((s) => s.lightning);
   const [bolts, setBolts] = useState<VisibleBolt[]>([]);
+  const lastTickRef = useRef(0);
 
   useFrame(() => {
     if (!lightning.enabled) {
@@ -35,6 +36,11 @@ export function LightningBolts() {
       return;
     }
     const now = performance.now();
+    // Gate visualization refresh to the lightning sim FPS so bolts
+    // strobe in lockstep with LED contribution at low frame rates.
+    const fps = Math.max(1, Math.min(60, Math.round(lightning.simFps || 60)));
+    if (now - lastTickRef.current < 1000 / fps) return;
+    lastTickRef.current = now;
     const strikes = sharedLightningController.getStrikes();
     const next: VisibleBolt[] = [];
     for (const s of strikes) {

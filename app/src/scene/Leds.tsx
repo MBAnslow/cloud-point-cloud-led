@@ -202,6 +202,7 @@ export function Leds() {
   // Long-lived WLED streaming client. Lightning uses a shared controller
   // so the 3D bolt visualisation sees the same active strikes.
   const lightningCtrl = sharedLightningController;
+  const lightningRenderRef = useRef(0);
   const wledClient = useMemo(() => new WledStreamClient(), []);
   useEffect(() => {
     if (wled.enabled) wledClient.start();
@@ -342,35 +343,35 @@ export function Leds() {
       hourInRange(sky.timeHours, lightning.activeStartHour, lightning.activeEndHour);
     if (useLightning) {
       const now = performance.now();
-      const substeps = Math.max(
-        1,
-        Math.min(20, Math.round(lightning.updatesPerFrame || 1)),
-      );
-      // Feed the controller N intermediate timestamps so the Poisson
-      // process runs `substeps` times per frame instead of once. Same
-      // total rate, but strikes are less clumped and the bolt
-      // population refreshes more often within a single render.
-      const lastMs = lightningCtrl.getLastUpdateMs();
-      const prev = lastMs > 0 ? lastMs : now;
-      const stepDt = (now - prev) / substeps;
-      const cloudXform = {
-        tiltRad: cloudTiltRad,
-        yawRad: cloudYawRad,
-        offsetX: cloud.offsetX,
-        offsetZ: cloud.offsetZ,
-      };
-      for (let s = 1; s <= substeps; s++) {
-        lightningCtrl.update(prev + stepDt * s, lightning, ellipsoid, cloudXform);
+      // Target sim FPS gates the strike scheduler + LED contribution.
+      // Lower FPS → the bolt state (and therefore illumination) only
+      // refreshes every 1000/fps ms, producing a stroboscopic look
+      // even though the renderer keeps drawing at full rate.
+      const fps = Math.max(1, Math.min(60, Math.round(lightning.simFps || 60)));
+      const frameMs = 1000 / fps;
+      const lastRender = lightningRenderRef.current;
+      if (now - lastRender >= frameMs) {
+        lightningRenderRef.current = now;
+        const cloudXform = {
+          tiltRad: cloudTiltRad,
+          yawRad: cloudYawRad,
+          offsetX: cloud.offsetX,
+          offsetZ: cloud.offsetZ,
+        };
+        lightningCtrl.update(now, lightning, ellipsoid, cloudXform);
+        lightningCtrl.contribute(
+          buffers.positions,
+          buffers.n,
+          buffers.lightningColorFloats,
+          now,
+          lightning,
+        );
       }
-      lightningCtrl.contribute(
-        buffers.positions,
-        buffers.n,
-        buffers.lightningColorFloats,
-        now,
-        lightning,
-      );
+      // Between refreshes, keep the previous lightningColorFloats so the
+      // last-rendered frame stays visible until the next sim tick.
     } else {
       buffers.lightningColorFloats.fill(0);
+      lightningRenderRef.current = 0;
     }
 
     // Select or blend pipelines per mode.
