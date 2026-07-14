@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { useSimStore, type Sample, type SampleClip } from "../state";
+import { useSimStore, type DroneLfoShape, type Sample, type SampleClip } from "../state";
+import { LFO_SHAPES, LfoScope } from "../drones/SynthSection";
 import { putSampleBlob, deleteSampleBlob } from "./sampleStorage";
 import { getSampleEngine } from "../audio/SampleEngine";
 import { SampleClipEditor } from "./SampleClipEditor";
@@ -329,7 +330,7 @@ export function SamplesPanel() {
           <input
             type="range"
             min={0}
-            max={1}
+            max={3}
             step={0.01}
             value={samples.master}
             onChange={(e) => setSamples({ master: parseFloat(e.target.value) })}
@@ -360,6 +361,107 @@ export function SamplesPanel() {
       </header>
 
       <div style={bodyScrollStyle}>
+        <section
+          style={{
+            padding: "6px 10px",
+            borderBottom: "1px solid rgba(255,255,255,0.06)",
+            display: "flex",
+            gap: 12,
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <strong style={{ fontSize: 12 }}>Master</strong>
+          <MasterFxSlider
+            label="Ptc LFO Hz"
+            min={0}
+            max={2}
+            step={0.01}
+            value={samples.pitchLfoRateHz}
+            onChange={(v) => setSamples({ pitchLfoRateHz: v })}
+            fmt={(v) => `${v.toFixed(2)}`}
+          />
+          <MasterFxSlider
+            label="Ptc LFO ¢"
+            min={0}
+            max={50}
+            step={1}
+            value={samples.pitchLfoDepthCents}
+            onChange={(v) => setSamples({ pitchLfoDepthCents: Math.round(v) })}
+            fmt={(v) => `±${v.toFixed(0)}`}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+            <span style={{ opacity: 0.8 }}>Shape</span>
+            <select
+              value={samples.pitchLfoShape}
+              onChange={(e) =>
+                setSamples({ pitchLfoShape: e.target.value as DroneLfoShape })
+              }
+              style={{ fontSize: 11 }}
+            >
+              {LFO_SHAPES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div style={{ minWidth: 200, maxWidth: 280 }}>
+            <LfoScope
+              rateHz={samples.pitchLfoRateHz}
+              depth={Math.min(1, samples.pitchLfoDepthCents / 50)}
+              shape={samples.pitchLfoShape}
+              colorStroke="rgba(255,225,77,0.9)"
+              colorFill="rgba(255,225,77,0.12)"
+              label={`${samples.pitchLfoRateHz.toFixed(2)} Hz · ±${samples.pitchLfoDepthCents}¢`}
+            />
+          </div>
+          <MasterFxSlider
+            label="Reverb"
+            min={0}
+            max={1}
+            step={0.01}
+            value={samples.reverbMix}
+            onChange={(v) => setSamples({ reverbMix: v })}
+            fmt={(v) => v.toFixed(2)}
+          />
+          <MasterFxSlider
+            label="Rvb size"
+            min={0}
+            max={0.99}
+            step={0.01}
+            value={samples.reverbDecay}
+            onChange={(v) => setSamples({ reverbDecay: v })}
+            fmt={(v) => v.toFixed(2)}
+          />
+          <MasterFxSlider
+            label="Delay"
+            min={0}
+            max={1}
+            step={0.01}
+            value={samples.delayMix}
+            onChange={(v) => setSamples({ delayMix: v })}
+            fmt={(v) => v.toFixed(2)}
+          />
+          <MasterFxSlider
+            label="Dly time"
+            min={0}
+            max={2}
+            step={0.01}
+            value={samples.delayTimeSec}
+            onChange={(v) => setSamples({ delayTimeSec: v })}
+            fmt={(v) => `${v.toFixed(2)}s`}
+          />
+          <MasterFxSlider
+            label="Dly fbk"
+            min={0}
+            max={0.9}
+            step={0.01}
+            value={samples.delayFeedback}
+            onChange={(v) => setSamples({ delayFeedback: v })}
+            fmt={(v) => v.toFixed(2)}
+          />
+        </section>
         <section style={rollSectionStyle}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <strong style={{ fontSize: 12 }}>Arrangement</strong>
@@ -760,6 +862,56 @@ function playheadTop(hour: number): React.CSSProperties {
     pointerEvents: "none",
   };
 }
+function MasterFxSlider({
+  label,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+  fmt,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (v: number) => void;
+  fmt: (v: number) => string;
+}) {
+  return (
+    <label
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 11,
+      }}
+    >
+      <span style={{ width: 56, opacity: 0.8 }}>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        style={{ width: 100 }}
+      />
+      <span
+        style={{
+          width: 44,
+          textAlign: "right",
+          fontVariantNumeric: "tabular-nums",
+          opacity: 0.85,
+        }}
+      >
+        {fmt(value)}
+      </span>
+    </label>
+  );
+}
+
 function playheadKnob(hour: number): React.CSSProperties {
   return {
     position: "absolute",

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useSimStore } from "../state";
 import { getSampleEngine } from "./SampleEngine";
+import { modulatedEngineParams } from "./breathModulation";
 
 /**
  * Headless RAF loop that drives the samples engine. Mount once at the
@@ -26,11 +27,8 @@ export function SampleRuntime(): null {
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const state = useSimStore.getState();
-      engine.update(
-        state.sky.timeHours,
-        state.sky.cycleSeconds,
-        state.samples,
-      );
+      const { samples } = modulatedEngineParams(state, performance.now());
+      engine.update(state.sky.timeHours, state.sky.cycleSeconds, samples);
     };
     raf = requestAnimationFrame(tick);
 

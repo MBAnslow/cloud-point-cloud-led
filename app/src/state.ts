@@ -490,6 +490,42 @@ export function resolveNoteFx(note: DroneNote): NoteFx {
 
 export type DroneLfoShape = "sine" | "triangle" | "square" | "sawtooth";
 
+/** One-pole biquad configuration reused by per-engine HPF/LPF slots. */
+export interface FilterParams {
+  enabled: boolean;
+  hz: number;
+  q: number;
+}
+export interface FilterChain {
+  lp: FilterParams;
+  hp: FilterParams;
+}
+
+export const DEFAULT_FILTER_CHAIN: FilterChain = {
+  lp: { enabled: false, hz: 12000, q: 0.7 },
+  hp: { enabled: false, hz: 60, q: 0.7 },
+};
+
+function resolveFilterChain(input: unknown): FilterChain {
+  const d = DEFAULT_FILTER_CHAIN;
+  const src = (input && typeof input === "object" ? input : {}) as Partial<FilterChain>;
+  const one = (
+    slot: Partial<FilterParams> | undefined,
+    def: FilterParams,
+  ): FilterParams => ({
+    enabled: typeof slot?.enabled === "boolean" ? slot.enabled : def.enabled,
+    hz:
+      typeof slot?.hz === "number"
+        ? Math.max(10, Math.min(22000, slot.hz))
+        : def.hz,
+    q:
+      typeof slot?.q === "number"
+        ? Math.max(0.1, Math.min(20, slot.q))
+        : def.q,
+  });
+  return { lp: one(src.lp, d.lp), hp: one(src.hp, d.hp) };
+}
+
 export interface DroneParams {
   enabled: boolean;
   /** Master output gain, [0, 1]. */
@@ -516,6 +552,8 @@ export interface DroneParams {
   distortionDrive: number;
   /** Distortion wet mix, [0, 1]. */
   distortionMix: number;
+  /** Per-engine HPF+LPF chain applied on the master before output. */
+  filters: FilterChain;
   notes: DroneNote[];
 }
 
@@ -592,6 +630,8 @@ export interface PadParams {
   filterLfoDepth: number;
   /** Waveshaper drive, [0, 1]. 0 = clean. */
   saturation: number;
+  /** Per-engine HPF+LPF chain applied on the master before output. */
+  filters: FilterChain;
   notes: PadNote[];
 }
 
@@ -658,8 +698,28 @@ export interface SampleClip {
  */
 export interface SamplesParams {
   enabled: boolean;
-  /** Master gain for the samples bus, [0, 1]. */
+  /** Master gain for the samples bus, [0, 3]. */
   master: number;
+  /** Global pitch offset in cents applied to every trigger. */
+  pitchCents: number;
+  /** Rate (Hz) of the master pitch LFO. */
+  pitchLfoRateHz: number;
+  /** Depth (cents) of the master pitch LFO around `pitchCents`. */
+  pitchLfoDepthCents: number;
+  /** Waveform shape for the master pitch LFO. */
+  pitchLfoShape: DroneLfoShape;
+  /** Master reverb wet mix, [0, 1] (send from all clips). */
+  reverbMix: number;
+  /** Master reverb roomSize, [0, 0.99]. */
+  reverbDecay: number;
+  /** Master delay wet mix, [0, 1]. */
+  delayMix: number;
+  /** Master delay time (s), [0, 2]. */
+  delayTimeSec: number;
+  /** Master delay feedback, [0, 0.9]. */
+  delayFeedback: number;
+  /** Per-engine HPF+LPF chain applied on the master before output. */
+  filters: FilterChain;
   library: Sample[];
   clips: SampleClip[];
 }
@@ -803,7 +863,7 @@ type BreathPatch = Partial<Omit<BreathParams, "area">> & {
   area?: Partial<BreathAreaParams>;
 };
 
-interface SimState {
+export interface SimState {
   ellipsoid: EllipsoidParams;
   cloud: CloudParams;
   strand: StrandParams;
@@ -818,6 +878,15 @@ interface SimState {
   samples: SamplesParams;
   dayCycle: DayCycleParams;
   masterFx: MasterFxParams;
+  /**
+   * Per-parameter breath-modulation amount, signed in [-1, 1]. Keyed by
+   * a stable slider ID (e.g. "drone.masterGain"). Positive = base value
+   * moves up on exhale, negative = moves down; magnitude is the fraction
+   * of the slider's range applied at full exhale. UI-only for now.
+   */
+  breathMod: Record<string, number>;
+  /** When true, `breathMod` values are applied every frame to the running engines. */
+  breathModEnabled: boolean;
   ledViewMode: LedViewMode;
   ledDisplayMode: LedDisplayMode;
   breathTimeCombineMode: BreathTimeCombineMode;
@@ -852,6 +921,8 @@ interface SimState {
   clearSampleClips: () => void;
   setDayCycle: (patch: Partial<DayCycleParams>) => void;
   setMasterFx: (patch: Partial<MasterFxParams>) => void;
+  setBreathMod: (key: string, value: number) => void;
+  setBreathModEnabled: (v: boolean) => void;
   updateDayPeriod: (id: string, patch: Partial<DayPeriod>) => void;
   setActivePeriod: (id: string) => void;
   advancePeriod: () => void;
@@ -1059,6 +1130,7 @@ const DEFAULTS = {
     distortionEnabled: false,
     distortionDrive: 0.5,
     distortionMix: 0.5,
+    filters: DEFAULT_FILTER_CHAIN,
     // A single C1 sustained through the whole 24h so the app makes
     // sound out of the box; users layer more notes on top.
     notes: [
@@ -1095,11 +1167,22 @@ const DEFAULTS = {
     filterLfoRateHz: 0.4,
     filterLfoDepth: 0,
     saturation: 0.15,
+    filters: DEFAULT_FILTER_CHAIN,
     notes: [],
   } as PadParams,
   samples: {
     enabled: false,
-    master: 0.6,
+    master: 1.2,
+    pitchCents: 0,
+    pitchLfoRateHz: 1,
+    pitchLfoDepthCents: 0,
+    pitchLfoShape: "sine",
+    reverbMix: 0,
+    reverbDecay: 0.7,
+    delayMix: 0,
+    delayTimeSec: 0.25,
+    delayFeedback: 0.3,
+    filters: DEFAULT_FILTER_CHAIN,
     library: [],
     clips: [],
   } as SamplesParams,
@@ -1123,6 +1206,8 @@ const DEFAULTS = {
     applyToPad: true,
     applyToSamples: true,
   } as MasterFxParams,
+  breathMod: {} as Record<string, number>,
+  breathModEnabled: false,
   ledViewMode: "breathPlusTimeOfDay" as LedViewMode,
   ledDisplayMode: "sensors" as LedDisplayMode,
   breathTimeCombineMode: "revealOnInhale" as BreathTimeCombineMode,
@@ -1324,6 +1409,7 @@ function resolveDroneParams(
     distortionEnabled: pick("distortionEnabled"),
     distortionDrive: pick("distortionDrive"),
     distortionMix: pick("distortionMix"),
+    filters: resolveFilterChain((saved as Record<string, unknown>).filters),
     notes,
   };
 }
@@ -1364,6 +1450,7 @@ function resolvePadParams(
     filterLfoRateHz: pick("filterLfoRateHz"),
     filterLfoDepth: pick("filterLfoDepth"),
     saturation: pick("saturation"),
+    filters: resolveFilterChain((saved as Record<string, unknown>).filters),
     notes,
   };
 }
@@ -1411,8 +1498,48 @@ function resolveSamplesParams(
         : DEFAULTS.samples.enabled,
     master:
       typeof saved.master === "number"
-        ? Math.max(0, Math.min(1, saved.master))
+        ? Math.max(0, Math.min(3, saved.master))
         : DEFAULTS.samples.master,
+    pitchCents:
+      typeof saved.pitchCents === "number"
+        ? Math.max(-1200, Math.min(1200, saved.pitchCents))
+        : DEFAULTS.samples.pitchCents,
+    pitchLfoRateHz:
+      typeof saved.pitchLfoRateHz === "number"
+        ? Math.max(0, Math.min(20, saved.pitchLfoRateHz))
+        : DEFAULTS.samples.pitchLfoRateHz,
+    pitchLfoDepthCents:
+      typeof saved.pitchLfoDepthCents === "number"
+        ? Math.max(0, Math.min(1200, saved.pitchLfoDepthCents))
+        : DEFAULTS.samples.pitchLfoDepthCents,
+    pitchLfoShape:
+      saved.pitchLfoShape === "triangle" ||
+      saved.pitchLfoShape === "square" ||
+      saved.pitchLfoShape === "sawtooth" ||
+      saved.pitchLfoShape === "sine"
+        ? saved.pitchLfoShape
+        : DEFAULTS.samples.pitchLfoShape,
+    reverbMix:
+      typeof saved.reverbMix === "number"
+        ? Math.max(0, Math.min(1, saved.reverbMix))
+        : DEFAULTS.samples.reverbMix,
+    reverbDecay:
+      typeof saved.reverbDecay === "number"
+        ? Math.max(0, Math.min(0.99, saved.reverbDecay))
+        : DEFAULTS.samples.reverbDecay,
+    delayMix:
+      typeof saved.delayMix === "number"
+        ? Math.max(0, Math.min(1, saved.delayMix))
+        : DEFAULTS.samples.delayMix,
+    delayTimeSec:
+      typeof saved.delayTimeSec === "number"
+        ? Math.max(0, Math.min(2, saved.delayTimeSec))
+        : DEFAULTS.samples.delayTimeSec,
+    delayFeedback:
+      typeof saved.delayFeedback === "number"
+        ? Math.max(0, Math.min(0.9, saved.delayFeedback))
+        : DEFAULTS.samples.delayFeedback,
+    filters: resolveFilterChain((saved as Record<string, unknown>).filters),
     library,
     clips,
   };
@@ -1630,6 +1757,21 @@ function initialState() {
       saved.masterFx as Partial<MasterFxParams> | undefined,
       saved.drone as Record<string, unknown> | undefined,
     ),
+    breathMod: (() => {
+      const src = (saved as unknown as Record<string, unknown>).breathMod;
+      if (!src || typeof src !== "object") return {};
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+        if (typeof v === "number" && Number.isFinite(v)) {
+          out[k] = Math.max(-1, Math.min(1, v));
+        }
+      }
+      return out;
+    })(),
+    breathModEnabled: (() => {
+      const v = (saved as unknown as Record<string, unknown>).breathModEnabled;
+      return typeof v === "boolean" ? v : DEFAULTS.breathModEnabled;
+    })(),
     ledViewMode: normalizeLedViewMode(saved.ledViewMode),
     ledDisplayMode:
       saved.ledDisplayMode === "leds" || saved.ledDisplayMode === "sensors"
@@ -1741,6 +1883,15 @@ export const useSimStore = create<SimState>((set) => ({
     set((s) => ({ dayCycle: { ...s.dayCycle, ...patch } })),
   setMasterFx: (patch) =>
     set((s) => ({ masterFx: { ...s.masterFx, ...patch } })),
+  setBreathMod: (key, value) =>
+    set((s) => {
+      const next = { ...s.breathMod };
+      const clamped = Math.max(-1, Math.min(1, value));
+      if (Math.abs(clamped) < 1e-4) delete next[key];
+      else next[key] = clamped;
+      return { breathMod: next };
+    }),
+  setBreathModEnabled: (v) => set({ breathModEnabled: v }),
   updateDayPeriod: (id, patch) =>
     set((s) => ({
       dayCycle: {
@@ -1933,6 +2084,8 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     samples: s.samples,
     dayCycle: s.dayCycle,
     masterFx: s.masterFx,
+    breathMod: s.breathMod,
+    breathModEnabled: s.breathModEnabled,
     ledViewMode: s.ledViewMode,
     ledDisplayMode: s.ledDisplayMode,
     breathTimeCombineMode: s.breathTimeCombineMode,

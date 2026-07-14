@@ -2,6 +2,7 @@ import * as Tone from "tone";
 import type { Sample, SamplesParams } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
 import { sampleClipsToTrigger, type TriggeredClip } from "./sampleCycle";
+import { applyFilterChain } from "./filterChain";
 
 /**
  * Samples engine — trigger model.
@@ -43,7 +44,43 @@ interface Voice {
 export class SampleEngine {
   private started = false;
   private master: Tone.Gain | null = null;
+  private masterHp: Tone.Filter | null = null;
+  private masterLp: Tone.Filter | null = null;
   private bus: Tone.Gain | null = null;
+  // Master send FX (bus → dry/reverbSend/delaySend → master).
+  private masterReverb: Tone.Freeverb | null = null;
+  private masterReverbWet: Tone.Gain | null = null;
+  private masterDelay: Tone.FeedbackDelay | null = null;
+  private masterDelayWet: Tone.Gain | null = null;
+  private pitchCents = 0;
+  private pitchLfoRateHz = 0;
+  private pitchLfoDepthCents = 0;
+  private pitchLfoShape: "sine" | "triangle" | "square" | "sawtooth" = "sine";
+  private startTimeMs = 0;
+
+  /** Effective pitch offset (cents) at the current wall-clock instant. */
+  private currentPitchCents(): number {
+    const t = (performance.now() - this.startTimeMs) / 1000;
+    let v = 0;
+    if (this.pitchLfoDepthCents > 0 && this.pitchLfoRateHz > 0) {
+      const phase = ((t * this.pitchLfoRateHz) % 1 + 1) % 1;
+      switch (this.pitchLfoShape) {
+        case "sine":
+          v = Math.sin(phase * Math.PI * 2);
+          break;
+        case "triangle":
+          v = 4 * Math.abs(phase - 0.5) - 1;
+          break;
+        case "square":
+          v = phase < 0.5 ? 1 : -1;
+          break;
+        case "sawtooth":
+          v = 2 * phase - 1;
+          break;
+      }
+    }
+    return this.pitchCents + v * this.pitchLfoDepthCents;
+  }
 
   private voices: Voice[] = [];
   private buffers = new Map<string, Tone.ToneAudioBuffer>();
@@ -54,8 +91,30 @@ export class SampleEngine {
     if (this.started) return;
     await Tone.start();
     this.master = new Tone.Gain(0);
+    this.masterHp = new Tone.Filter({ type: "highpass", frequency: 10, Q: 0.7 });
+    this.masterLp = new Tone.Filter({ type: "lowpass", frequency: 22000, Q: 0.7 });
+    this.master.connect(this.masterHp);
+    this.masterHp.connect(this.masterLp);
     this.bus = new Tone.Gain(1);
+    this.masterReverb = new Tone.Freeverb({ roomSize: 0.7, dampening: 3000 });
+    this.masterReverbWet = new Tone.Gain(0);
+    this.masterDelay = new Tone.FeedbackDelay({
+      delayTime: 0.25,
+      feedback: 0.3,
+      wet: 1,
+    });
+    this.masterDelayWet = new Tone.Gain(0);
+    // Dry path.
     this.bus.connect(this.master);
+    // Parallel reverb send.
+    this.bus.connect(this.masterReverb);
+    this.masterReverb.connect(this.masterReverbWet);
+    this.masterReverbWet.connect(this.master);
+    // Parallel delay send.
+    this.bus.connect(this.masterDelay);
+    this.masterDelay.connect(this.masterDelayWet);
+    this.masterDelayWet.connect(this.master);
+    this.startTimeMs = performance.now();
     this.started = true;
   }
 
@@ -66,11 +125,11 @@ export class SampleEngine {
   private currentRoutingTarget: Tone.InputNode | null | undefined = undefined;
   /** See DroneEngine.setRouting. */
   setRouting(target: Tone.InputNode | null): void {
-    if (!this.started || !this.master) return;
+    if (!this.started || !this.masterLp) return;
     if (this.currentRoutingTarget === target) return;
-    this.master.disconnect();
-    if (target) this.master.connect(target);
-    else this.master.toDestination();
+    this.masterLp.disconnect();
+    if (target) this.masterLp.connect(target);
+    else this.masterLp.toDestination();
     this.currentRoutingTarget = target;
   }
 
@@ -84,6 +143,41 @@ export class SampleEngine {
     void cycleSeconds; // trigger model no longer needs cycle length.
 
     this.master.gain.rampTo(p.enabled ? p.master : 0, 0.05);
+    applyFilterChain(this.masterHp, this.masterLp, p.filters);
+
+    // Master send FX + global pitch offset (+ LFO).
+    this.pitchCents = p.pitchCents;
+    this.pitchLfoRateHz = p.pitchLfoRateHz;
+    this.pitchLfoDepthCents = p.pitchLfoDepthCents;
+    this.pitchLfoShape = p.pitchLfoShape;
+    if (this.masterReverbWet) {
+      this.masterReverbWet.gain.rampTo(
+        Math.max(0, Math.min(1, p.reverbMix)),
+        0.08,
+      );
+    }
+    if (this.masterReverb) {
+      (this.masterReverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
+        Math.max(0, Math.min(0.99, p.reverbDecay)),
+        0.1,
+      );
+    }
+    if (this.masterDelayWet) {
+      this.masterDelayWet.gain.rampTo(
+        Math.max(0, Math.min(1, p.delayMix)),
+        0.08,
+      );
+    }
+    if (this.masterDelay) {
+      this.masterDelay.delayTime.rampTo(
+        Math.max(0, Math.min(2, p.delayTimeSec)),
+        0.08,
+      );
+      this.masterDelay.feedback.rampTo(
+        Math.max(0, Math.min(0.9, p.delayFeedback)),
+        0.08,
+      );
+    }
 
     if (!p.enabled) {
       // Tear everything down while disabled.
@@ -119,7 +213,11 @@ export class SampleEngine {
       if (!c) continue;
       v.panner.pan.rampTo(c.pan, 0.05);
       v.gain.gain.rampTo(c.gain, 0.05);
-      const effRate = Math.max(0.05, c.playbackRate * v.randomRateMult);
+      const pitchMult = Math.pow(2, this.currentPitchCents() / 1200);
+      const effRate = Math.max(
+        0.05,
+        c.playbackRate * v.randomRateMult * pitchMult,
+      );
       if (Math.abs(v.player.playbackRate - effRate) > 0.001) {
         v.player.playbackRate = effRate;
       }
@@ -172,7 +270,11 @@ export class SampleEngine {
         ? (Math.random() * 2 - 1) * t.randomPitchCents
         : 0;
     const randomRateMult = Math.pow(2, randCents / 1200);
-    const effectiveRate = Math.max(0.05, t.playbackRate * randomRateMult);
+    const pitchMult = Math.pow(2, this.currentPitchCents() / 1200);
+    const effectiveRate = Math.max(
+      0.05,
+      t.playbackRate * randomRateMult * pitchMult,
+    );
 
     const player = new Tone.Player({
       url: buffer,

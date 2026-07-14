@@ -1,4 +1,5 @@
 import * as Tone from "tone";
+import { applyFilterChain } from "./filterChain";
 import {
   HARMONIC_COUNT,
   HARMONIC_OCTAVE_OFFSETS,
@@ -127,6 +128,8 @@ interface Voice {
 export class DroneEngine {
   private started = false;
   private master: Tone.Gain | null = null;
+  private hp: Tone.Filter | null = null;
+  private lp: Tone.Filter | null = null;
   private distortion: Tone.Distortion | null = null;
   private saturation: Tone.WaveShaper | null = null;
   private saturationMix: Tone.CrossFade | null = null;
@@ -186,6 +189,11 @@ export class DroneEngine {
     // MasterFxBus decides whether to route it through the EQ chain or
     // directly to destination via `setRouting`.
     this.master = new Tone.Gain(0);
+    // Per-engine HPF+LPF chain: master → hp → lp → (setRouting target).
+    this.hp = new Tone.Filter({ type: "highpass", frequency: 10, Q: 0.7 });
+    this.lp = new Tone.Filter({ type: "lowpass", frequency: 22000, Q: 0.7 });
+    this.master.connect(this.hp);
+    this.hp.connect(this.lp);
     this.distortion = new Tone.Distortion({ distortion: 0, wet: 0, oversample: "2x" });
     this.distortion.connect(this.master);
     this.tremoloGain = new Tone.Gain(1);
@@ -222,11 +230,11 @@ export class DroneEngine {
    */
   private currentRoutingTarget: Tone.InputNode | null | undefined = undefined;
   setRouting(target: Tone.InputNode | null): void {
-    if (!this.started || !this.master) return;
+    if (!this.started || !this.lp || !this.master || !this.hp) return;
     if (this.currentRoutingTarget === target) return;
-    this.master.disconnect();
-    if (target) this.master.connect(target);
-    else this.master.toDestination();
+    this.lp.disconnect();
+    if (target) this.lp.connect(target);
+    else this.lp.toDestination();
     this.currentRoutingTarget = target;
   }
 
@@ -249,6 +257,7 @@ export class DroneEngine {
     )
       return;
     this.master.gain.rampTo(p.enabled ? p.masterGain : 0, 0.05);
+    applyFilterChain(this.hp, this.lp, p.filters);
 
     if (p.waveform !== this.currentWaveform) {
       this.currentWaveform = p.waveform;

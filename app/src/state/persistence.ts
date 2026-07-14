@@ -41,6 +41,8 @@ export interface Snapshot {
   samples?: SamplesParams;
   dayCycle?: DayCycleParams;
   masterFx?: MasterFxParams;
+  breathMod?: Record<string, number>;
+  breathModEnabled?: boolean;
   ledViewMode?: LedViewMode;
   ledDisplayMode?: LedDisplayMode;
   breathTimeCombineMode?: BreathTimeCombineMode;

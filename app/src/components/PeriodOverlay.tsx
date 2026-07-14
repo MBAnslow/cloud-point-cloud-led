@@ -11,31 +11,57 @@ const HOURS = 24;
 export function ActivePeriodBand({ opacity = 0.35 }: { opacity?: number }) {
   const dayCycle = useSimStore((s) => s.dayCycle);
   const active = dayCycle.periods.find((p) => p.id === dayCycle.activePeriodId);
-  if (!active) return null;
-  const spans: Array<[number, number]> =
-    active.endHour >= active.startHour
-      ? [[active.startHour, active.endHour]]
-      : [
-          [active.startHour, 24],
-          [0, active.endHour],
-        ];
+  const activeOpacity = opacity;
+  const inactiveOpacity = Math.max(0.08, opacity * 0.35);
   return (
     <>
-      {spans.map(([a, b], i) => (
-        <div
-          key={i}
-          style={{
-            position: "absolute",
-            top: 0,
-            bottom: 0,
-            left: `${(a / HOURS) * 100}%`,
-            width: `${((b - a) / HOURS) * 100}%`,
-            background: `${active.color}`,
-            opacity,
-            pointerEvents: "none",
-          }}
-        />
-      ))}
+      {dayCycle.periods.map((p) => {
+        const isActive = active?.id === p.id;
+        const spans: Array<[number, number]> =
+          p.endHour >= p.startHour
+            ? [[p.startHour, p.endHour]]
+            : [
+                [p.startHour, 24],
+                [0, p.endHour],
+              ];
+        return spans.map(([a, b], i) => {
+          const widthPct = ((b - a) / HOURS) * 100;
+          return (
+            <div
+              key={`${p.id}-${i}`}
+              style={{
+                position: "absolute",
+                top: 0,
+                bottom: 0,
+                left: `${(a / HOURS) * 100}%`,
+                width: `${widthPct}%`,
+                background: p.color,
+                opacity: isActive ? activeOpacity : inactiveOpacity,
+                borderLeft: `1px solid ${p.color}aa`,
+                pointerEvents: "none",
+                overflow: "hidden",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 2,
+                  left: 4,
+                  fontSize: 10,
+                  fontWeight: isActive ? 700 : 500,
+                  letterSpacing: 0.3,
+                  color: "rgba(255,255,255,0.92)",
+                  textShadow: "0 1px 2px rgba(0,0,0,0.7)",
+                  whiteSpace: "nowrap",
+                  opacity: widthPct < 4 ? 0 : 1,
+                }}
+              >
+                {p.name}
+              </span>
+            </div>
+          );
+        });
+      })}
     </>
   );
 }

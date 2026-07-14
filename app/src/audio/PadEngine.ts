@@ -1,6 +1,7 @@
 import * as Tone from "tone";
 import type { PadParams, PadWaveform } from "../state";
 import { activePadVoicesAt } from "./padCycle";
+import { applyFilterChain } from "./filterChain";
 
 /**
  * Warm-pad synth engine. Signal chain per voice:
@@ -50,6 +51,8 @@ interface PadVoice {
 export class PadEngine {
   private started = false;
   private master: Tone.Gain | null = null;
+  private masterHp: Tone.Filter | null = null;
+  private masterLp: Tone.Filter | null = null;
   private chorus: Tone.Chorus | null = null;
   private filter: Tone.Filter | null = null;
   private saturation: Tone.Distortion | null = null;
@@ -67,6 +70,10 @@ export class PadEngine {
     if (this.started) return;
     await Tone.start();
     this.master = new Tone.Gain(0);
+    this.masterHp = new Tone.Filter({ type: "highpass", frequency: 10, Q: 0.7 });
+    this.masterLp = new Tone.Filter({ type: "lowpass", frequency: 22000, Q: 0.7 });
+    this.master.connect(this.masterHp);
+    this.masterHp.connect(this.masterLp);
     this.chorus = new Tone.Chorus({
       frequency: 0.3,
       delayTime: 3.5,
@@ -92,11 +99,11 @@ export class PadEngine {
   private currentRoutingTarget: Tone.InputNode | null | undefined = undefined;
   /** See DroneEngine.setRouting. */
   setRouting(target: Tone.InputNode | null): void {
-    if (!this.started || !this.master) return;
+    if (!this.started || !this.masterLp) return;
     if (this.currentRoutingTarget === target) return;
-    this.master.disconnect();
-    if (target) this.master.connect(target);
-    else this.master.toDestination();
+    this.masterLp.disconnect();
+    if (target) this.masterLp.connect(target);
+    else this.masterLp.toDestination();
     this.currentRoutingTarget = target;
   }
 
@@ -112,6 +119,7 @@ export class PadEngine {
       return;
 
     this.master.gain.rampTo(p.enabled ? p.master : 0, 0.05);
+    applyFilterChain(this.masterHp, this.masterLp, p.filters);
 
     if (p.waveform !== this.currentWaveform) {
       this.currentWaveform = p.waveform;

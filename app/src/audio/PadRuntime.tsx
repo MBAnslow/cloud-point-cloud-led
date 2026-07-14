@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useSimStore } from "../state";
 import { getPadEngine } from "./PadEngine";
+import { modulatedEngineParams } from "./breathModulation";
 
 /**
  * Headless component that drives the warm-pad engine every animation
@@ -28,7 +29,8 @@ export function PadRuntime(): null {
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const state = useSimStore.getState();
-      engine.update(state.sky.timeHours, state.pad);
+      const { pad } = modulatedEngineParams(state, performance.now());
+      engine.update(state.sky.timeHours, pad);
     };
     raf = requestAnimationFrame(tick);
 

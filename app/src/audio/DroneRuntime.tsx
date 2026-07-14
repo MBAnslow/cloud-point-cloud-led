@@ -5,6 +5,7 @@ import {
   periodLengthHours,
 } from "../state";
 import { getDroneEngine } from "./DroneEngine";
+import { modulatedEngineParams } from "./breathModulation";
 
 /**
  * Headless component that drives the drone engine every animation frame.
@@ -80,7 +81,8 @@ export function DroneRuntime(): null {
         }
         state.setSky({ timeHours: next });
       }
-      engine.update(state.sky.timeHours, state.drone);
+      const { drone } = modulatedEngineParams(state, now);
+      engine.update(state.sky.timeHours, drone);
     };
     raf = requestAnimationFrame(tick);
 
