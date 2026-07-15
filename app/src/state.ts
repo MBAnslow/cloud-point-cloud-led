@@ -49,10 +49,12 @@ export interface LightningParams {
   /** Average number of strikes per minute (Poisson-ish scheduling). */
   strikesPerMinute: number;
   /**
-   * Radius (m) around the bolt where an LED gets full contribution;
-   * fades to zero at 2x. Fixed value (not sampled per strike).
+   * Characteristic distance (m) over which an LED's contribution from a
+   * lit segment drops by 1/e. Continuous exponential falloff — every
+   * LED receives some light, larger values = more diffuse glow through
+   * the cloud.
    */
-  boltRadius: number;
+  falloffDistance: number;
   /** Number of samples in a bolt polyline (jaggedness). */
   boltSegments: number;
   /** Per-strike lateral randomness range, [0,1]. Sampled per strike. */
@@ -1097,7 +1099,7 @@ const DEFAULTS = {
     colors: ["#cfe7ff", "#a8c8ff", "#fff2c9"],
     intensityRange: [0.9, 1.5],
     strikesPerMinute: 12,
-    boltRadius: 0.25,
+    falloffDistance: 0.6,
     boltSegments: 10,
     boltJitterRange: [0.25, 0.55],
     flashDurationMsRange: [160, 320],
@@ -1679,14 +1681,26 @@ function resolveLightning(input: unknown): LightningParams {
       "intensity",
       d.intensityRange,
     ),
-    boltRadius: (() => {
-      const v = (saved as Record<string, unknown>).boltRadius;
-      if (typeof v === "number") return v;
-      const r = (saved as Record<string, unknown>).boltRadiusRange;
-      if (Array.isArray(r) && typeof r[0] === "number" && typeof r[1] === "number") {
-        return (r[0] + r[1]) / 2;
+    falloffDistance: (() => {
+      const rec = saved as Record<string, unknown>;
+      const explicit = rec.falloffDistance;
+      if (typeof explicit === "number" && Number.isFinite(explicit)) {
+        return Math.max(0.02, explicit);
       }
-      return d.boltRadius;
+      // Migration from the old fixed-radius model.
+      const legacy = rec.boltRadius;
+      if (typeof legacy === "number" && Number.isFinite(legacy)) {
+        return Math.max(0.02, legacy);
+      }
+      const range = rec.boltRadiusRange;
+      if (
+        Array.isArray(range) &&
+        typeof range[0] === "number" &&
+        typeof range[1] === "number"
+      ) {
+        return Math.max(0.02, (range[0] + range[1]) / 2);
+      }
+      return d.falloffDistance;
     })(),
     boltJitterRange: asPairFromScalar(
       "boltJitterRange",

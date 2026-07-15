@@ -15,6 +15,7 @@ interface VisibleBolt {
   opacity: number;
   head: number;
   color: string;
+  lineWidth: number;
 }
 
 function rgbToHex(r: number, g: number, b: number): string {
@@ -51,6 +52,10 @@ export function LightningBolts() {
     if (now - lastTickRef.current < 1000 / fps) return;
     lastTickRef.current = now;
     const strikes = sharedLightningController.getStrikes();
+    // Reference the top of the user-set intensity range so the strongest
+    // configured strike renders at full opacity; weaker strikes look
+    // overtly dimmer as a visual cue.
+    const intensityMax = Math.max(1, lightning.intensityRange[1]);
     const next: VisibleBolt[] = [];
     for (const s of strikes) {
       const env = sharedLightningController.strikeEnvelope(s, now);
@@ -64,12 +69,16 @@ export function LightningBolts() {
       const points = partialPath(s.path, head);
       if (points.length < 2) continue;
       const c = sharedLightningController.strikeColor(s, now);
+      const iNorm = Math.max(0, Math.min(1, s.intensity / intensityMax));
+      const opacity = Math.max(0, Math.min(1, env * (0.35 + 0.65 * iNorm)));
+      const lineWidth = 1.5 + iNorm * 1.5;
       next.push({
         id,
         points,
-        opacity: Math.min(1, env),
+        opacity,
         head,
         color: rgbToHex(c[0], c[1], c[2]),
+        lineWidth,
       });
     }
     // Cheap change check: compare counts + ids + rounded opacities.
@@ -98,7 +107,7 @@ export function LightningBolts() {
           key={b.id}
           points={b.points}
           color={b.color}
-          lineWidth={2}
+          lineWidth={b.lineWidth}
           transparent
           opacity={b.opacity}
           depthWrite={false}

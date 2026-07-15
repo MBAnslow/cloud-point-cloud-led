@@ -61,7 +61,9 @@ function rotateCloud(
   tiltRad: number,
   yawRad: number,
 ): [number, number, number] {
-  return rotateY(rotateX(v, tiltRad), yawRad);
+  // Match three.js default Euler order "XYZ" used by the Ellipsoid mesh
+  // (composed matrix Rx * Ry * Rz → yaw applied first, then tilt).
+  return rotateX(rotateY(v, yawRad), tiltRad);
 }
 
 function offsetXZ(v: [number, number, number], x: number, z: number): [number, number, number] {

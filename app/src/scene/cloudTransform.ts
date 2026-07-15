@@ -27,7 +27,12 @@ export function rotateCloud(
   tiltRad: number,
   yawRad: number,
 ): [number, number, number] {
-  return rotateY(rotateX(v, tiltRad), yawRad);
+  // Match three.js default Euler order "XYZ" on the ellipsoid mesh:
+  // the composed matrix is Rx * Ry * Rz, so a vector sees yaw applied
+  // first, then tilt. Getting this order wrong makes LEDs, lightning
+  // paths, and the breath area diverge from the visible mesh at large
+  // tilt angles.
+  return rotateX(rotateY(v, yawRad), tiltRad);
 }
 
 export function offsetXZ(

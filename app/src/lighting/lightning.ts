@@ -21,8 +21,6 @@ export interface BoltStrike {
   subOffsets: number[];
   /** Sampled per-strike intensity (from `intensityRange`). */
   intensity: number;
-  /** Radius (m) at strike time (copied from `boltRadius`). */
-  radius: number;
 }
 
 function sampleRange(range: [number, number]): number {
@@ -332,7 +330,6 @@ export class LightningController {
       const jitter = Math.max(0, sampleRange(params.boltJitterRange));
       const duration = Math.max(30, sampleRange(params.flashDurationMsRange));
       const intensity = Math.max(0, sampleRange(params.intensityRange));
-      const radius = Math.max(0.01, params.boltRadius);
       const path = sampleBoltPath(
         ellipsoid,
         transform,
@@ -353,7 +350,6 @@ export class LightningController {
         colorStops: shuffledColorStops(params.colors),
         subOffsets: subs,
         intensity,
-        radius,
       });
     }
   }
@@ -372,15 +368,19 @@ export class LightningController {
     out.fill(0);
     if (!params.enabled || this.strikes.length === 0) return;
 
+    // Continuous exponential falloff: contribution to an LED at distance
+    // `d` from a lit segment is `exp(-d / falloff)`. Every LED gets a
+    // little bit of light (matches how it diffuses through the cloud)
+    // rather than a hard radius cutoff. We still skip contributions
+    // below ~1/255 so the inner loop stays bounded.
+    const falloff = Math.max(0.02, params.falloffDistance);
+    const invFalloff = 1 / falloff;
+    const cutoff = 5.5 * falloff;
+    const cutoffSq = cutoff * cutoff;
+
     for (const s of this.strikes) {
       const age = nowMs - s.bornMs;
       if (age < 0 || age > s.durationMs) continue;
-      // Per-strike radius + intensity (sampled at birth from ranges).
-      const radius = Math.max(0.01, s.radius);
-      const rFull = radius;
-      const rFade = radius * 2;
-      const rFullSq = rFull * rFull;
-      const rFadeSq = rFade * rFade;
       const path = s.path;
       const totalSegs = path.length / 3 - 1;
       if (totalSegs <= 0) continue;
@@ -451,13 +451,8 @@ export class LightningController {
             path[a3], path[a3 + 1], path[a3 + 2],
             path[b3], path[b3 + 1], path[b3 + 2],
           );
-          if (d2 >= rFadeSq) continue;
-          let prox: number;
-          if (d2 <= rFullSq) prox = 1;
-          else {
-            const d = Math.sqrt(d2);
-            prox = 1 - (d - rFull) / (rFade - rFull);
-          }
+          if (d2 >= cutoffSq) continue;
+          const prox = Math.exp(-Math.sqrt(d2) * invFalloff);
           acc += e * prox;
         }
         if (acc <= 0) continue;

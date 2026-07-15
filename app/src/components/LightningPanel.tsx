@@ -85,13 +85,13 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           formatValue={(v) => v.toFixed(0)}
         />
         <SliderRow
-          label="Bolt radius"
-          min={0.02}
-          max={2}
+          label="Light falloff"
+          min={0.05}
+          max={5}
           step={0.01}
-          value={lightning.boltRadius}
-          onChange={(v) => upd({ boltRadius: v })}
-          formatValue={(v) => v.toFixed(2)}
+          value={lightning.falloffDistance}
+          onChange={(v) => upd({ falloffDistance: v })}
+          formatValue={(v) => `${v.toFixed(2)} m`}
         />
         <SliderRow
           label="Segments"
