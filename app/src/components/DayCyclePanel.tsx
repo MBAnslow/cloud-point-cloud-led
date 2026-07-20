@@ -323,7 +323,7 @@ function clampCyclic(v: number, lo: number, hi: number): number {
 
 const panelStyle: React.CSSProperties = {
   position: "fixed",
-  top: 12,
+  top: 56,
   left: 12,
   right: 300,
   zIndex: 15,

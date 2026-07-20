@@ -71,7 +71,7 @@ export function LedViewModePanel() {
       style={{
         position: "fixed",
         left: 12,
-        top: 220,
+        top: 420,
         width: "min(300px, 24vw)",
         zIndex: 10,
         pointerEvents: "auto",

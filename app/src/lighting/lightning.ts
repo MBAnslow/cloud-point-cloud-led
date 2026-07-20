@@ -205,6 +205,24 @@ function sampleBoltPath(
 }
 
 /**
+ * Sum of segment lengths of a packed `[x, y, z, x, y, z, ...]` polyline
+ * in world units. Returns 0 for a degenerate (0 or 1 vertex) path.
+ */
+function polylineLength(path: Float32Array): number {
+  const verts = path.length / 3;
+  if (verts < 2) return 0;
+  let total = 0;
+  for (let i = 1; i < verts; i++) {
+    const j = i * 3;
+    const dx = path[j] - path[j - 3];
+    const dy = path[j + 1] - path[j - 2];
+    const dz = path[j + 2] - path[j - 1];
+    total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  return total;
+}
+
+/**
  * Squared distance from point p to segment (a, b). Returns 0 if a == b.
  */
 function pointSegmentDistSq(
@@ -305,12 +323,16 @@ export class LightningController {
     }
 
     if (this.lastUpdateMs === 0) this.lastUpdateMs = nowMs;
-    const dtMs = Math.max(0, nowMs - this.lastUpdateMs);
+    // Cap the effective dt so backgrounded tabs / routes without the
+    // simulator mounted don't accumulate a huge Poisson budget that
+    // discharges as a strike burst the moment updates resume. 250 ms
+    // is well over a typical frame but far under any realistic
+    // between-strike interval, so normal spawning is unaffected.
+    const dtMs = Math.min(250, Math.max(0, nowMs - this.lastUpdateMs));
     this.lastUpdateMs = nowMs;
 
     if (!params.enabled) return;
 
-    // Expected strikes in dt from a Poisson process at strikesPerMinute.
     const rate = Math.max(0, params.strikesPerMinute) / 60000;
     const expected = rate * dtMs;
     // Cheap approximation: probability per frame ~ expected (small values).
@@ -328,7 +350,6 @@ export class LightningController {
       // draw from every configured range so the strike keeps stable
       // values through its whole flash envelope.
       const jitter = Math.max(0, sampleRange(params.boltJitterRange));
-      const duration = Math.max(30, sampleRange(params.flashDurationMsRange));
       const intensity = Math.max(0, sampleRange(params.intensityRange));
       const path = sampleBoltPath(
         ellipsoid,
@@ -338,6 +359,14 @@ export class LightningController {
         Math.max(0.05, Math.min(1, params.spanScale)),
         Math.max(0, Math.min(2, params.minSpanScale ?? 0)),
       );
+      // Flash duration is derived from the actual polyline length and a
+      // per-strike sampled travel speed. Longer bolts and slower speeds
+      // → longer flashes. The `* 4` keeps the existing 25% travel /
+      // 75% fade envelope split intact.
+      const speed = Math.max(0.05, sampleRange(params.travelSpeedRange));
+      const pathLen = polylineLength(path);
+      const travelMsRaw = (pathLen / speed) * 1000;
+      const duration = Math.max(30, travelMsRaw * 4);
       const subs: number[] = [];
       const subCount = Math.max(0, Math.floor(params.subFlashes));
       for (let k = 0; k < subCount; k++) {

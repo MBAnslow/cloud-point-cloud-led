@@ -5,7 +5,8 @@ import {
   currentSnapshot,
   useSimStore,
 } from "../state";
-import { loadSnapshot, saveSnapshot } from "../state/persistence";
+import { loadSnapshot, saveSnapshot, type Snapshot } from "../state/persistence";
+import { loadFromFile, saveToFile, summariseMissing } from "../state/fileIO";
 
 /**
  * Renders no DOM itself — leva manages its own panel. We use the controls
@@ -57,6 +58,13 @@ export function ControlPanel() {
         max: 5,
         step: 0.01,
         label: "offset x (m)",
+      },
+      offsetY: {
+        value: initial.cloud.offsetY ?? 0,
+        min: -5,
+        max: 5,
+        step: 0.01,
+        label: "offset y (m)",
       },
       offsetZ: {
         value: initial.cloud.offsetZ ?? 0,
@@ -188,55 +196,79 @@ export function ControlPanel() {
     [],
   );
 
+  // Mirror snapshot values back into the leva controls after any load
+  // path so the sliders/pickers reflect what's now in the store. Kept
+  // as a local closure so both the localStorage and YAML-file loaders
+  // share the exact same mirror logic.
+  const mirrorToLeva = (snap: Omit<Snapshot, "version">) => {
+    setCl({
+      opacity: snap.cloud.opacity,
+      showOpacity: snap.cloud.showOpacity,
+      rotationXDeg: snap.cloud.rotationXDeg ?? 0,
+      rotationYDeg: snap.cloud.rotationYDeg ?? 0,
+      offsetX: snap.cloud.offsetX ?? 0,
+      offsetY: snap.cloud.offsetY ?? 0,
+      offsetZ: snap.cloud.offsetZ ?? 0,
+    });
+    setStr({
+      ledSize: snap.strand.ledSize,
+      sensorHemisphereFocus: snap.strand.sensorHemisphereFocus ?? 0,
+    });
+    setLights({
+      ambientColor: snap.ambient.color,
+      ambientIntensity: snap.ambient.intensity,
+    });
+    setSkyControls({
+      enabled: snap.sky?.enabled ?? true,
+      visualizationAmount: snap.sky?.visualizationAmount ?? 1,
+      cycleSeconds: snap.sky?.cycleSeconds ?? 180,
+      ambientScale: snap.sky?.ambientScale ?? 1,
+      sunScale: snap.sky?.sunScale ?? 1,
+      sunSpread: snap.sky?.sunSpread ?? 0.9,
+      moonScale: snap.sky?.moonScale ?? 1,
+      moonSpread: snap.sky?.moonSpread ?? 0.9,
+      horizonCutoffDeg: snap.sky?.horizonCutoffDeg ?? -7,
+      horizonSoftnessDeg: snap.sky?.horizonSoftnessDeg ?? 0,
+    });
+    setWledControls({
+      enabled: false,
+      host: snap.wled.host,
+      fps: snap.wled.fps,
+    });
+  };
+
   useControls("Presets", {
-    save: button(() => {
+    "auto-save (browser)": button(() => {
       saveSnapshot(currentSnapshot());
     }),
-    load: button(() => {
+    "auto-load (browser)": button(() => {
       const snap = loadSnapshot();
       if (!snap) {
         console.warn("[presets] no saved settings to load");
         return;
       }
       applySnapshot(snap);
-      // The store is now in sync; mirror that into the leva controls so the
-      // sliders/colour pickers reflect the loaded values. `enabled` is
-      // deliberately forced off — see applySnapshot for the rationale.
-      // (Ellipsoid dimensions are owned by the LED-mapping app now, so they
-      // are applied via applySnapshot above and not mirrored here.)
-      setCl({
-        opacity: snap.cloud.opacity,
-        showOpacity: snap.cloud.showOpacity,
-        rotationXDeg: snap.cloud.rotationXDeg ?? 0,
-        rotationYDeg: snap.cloud.rotationYDeg ?? 0,
-        offsetX: snap.cloud.offsetX ?? 0,
-        offsetZ: snap.cloud.offsetZ ?? 0,
-      });
-      setStr({
-        ledSize: snap.strand.ledSize,
-        sensorHemisphereFocus: snap.strand.sensorHemisphereFocus ?? 0,
-      });
-      setLights({
-        ambientColor: snap.ambient.color,
-        ambientIntensity: snap.ambient.intensity,
-      });
-      setSkyControls({
-        enabled: snap.sky?.enabled ?? true,
-        visualizationAmount: snap.sky?.visualizationAmount ?? 1,
-        cycleSeconds: snap.sky?.cycleSeconds ?? 180,
-        ambientScale: snap.sky?.ambientScale ?? 1,
-        sunScale: snap.sky?.sunScale ?? 1,
-        sunSpread: snap.sky?.sunSpread ?? 0.9,
-        moonScale: snap.sky?.moonScale ?? 1,
-        moonSpread: snap.sky?.moonSpread ?? 0.9,
-        horizonCutoffDeg: snap.sky?.horizonCutoffDeg ?? -7,
-        horizonSoftnessDeg: snap.sky?.horizonSoftnessDeg ?? 0,
-      });
-      setWledControls({
-        enabled: false,
-        host: snap.wled.host,
-        fps: snap.wled.fps,
-      });
+      mirrorToLeva(snap);
+    }),
+    "save to file": button(() => {
+      void saveToFile().catch((err) =>
+        console.warn("[presets] save-to-file failed", err),
+      );
+    }),
+    "save as…": button(() => {
+      void saveToFile({ forcePicker: true }).catch((err) =>
+        console.warn("[presets] save-as failed", err),
+      );
+    }),
+    "open from file…": button(() => {
+      void loadFromFile()
+        .then((res) => {
+          if (!res) return;
+          mirrorToLeva(currentSnapshot());
+          const missing = summariseMissing(res.missingAssets);
+          if (missing) console.warn(`[presets] ${missing}`);
+        })
+        .catch((err) => console.warn("[presets] open-file failed", err));
     }),
   });
 
@@ -247,6 +279,7 @@ export function ControlPanel() {
       rotationXDeg: cl.rotationXDeg,
       rotationYDeg: cl.rotationYDeg,
       offsetX: cl.offsetX,
+      offsetY: cl.offsetY,
       offsetZ: cl.offsetZ,
     });
   }, [
@@ -255,6 +288,7 @@ export function ControlPanel() {
     cl.rotationXDeg,
     cl.rotationYDeg,
     cl.offsetX,
+    cl.offsetY,
     cl.offsetZ,
     setCloud,
   ]);

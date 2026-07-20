@@ -40,10 +40,20 @@ export interface ShadeLightPoint {
   spread: number;
 }
 
+export interface ShadeLightHemisphere {
+  type: "hemisphere";
+  /** Upper-hemisphere tint (contributes as `normal.y → +1`). */
+  skyColor: Vec3;
+  /** Lower-hemisphere tint (contributes as `normal.y → −1`). */
+  groundColor: Vec3;
+  intensity: number;
+}
+
 export type ShadeLight =
   | ShadeLightAmbient
   | ShadeLightDirectional
-  | ShadeLightPoint;
+  | ShadeLightPoint
+  | ShadeLightHemisphere;
 
 /**
  * Cosine exponent at `spread = 0` — the tightest the spot beam can get.
@@ -198,6 +208,16 @@ export function shadeLeds(
         r += L.color[0] * L.intensity;
         g += L.color[1] * L.intensity;
         b += L.color[2] * L.intensity;
+      } else if (L.type === "hemisphere") {
+        // three.js HemisphereLight: linear blend between sky and ground
+        // tints based on the surface normal's Y component. `ny` here is
+        // the LED's outward normal in world space, so upward-facing LEDs
+        // pick up the sky tint and downward-facing ones pick up ground.
+        const t = ny * 0.5 + 0.5;
+        const one = 1 - t;
+        r += (L.groundColor[0] * one + L.skyColor[0] * t) * L.intensity;
+        g += (L.groundColor[1] * one + L.skyColor[1] * t) * L.intensity;
+        b += (L.groundColor[2] * one + L.skyColor[2] * t) * L.intensity;
       } else if (L.type === "directional") {
         let k: number;
         if (!hemisphereAverage) {

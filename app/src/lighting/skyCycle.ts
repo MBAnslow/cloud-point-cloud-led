@@ -3,6 +3,12 @@ import type { SkyChannelStop, SkyParams, Vec3 } from "../state";
 export interface SkyLighting {
   ambientColor: string;
   ambientIntensity: number;
+  /** Upper-hemisphere tint for the hemispheric sky term. */
+  skyColor: string;
+  /** Lower-hemisphere tint (warm at twilight, neutral otherwise). */
+  groundColor: string;
+  /** Energy for the hemispheric term; matches `ambientIntensity`. */
+  hemiIntensity: number;
   sunColor: string;
   sunIntensity: number;
   sunDirection: Vec3;
@@ -139,11 +145,14 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
   const rawMoonColor = interpolateChannel(sky.moonStops, hour, "#b7c8ff");
   const rawAmbientColor = interpolateChannel(sky.ambientStops, hour, "#0c1734");
 
-  const solar = Math.sin(((hour - 6) / 24) * TAU);
-  const altitude = Math.asin(solar);
-  const altitudeDeg = (altitude * 180) / Math.PI;
-  const azimuth = ((hour - 6) / 24) * TAU;
-  const sunDirection = directionFromAzAlt(azimuth, altitude);
+  // Use one continuous orbital angle for both horizontal + vertical motion.
+  // The previous formulation derived altitude from `sin(phase)` and azimuth
+  // from the same phase, which folds `cos(altitude)` into `|cos(phase)|` and
+  // makes the trajectory appear to reverse around horizon crossings.
+  const orbital = ((hour - 6) / 24) * TAU;
+  const sunDirection: Vec3 = [Math.cos(orbital), Math.sin(orbital), 0];
+  const solar = sunDirection[1];
+  const altitudeDeg = (Math.asin(solar) * 180) / Math.PI;
   const moonDirection: Vec3 = [
     -sunDirection[0],
     -sunDirection[1],
@@ -171,10 +180,20 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
   const sunIntensity = clamp01(sunBase * sky.sunScale) * 1.6 * vis;
   const moonIntensity = clamp01(moonBase * sky.moonScale) * 0.95 * vis;
 
+  const ambientColorFinal = saturateHex(rawAmbientColor, 1.08 + twilight * 0.25);
+  const sunColorFinal = saturateHex(rawSunColor, 1.18 * sunsetBoost);
+  // Ground tint: neutral cool at midday/night, biases toward the warm
+  // sun color as the sun approaches the horizon. `twilight` already
+  // peaks near sunrise/sunset, so it drives the mix directly.
+  const groundColor = lerpHex("#0b0e14", sunColorFinal, clamp01(twilight * 0.9));
+
   return {
-    ambientColor: saturateHex(rawAmbientColor, 1.08 + twilight * 0.25),
+    ambientColor: ambientColorFinal,
     ambientIntensity,
-    sunColor: saturateHex(rawSunColor, 1.18 * sunsetBoost),
+    skyColor: ambientColorFinal,
+    groundColor,
+    hemiIntensity: ambientIntensity,
+    sunColor: sunColorFinal,
     sunIntensity,
     sunDirection,
     moonColor: saturateHex(rawMoonColor, 1.1),

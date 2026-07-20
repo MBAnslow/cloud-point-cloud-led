@@ -59,8 +59,14 @@ export interface LightningParams {
   boltSegments: number;
   /** Per-strike lateral randomness range, [0,1]. Sampled per strike. */
   boltJitterRange: [number, number];
-  /** Per-strike flash-envelope duration range, ms. Sampled per strike. */
-  flashDurationMsRange: [number, number];
+  /**
+   * Per-strike bolt tip travel speed range, in world metres per second.
+   * The flash duration is derived from `path_length / speed * 4` so
+   * longer bolts and slower speeds automatically produce longer flashes.
+   * The `* 4` factor preserves the historical ~25% travel / ~75% fade
+   * envelope split.
+   */
+  travelSpeedRange: [number, number];
   /** Number of flicker sub-pulses within a single strike. */
   subFlashes: number;
   /** Max portion of the ellipsoid extents the bolt endpoints span, [0,1]. */
@@ -92,6 +98,13 @@ export interface LightningParams {
    * trigger (uniform in [-range, +range]). 0 = deterministic.
    */
   boltPitchJitterCents: number;
+  /**
+   * Delay in milliseconds between the visual bolt spawning and the
+   * bolt sample being triggered. Mimics thunder arriving after the
+   * flash (sound travels ~340 m/s vs. instantaneous light). 0 = fire
+   * simultaneously. Clamped to [0, 10000] on load.
+   */
+  thunderDelayMs: number;
   /**
    * Target simulation FPS for lightning updates + LED contribution.
    * Lower values create a stroboscopic, film-like flicker by
@@ -143,6 +156,9 @@ export interface CloudParams {
   rotationXDeg: number;
   /** World-space X offset of the cloud center, in metres. */
   offsetX: number;
+  /** World-space Y offset of the cloud center, in metres. Positive
+   * values lift the whole cloud (mesh + LEDs) up off the ground. */
+  offsetY: number;
   /** World-space Z offset of the cloud center, in metres. */
   offsetZ: number;
 }
@@ -744,6 +760,13 @@ export interface DayPeriod {
 export interface DayCycleParams {
   periods: DayPeriod[];
   activePeriodId: string;
+  /**
+   * When true and `sky.autoPlay` is on, the clock advances into the
+   * next period at the end of the current one instead of looping
+   * inside it. Off = classic behaviour (loop within period until the
+   * user clicks Next).
+   */
+  autoNext: boolean;
 }
 
 /**
@@ -895,6 +918,8 @@ export interface SimState {
   ledStreamPipeline: LedStreamPipeline;
   ledLocator: LedLocatorState;
   mapping: MappingParams;
+  mesh: MeshTargetParams;
+  ui: UiParams;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
   setStrand: (s: Partial<StrandParams>) => void;
@@ -937,8 +962,10 @@ export interface SimState {
   toggleLocatedLed: (index: number) => void;
   clearLocatedLeds: () => void;
   setMapping: (m: Partial<MappingParams>) => void;
-  addMappedLed: (dir: Vec3) => void;
-  moveMappedLed: (index: number, dir: Vec3) => void;
+  setMesh: (m: Partial<MeshTargetParams>) => void;
+  setUi: (u: Partial<UiParams>) => void;
+  addMappedLed: (dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
+  moveMappedLed: (index: number, dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
   removeLastMappedLed: () => void;
   clearMappedLeds: () => void;
 }
@@ -956,12 +983,52 @@ export interface LedLocatorState {
  * `(rx, ry, rz) * dir`.
  */
 export interface MappedLed {
+  /**
+   * Unit-sphere direction used in ellipsoid mode. In mesh mode a `dir` is
+   * still stored (the normalised `pos` from origin) so the flip/orientation
+   * helpers continue to work uniformly, but bead placement uses `pos`.
+   */
   dir: Vec3;
+  /** World-space surface point on the uploaded mesh (mesh mode only). */
+  pos?: Vec3;
+  /** Outward-pointing surface normal at `pos` (mesh mode only). */
+  normal?: Vec3;
+}
+
+/**
+ * Persisted UI toggles for the floating panels on the simulator page.
+ * Kept in the store (rather than component-local `useState`) so they
+ * round-trip through the snapshot save/load like every other choice.
+ */
+export interface UiParams {
+  showMaster: boolean;
+  showBreath: boolean;
+  showLightning: boolean;
+  showStream: boolean;
+}
+
+export type MappingMode = "ellipsoid" | "mesh";
+
+export interface MeshTargetParams {
+  /** IndexedDB blob id, or null if no mesh is loaded. */
+  id: string | null;
+  /** Display name (usually the source filename). */
+  name: string;
+  /** Uniform scale applied to the imported mesh. */
+  scale: number;
+  /** Rotation around the vertical (Y) axis, degrees. */
+  yawDeg: number;
+  /** Rotation around the X axis, degrees. */
+  tiltDeg: number;
+  /** Vertical offset from origin, metres. */
+  offsetY: number;
 }
 
 export interface MappingParams {
   /** LEDs in the order they were placed on the strand. */
   leds: MappedLed[];
+  /** Which surface the mapping app targets — the ellipsoid or an uploaded mesh. */
+  mode: MappingMode;
   /** Mirror mapping orientation vertically (swap top/bottom). */
   flipUpDown: boolean;
   /** Mirror mapping orientation horizontally (swap left/right). */
@@ -975,6 +1042,14 @@ export interface MappingParams {
   reversed: boolean;
   /** Bead display size in the mapping view (metres). */
   ledSize: number;
+  /**
+   * Maximum world-space distance the next LED can sit from the previous
+   * one, in metres. Modelled as an upper bound on the length of each
+   * strand segment: clicks farther than this from the last placed bead
+   * are rejected and the hover preview turns red. Ignored for the first
+   * bead in the strand.
+   */
+  maxSegmentLength: number;
 }
 
 /**
@@ -1045,6 +1120,7 @@ const DEFAULTS = {
     rotationXDeg: 0,
     rotationYDeg: 0,
     offsetX: 0,
+    offsetY: 0,
     offsetZ: 0,
   } as CloudParams,
   strand: {
@@ -1102,7 +1178,7 @@ const DEFAULTS = {
     falloffDistance: 0.6,
     boltSegments: 10,
     boltJitterRange: [0.25, 0.55],
-    flashDurationMsRange: [160, 320],
+    travelSpeedRange: [0.5, 2],
     subFlashes: 2,
     spanScale: 0.85,
     minSpanScale: 0.5,
@@ -1113,6 +1189,7 @@ const DEFAULTS = {
     boltGain: 0.8,
     backgroundGain: 0.35,
     boltPitchJitterCents: 200,
+    thunderDelayMs: 800,
     simFps: 60,
   } as LightningParams,
   drone: {
@@ -1196,6 +1273,7 @@ const DEFAULTS = {
       { id: "night", name: "Night", startHour: 20, endHour: 5, color: "#6366f1" },
     ],
     activePeriodId: "dawn",
+    autoNext: false,
   } as DayCycleParams,
   masterFx: {
     lpEnabled: false,
@@ -1226,11 +1304,27 @@ const DEFAULTS = {
   } as LedLocatorState,
   mapping: {
     leds: [],
+    mode: "ellipsoid",
     flipUpDown: false,
     flipLeftRight: false,
     reversed: false,
-    ledSize: 0.05,
+    ledSize: 0.01,
+    maxSegmentLength: 0.05,
   } as MappingParams,
+  mesh: {
+    id: null,
+    name: "",
+    scale: 1,
+    yawDeg: 0,
+    tiltDeg: 0,
+    offsetY: 0,
+  } as MeshTargetParams,
+  ui: {
+    showMaster: true,
+    showBreath: true,
+    showLightning: false,
+    showStream: false,
+  } as UiParams,
 };
 
 function normalizeLedViewMode(mode: unknown): LedViewMode {
@@ -1577,7 +1671,9 @@ function resolveDayCycle(
     saved.activePeriodId && periods.some((p) => p.id === saved.activePeriodId)
       ? saved.activePeriodId
       : periods[0].id;
-  return { periods, activePeriodId };
+  const autoNext =
+    typeof saved.autoNext === "boolean" ? saved.autoNext : DEFAULTS.dayCycle.autoNext;
+  return { periods, activePeriodId, autoNext };
 }
 
 /**
@@ -1707,11 +1803,16 @@ function resolveLightning(input: unknown): LightningParams {
       "boltJitter",
       d.boltJitterRange,
     ),
-    flashDurationMsRange: asPairFromScalar(
-      "flashDurationMsRange",
-      "flashDurationMs",
-      d.flashDurationMsRange,
+    travelSpeedRange: asPairFromScalar(
+      "travelSpeedRange",
+      "travelSpeed",
+      d.travelSpeedRange,
     ),
+    thunderDelayMs: (() => {
+      const v = (saved as Record<string, unknown>).thunderDelayMs;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.thunderDelayMs;
+      return Math.max(0, Math.min(10000, v));
+    })(),
   };
 }
 
@@ -1802,6 +1903,8 @@ function initialState() {
     },
     ledLocator: { ...DEFAULTS.ledLocator, ...saved.ledLocator },
     mapping: { ...DEFAULTS.mapping, ...saved.mapping },
+    mesh: { ...DEFAULTS.mesh, ...(saved.mesh ?? {}) },
+    ui: { ...DEFAULTS.ui, ...(saved.ui ?? {}) },
   };
 }
 
@@ -1975,15 +2078,22 @@ export const useSimStore = create<SimState>((set) => ({
   clearLocatedLeds: () =>
     set((s) => ({ ledLocator: { ...s.ledLocator, highlighted: [] } })),
   setMapping: (m) => set((s) => ({ mapping: { ...s.mapping, ...m } })),
-  addMappedLed: (dir) =>
-    set((s) => ({
-      mapping: { ...s.mapping, leds: [...s.mapping.leds, { dir }] },
-    })),
-  moveMappedLed: (index, dir) =>
+  setMesh: (m) => set((s) => ({ mesh: { ...s.mesh, ...m } })),
+  setUi: (u) => set((s) => ({ ui: { ...s.ui, ...u } })),
+  addMappedLed: (dir, pos, normal) =>
     set((s) => ({
       mapping: {
         ...s.mapping,
-        leds: s.mapping.leds.map((l, i) => (i === index ? { dir } : l)),
+        leds: [...s.mapping.leds, { dir, pos, normal }],
+      },
+    })),
+  moveMappedLed: (index, dir, pos, normal) =>
+    set((s) => ({
+      mapping: {
+        ...s.mapping,
+        leds: s.mapping.leds.map((l, i) =>
+          i === index ? { dir, pos, normal } : l,
+        ),
       },
     })),
   removeLastMappedLed: () =>
@@ -2077,6 +2187,8 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   });
   s.setLedLocator({ ...DEFAULTS.ledLocator, ...snap.ledLocator });
   s.setMapping({ ...DEFAULTS.mapping, ...snap.mapping });
+  s.setMesh({ ...DEFAULTS.mesh, ...(snap.mesh ?? {}) });
+  s.setUi({ ...DEFAULTS.ui, ...(snap.ui ?? {}) });
   return snap;
 }
 
@@ -2106,6 +2218,8 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     ledStreamPipeline: s.ledStreamPipeline,
     ledLocator: s.ledLocator,
     mapping: s.mapping,
+    mesh: s.mesh,
+    ui: s.ui,
   };
 }
 

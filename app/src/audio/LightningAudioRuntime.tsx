@@ -21,6 +21,9 @@ export function LightningAudioRuntime(): null {
     let lastMaxBorn = -Infinity;
     let unlockedOnce = false;
     let firstFrame = true;
+    // Pending thunder timers so we can clear queued sounds on unmount /
+    // when the effect is disabled mid-flight.
+    const pendingThunder = new Set<ReturnType<typeof setTimeout>>();
 
     const unlock = () => {
       engine
@@ -61,7 +64,19 @@ export function LightningAudioRuntime(): null {
       let newMax = lastMaxBorn;
       for (const s of strikes) {
         if (s.bornMs > lastMaxBorn) {
-          engine.triggerBolt(p, s.intensity);
+          const delay = Math.max(0, p.thunderDelayMs ?? 0);
+          const intensity = s.intensity;
+          if (delay <= 0) {
+            engine.triggerBolt(p, intensity);
+          } else {
+            const timer = setTimeout(() => {
+              pendingThunder.delete(timer);
+              const cur = useSimStore.getState().lightning;
+              if (!cur.enabled) return;
+              engine.triggerBolt(cur, intensity);
+            }, delay);
+            pendingThunder.add(timer);
+          }
           if (s.bornMs > newMax) newMax = s.bornMs;
         }
       }
@@ -71,6 +86,8 @@ export function LightningAudioRuntime(): null {
 
     return () => {
       cancelAnimationFrame(raf);
+      for (const t of pendingThunder) clearTimeout(t);
+      pendingThunder.clear();
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
     };

@@ -75,10 +75,10 @@ export function BreathArea() {
     );
     const worldSurfacePos = offsetXZ(surfacePos, cloud.offsetX, cloud.offsetZ);
     return {
-      center: new Vector3(centerPos[0], centerPos[1], centerPos[2]),
+      center: new Vector3(centerPos[0], centerPos[1] + cloud.offsetY, centerPos[2]),
       surfacePoint: new Vector3(
         worldSurfacePos[0],
-        worldSurfacePos[1],
+        worldSurfacePos[1] + cloud.offsetY,
         worldSurfacePos[2],
       ),
     };
@@ -87,6 +87,7 @@ export function BreathArea() {
     tiltRad,
     yawRad,
     cloud.offsetX,
+    cloud.offsetY,
     cloud.offsetZ,
     breath.area.sourceAzimuthDeg,
     breath.area.sourceElevationDeg,

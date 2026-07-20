@@ -73,13 +73,21 @@ export function DroneRuntime(): null {
         if (dh < distToEnd) {
           next = cur + dh;
           if (next >= 24) next -= 24;
+          state.setSky({ timeHours: next });
+        } else if (state.dayCycle.autoNext) {
+          // Auto-advance to the next period at the boundary. The
+          // overshoot beyond `distToEnd` is discarded — advancing snaps
+          // to the next period's startHour, matching the manual Next
+          // button's behaviour and keeping instrument scheduling
+          // predictable.
+          state.advancePeriod();
         } else {
-          // Loop: land at startHour + (dh - distToEnd) mod length.
+          // Classic loop: land at startHour + (dh - distToEnd) mod length.
           const overshoot = (dh - distToEnd) % len;
           next = period.startHour + overshoot;
           if (next >= 24) next -= 24;
+          state.setSky({ timeHours: next });
         }
-        state.setSky({ timeHours: next });
       }
       const { drone } = modulatedEngineParams(state, now);
       engine.update(state.sky.timeHours, drone);

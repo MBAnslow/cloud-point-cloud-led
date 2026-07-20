@@ -3,18 +3,22 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import {
   AdditiveBlending,
   Color,
+  Euler,
   FrontSide,
   DynamicDrawUsage,
   InstancedBufferAttribute,
   InstancedMesh,
+  Matrix3,
+  Matrix4,
   Object3D,
+  Quaternion,
   Vector3,
 } from "three";
+import { applyMappingOrientationPoint } from "../mapping/geometry";
 import {
-  applyMappingOrientation,
-  surfaceNormal,
-  surfacePoint,
-} from "../mapping/geometry";
+  getMeshHalfExtents,
+  loadMeshGeometry,
+} from "../mapping/meshAsset";
 import { sampleBreathAt } from "../lighting/breath";
 import {
   computeBreathAreaOrigin,
@@ -75,6 +79,7 @@ export function Leds() {
   const cloud = useSimStore((s) => s.cloud);
   const strand = useSimStore((s) => s.strand);
   const mapping = useSimStore((s) => s.mapping);
+  const meshTarget = useSimStore((s) => s.mesh);
   const ambient = useSimStore((s) => s.ambient);
   const sky = useSimStore((s) => s.sky);
   const breath = useSimStore((s) => s.breath);
@@ -117,20 +122,61 @@ export function Leds() {
     };
   }, [ledCount]);
 
-  // Recompute LED positions whenever the geometric parameters change.
-  // Written in-place to avoid per-frame allocations.
+  // Mesh transform used to convert stored mesh-local LED coords into
+  // world coords. Kept identical to the mapping app's mesh transform.
+  const meshMatrix = useMemo(() => {
+    const q = new Quaternion().setFromEuler(
+      new Euler(
+        (meshTarget.tiltDeg * Math.PI) / 180,
+        (meshTarget.yawDeg * Math.PI) / 180,
+        0,
+        "XYZ",
+      ),
+    );
+    return new Matrix4().compose(
+      new Vector3(0, meshTarget.offsetY, 0),
+      q,
+      new Vector3(meshTarget.scale, meshTarget.scale, meshTarget.scale),
+    );
+  }, [meshTarget.scale, meshTarget.offsetY, meshTarget.yawDeg, meshTarget.tiltDeg]);
+  const meshNormalMat = useMemo(
+    () => new Matrix3().getNormalMatrix(meshMatrix),
+    [meshMatrix],
+  );
+
   useEffect(() => {
     for (let i = 0; i < buffers.n; i++) {
       // `i` is the logical strand index; map it to the placement index so
       // the reverse toggle flips which physical end is LED #0.
       const physical = mapping.reversed ? buffers.n - 1 - i : i;
-      const dir = applyMappingOrientation(
-        mapping.leds[physical].dir,
+      const led = mapping.leds[physical];
+      // LEDs without a mesh-mode record contribute an origin dummy (0,0,0)
+      // so they still count in the strand but have no visible position.
+      const rawPos: [number, number, number] = led.pos
+        ? [led.pos[0], led.pos[1], led.pos[2]]
+        : [0, 0, 0];
+      const rawNrm: [number, number, number] = led.normal
+        ? [led.normal[0], led.normal[1], led.normal[2]]
+        : [0, 1, 0];
+      const lp = applyMappingOrientationPoint(
+        rawPos,
         mapping.flipUpDown,
         mapping.flipLeftRight,
       );
-      const pos = surfacePoint(dir, ellipsoid);
-      const nrm = ensureOutwardNormal(pos, surfaceNormal(dir, ellipsoid));
+      const ln = applyMappingOrientationPoint(
+        rawNrm,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+      );
+      // Transform the stored mesh-local point + normal by the current
+      // mesh transform so LEDs stay attached to the surface as the
+      // scale/rotation/offset sliders change.
+      const wpV = new Vector3(lp[0], lp[1], lp[2]).applyMatrix4(meshMatrix);
+      const wnV = new Vector3(ln[0], ln[1], ln[2])
+        .applyMatrix3(meshNormalMat)
+        .normalize();
+      const pos: [number, number, number] = [wpV.x, wpV.y, wpV.z];
+      const nrm = ensureOutwardNormal(pos, [wnV.x, wnV.y, wnV.z]);
       const rPos = offsetXZ(
         rotateCloud(pos, cloudTiltRad, cloudYawRad),
         cloud.offsetX,
@@ -139,7 +185,7 @@ export function Leds() {
       const rNrm = rotateCloud(nrm, cloudTiltRad, cloudYawRad);
       const i3 = i * 3;
       buffers.positions[i3] = rPos[0];
-      buffers.positions[i3 + 1] = rPos[1];
+      buffers.positions[i3 + 1] = rPos[1] + cloud.offsetY;
       buffers.positions[i3 + 2] = rPos[2];
       buffers.normals[i3] = rNrm[0];
       buffers.normals[i3 + 1] = rNrm[1];
@@ -195,11 +241,40 @@ export function Leds() {
     cloudTiltRad,
     cloudYawRad,
     cloud.offsetX,
+    cloud.offsetY,
     cloud.offsetZ,
     ledDisplayMode,
+    meshMatrix,
+    meshNormalMat,
     buffers,
     dummy,
   ]);
+
+  // Cached mesh half-extents (bounding-box), used to constrain lightning
+  // bolt endpoints to the actual cloud mesh volume rather than the legacy
+  // ellipsoid params (which no longer describe the visible cloud once a
+  // user mesh is loaded).
+  const meshHalfExtentsRef = useRef<{ hx: number; hy: number; hz: number } | null>(null);
+  useEffect(() => {
+    const id = meshTarget.id;
+    if (!id) {
+      meshHalfExtentsRef.current = null;
+      return;
+    }
+    const cached = getMeshHalfExtents(id);
+    if (cached) {
+      meshHalfExtentsRef.current = cached;
+      return;
+    }
+    let cancelled = false;
+    loadMeshGeometry(id).then(() => {
+      if (cancelled) return;
+      meshHalfExtentsRef.current = getMeshHalfExtents(id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [meshTarget.id]);
 
   // Long-lived WLED streaming client. Lightning uses a shared controller
   // so the 3D bolt visualisation sees the same active strikes.
@@ -256,9 +331,10 @@ export function Leds() {
       if (sky.enabled) {
         timeLights.push(
           {
-            type: "ambient",
-            color: hexToVec3(skyLighting.ambientColor),
-            intensity: skyLighting.ambientIntensity,
+            type: "hemisphere",
+            skyColor: hexToVec3(skyLighting.skyColor),
+            groundColor: hexToVec3(skyLighting.groundColor),
+            intensity: skyLighting.hemiIntensity,
           },
           {
             type: "directional",
@@ -316,7 +392,7 @@ export function Leds() {
         cloud.offsetZ,
       );
       const ox = origin[0];
-      const oy = origin[1];
+      const oy = origin[1] + cloud.offsetY;
       const oz = origin[2];
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
@@ -354,13 +430,33 @@ export function Leds() {
       const lastRender = lightningRenderRef.current;
       if (now - lastRender >= frameMs) {
         lightningRenderRef.current = now;
+        // Compose the mesh's own yaw/tilt/offsetY into the cloud
+        // transform so bolts follow the visible mesh, not just the
+        // cloud-level rotation. Three.js Euler order is XYZ (see
+        // `Ellipsoid.tsx`) so tilts and yaws add directly here.
+        const meshTiltRad = (meshTarget.tiltDeg * Math.PI) / 180;
+        const meshYawRad = (meshTarget.yawDeg * Math.PI) / 180;
         const cloudXform = {
-          tiltRad: cloudTiltRad,
-          yawRad: cloudYawRad,
+          tiltRad: cloudTiltRad + meshTiltRad,
+          yawRad: cloudYawRad + meshYawRad,
           offsetX: cloud.offsetX,
+          offsetY: cloud.offsetY + meshTarget.offsetY,
           offsetZ: cloud.offsetZ,
         };
-        lightningCtrl.update(now, lightning, ellipsoid, cloudXform);
+        // Derive the bolt spawn volume from the loaded mesh's bounding
+        // box scaled by `meshTarget.scale`. Falls back to the legacy
+        // ellipsoid params only when no mesh is loaded. The 0.9 factor
+        // keeps endpoints comfortably inside the surface so lateral
+        // jitter doesn't push midpoints outside the mesh.
+        const half = meshHalfExtentsRef.current;
+        const boltEllipsoid = half
+          ? {
+              rx: Math.max(1e-3, half.hx * meshTarget.scale * 0.9),
+              ry: Math.max(1e-3, half.hy * meshTarget.scale * 0.9),
+              rz: Math.max(1e-3, half.hz * meshTarget.scale * 0.9),
+            }
+          : ellipsoid;
+        lightningCtrl.update(now, lightning, boltEllipsoid, cloudXform);
         lightningCtrl.contribute(
           buffers.positions,
           buffers.n,
@@ -399,7 +495,7 @@ export function Leds() {
         cloud.offsetZ,
       );
       const ox = origin[0];
-      const oy = origin[1];
+      const oy = origin[1] + cloud.offsetY;
       const oz = origin[2];
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;

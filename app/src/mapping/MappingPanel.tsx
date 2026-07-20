@@ -1,12 +1,14 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useSimStore, type Vec3 } from "../state";
 import {
-  applySnapshot,
-  currentSnapshot,
-  useSimStore,
-  type Vec3,
-} from "../state";
-import { loadSnapshot, saveSnapshot } from "../state/persistence";
+  boundFileName,
+  loadFromFile,
+  saveToFile,
+  summariseMissing,
+} from "../state/fileIO";
 import { applyMappingOrientation, azElToDir, dirToAzEl } from "./geometry";
+import { deleteMeshBlob, invalidateMeshGeometry, putMeshBlob } from "./meshAsset";
 
 interface Props {
   selected: number | null;
@@ -17,10 +19,10 @@ const NUDGE_DEG = 2;
 const NUDGE_RAD = (NUDGE_DEG * Math.PI) / 180;
 
 export function MappingPanel({ selected, setSelected }: Props) {
-  const ellipsoid = useSimStore((s) => s.ellipsoid);
-  const setEllipsoid = useSimStore((s) => s.setEllipsoid);
   const mapping = useSimStore((s) => s.mapping);
   const setMapping = useSimStore((s) => s.setMapping);
+  const mesh = useSimStore((s) => s.mesh);
+  const setMesh = useSimStore((s) => s.setMesh);
   const moveMappedLed = useSimStore((s) => s.moveMappedLed);
   const removeLastMappedLed = useSimStore((s) => s.removeLastMappedLed);
   const clearMappedLeds = useSimStore((s) => s.clearMappedLeds);
@@ -135,38 +137,131 @@ export function MappingPanel({ selected, setSelected }: Props) {
         </Link>
       </div>
 
-      <Section title="Cloud dimensions (m)">
+      <Section title="Surface">
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 6,
+            marginBottom: 6,
+          }}
+        >
+          <div style={{ opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis" }}>
+            {mesh.id ? mesh.name || "(unnamed mesh)" : "No mesh loaded"}
+          </div>
+          {mesh.id && (
+            <Button
+              danger
+              onClick={() => {
+                if (mesh.id) {
+                  invalidateMeshGeometry(mesh.id);
+                  deleteMeshBlob(mesh.id).catch(() => {});
+                }
+                setMesh({ id: null, name: "" });
+              }}
+            >
+              Remove
+            </Button>
+          )}
+        </div>
+        <label
+          style={{
+            display: "inline-block",
+            background: "rgba(255,255,255,0.06)",
+            border: "1px solid rgba(255,255,255,0.15)",
+            borderRadius: 6,
+            padding: "4px 10px",
+            cursor: "pointer",
+            fontSize: 11,
+            marginBottom: 8,
+          }}
+        >
+          Upload .glb / .gltf
+          <input
+            type="file"
+            accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+            style={{ display: "none" }}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (!file) return;
+              const id = `mesh-${Date.now().toString(36)}-${Math.random()
+                .toString(36)
+                .slice(2, 8)}`;
+              try {
+                await putMeshBlob(id, file);
+                setMesh({
+                  id,
+                  name: file.name,
+                  scale: 1,
+                  yawDeg: 0,
+                  tiltDeg: 0,
+                  offsetY: 0,
+                });
+              } catch (err) {
+                console.warn("[mapping] mesh upload failed", err);
+              }
+            }}
+          />
+        </label>
+        <div style={{ opacity: 0.6, marginBottom: 6, lineHeight: 1.4 }}>
+          Export from Blender: File → Export → glTF 2.0 (.glb). Uploaded
+          mesh becomes the surface LEDs snap to when Mesh mode is active.
+        </div>
         <SliderRow
-          label="rx"
-          value={ellipsoid.rx}
-          min={0.1}
-          max={5}
+          label="scale"
+          value={mesh.scale}
+          min={0.05}
+          max={10}
           step={0.05}
-          onChange={(v) => setEllipsoid({ rx: v })}
+          onChange={(v) => setMesh({ scale: v })}
+          format={formatScale}
         />
         <SliderRow
-          label="ry"
-          value={ellipsoid.ry}
-          min={0.1}
-          max={5}
-          step={0.05}
-          onChange={(v) => setEllipsoid({ ry: v })}
+          label="yaw"
+          value={mesh.yawDeg}
+          min={-180}
+          max={180}
+          step={1}
+          onChange={(v) => setMesh({ yawDeg: v })}
+          format={formatDeg}
         />
         <SliderRow
-          label="rz"
-          value={ellipsoid.rz}
-          min={0.1}
-          max={5}
-          step={0.05}
-          onChange={(v) => setEllipsoid({ rz: v })}
+          label="tilt"
+          value={mesh.tiltDeg}
+          min={-180}
+          max={180}
+          step={1}
+          onChange={(v) => setMesh({ tiltDeg: v })}
+          format={formatDeg}
+        />
+        <SliderRow
+          label="y-off"
+          value={mesh.offsetY}
+          min={-3}
+          max={3}
+          step={0.01}
+          onChange={(v) => setMesh({ offsetY: v })}
+          format={formatMeters}
         />
         <SliderRow
           label="bead"
           value={mapping.ledSize}
-          min={0.01}
-          max={0.2}
-          step={0.005}
+          min={0.005}
+          max={0.02}
+          step={0.001}
           onChange={(v) => setMapping({ ledSize: v })}
+          format={formatMillimeters}
+        />
+        <SliderRow
+          label="max seg"
+          value={mapping.maxSegmentLength}
+          min={0.01}
+          max={0.1}
+          step={0.001}
+          onChange={(v) => setMapping({ maxSegmentLength: v })}
+          format={formatSmallDistance}
         />
         <label
           style={{
@@ -259,19 +354,7 @@ export function MappingPanel({ selected, setSelected }: Props) {
       </Section>
 
       <Section title="Configuration">
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <Button onClick={() => saveSnapshot(currentSnapshot())}>Save</Button>
-          <Button
-            onClick={() => {
-              const snap = loadSnapshot();
-              if (!snap) return;
-              applySnapshot(snap);
-              setSelected(null);
-            }}
-          >
-            Load
-          </Button>
-        </div>
+        <ConfigButtons onLoaded={() => setSelected(null)} />
       </Section>
 
       <Section title="LEDs">
@@ -356,6 +439,7 @@ function SliderRow({
   max,
   step,
   onChange,
+  format,
 }: {
   label: string;
   value: number;
@@ -363,12 +447,13 @@ function SliderRow({
   max: number;
   step: number;
   onChange: (v: number) => void;
+  format?: (v: number) => string;
 }) {
   return (
     <label
       style={{
         display: "grid",
-        gridTemplateColumns: "34px 1fr 44px",
+        gridTemplateColumns: "44px 1fr 60px",
         alignItems: "center",
         gap: 8,
         marginBottom: 6,
@@ -391,9 +476,104 @@ function SliderRow({
           fontVariantNumeric: "tabular-nums",
         }}
       >
-        {value.toFixed(2)}
+        {format ? format(value) : value.toFixed(2)}
       </span>
     </label>
+  );
+}
+
+// All scene distances are in metres (three.js world units). These helpers
+// pick a friendly unit per magnitude so the readout matches the physical
+// scale you'd measure on the real cloud.
+function formatMeters(v: number): string {
+  return `${v.toFixed(2)} m`;
+}
+
+function formatMillimeters(v: number): string {
+  return `${(v * 1000).toFixed(0)} mm`;
+}
+
+function formatSmallDistance(v: number): string {
+  return v < 1 ? `${(v * 100).toFixed(1)} cm` : `${v.toFixed(2)} m`;
+}
+
+function formatDeg(v: number): string {
+  return `${v.toFixed(0)}°`;
+}
+
+function formatScale(v: number): string {
+  return `${v.toFixed(2)}×`;
+}
+
+function ConfigButtons({ onLoaded }: { onLoaded: () => void }) {
+  const [file, setFile] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    // Show which file subsequent Saves will write to.
+    boundFileName().then(setFile);
+  }, []);
+  const wrap = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (err) {
+      console.warn("[config] file I/O failed", err);
+      setStatus(`Error: ${(err as Error).message ?? String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <Button
+          disabled={busy || !file}
+          onClick={() =>
+            wrap(async () => {
+              await saveToFile();
+              setFile(await boundFileName());
+              setStatus(`Saved to ${await boundFileName()}`);
+            })
+          }
+        >
+          Save
+        </Button>
+        <Button
+          disabled={busy}
+          onClick={() =>
+            wrap(async () => {
+              await saveToFile({ forcePicker: true });
+              setFile(await boundFileName());
+              setStatus(`Saved to ${await boundFileName()}`);
+            })
+          }
+        >
+          Save as…
+        </Button>
+        <Button
+          disabled={busy}
+          onClick={() =>
+            wrap(async () => {
+              const res = await loadFromFile();
+              if (!res) return;
+              setFile(res.fileName);
+              onLoaded();
+              const missing = summariseMissing(res.missingAssets);
+              setStatus(missing ?? `Loaded ${res.fileName}`);
+            })
+          }
+        >
+          Open…
+        </Button>
+      </div>
+      <div style={{ fontSize: 10, opacity: 0.7, lineHeight: 1.4 }}>
+        {file ? `Bound to ${file}` : "No file bound. Use ‘Save as…’ to create one."}
+      </div>
+      {status && (
+        <div style={{ fontSize: 10, opacity: 0.85, lineHeight: 1.4 }}>{status}</div>
+      )}
+    </div>
   );
 }
 

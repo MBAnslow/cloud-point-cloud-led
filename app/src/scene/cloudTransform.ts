@@ -47,6 +47,7 @@ export interface CloudTransform {
   tiltRad: number;
   yawRad: number;
   offsetX: number;
+  offsetY: number;
   offsetZ: number;
 }
 
@@ -54,5 +55,6 @@ export function applyCloudTransform(
   v: [number, number, number],
   t: CloudTransform,
 ): [number, number, number] {
-  return offsetXZ(rotateCloud(v, t.tiltRad, t.yawRad), t.offsetX, t.offsetZ);
+  const r = offsetXZ(rotateCloud(v, t.tiltRad, t.yawRad), t.offsetX, t.offsetZ);
+  return [r[0], r[1] + t.offsetY, r[2]];
 }

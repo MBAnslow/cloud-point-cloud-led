@@ -17,6 +17,7 @@
     "react-router-dom": "^7.18.1",
     "three": "^0.169.0",
     "tone": "^15.1.22",
+    "yaml": "^2.9.0",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

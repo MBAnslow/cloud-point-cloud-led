@@ -86,8 +86,8 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
         />
         <SliderRow
           label="Light falloff"
-          min={0.05}
-          max={5}
+          min={0}
+          max={1}
           step={0.01}
           value={lightning.falloffDistance}
           onChange={(v) => upd({ falloffDistance: v })}
@@ -113,14 +113,14 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           format={(lo, hi) => `${lo.toFixed(2)} – ${hi.toFixed(2)}`}
         />
         <RangeRow
-          label="Flash (ms)"
-          min={60}
-          max={2000}
-          step={10}
-          low={lightning.flashDurationMsRange[0]}
-          high={lightning.flashDurationMsRange[1]}
-          onChange={(lo, hi) => upd({ flashDurationMsRange: [lo, hi] })}
-          format={(lo, hi) => `${lo.toFixed(0)} – ${hi.toFixed(0)}`}
+          label="Travel (m/s)"
+          min={0.1}
+          max={5}
+          step={0.05}
+          low={lightning.travelSpeedRange[0]}
+          high={lightning.travelSpeedRange[1]}
+          onChange={(lo, hi) => upd({ travelSpeedRange: [lo, hi] })}
+          format={(lo, hi) => `${lo.toFixed(1)} – ${hi.toFixed(1)}`}
         />
         <SliderRow
           label="Sub-flashes"
@@ -255,6 +255,17 @@ function AudioSection({
         step={5}
         onChange={(v) => upd({ boltPitchJitterCents: v })}
         formatValue={(v) => `${v.toFixed(0)}¢`}
+      />
+      <SliderRow
+        label="Thunder delay"
+        value={lightning.thunderDelayMs}
+        min={0}
+        max={5000}
+        step={10}
+        onChange={(v) => upd({ thunderDelayMs: v })}
+        formatValue={(v) =>
+          v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${v.toFixed(0)} ms`
+        }
       />
 
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>

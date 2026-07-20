@@ -16,7 +16,9 @@ import type {
   LedViewMode,
   LightningParams,
   MappingParams,
+  MeshTargetParams,
   SkyParams,
+  UiParams,
   StrandParams,
   WledParams,
 } from "../state";
@@ -49,6 +51,8 @@ export interface Snapshot {
   ledStreamPipeline?: LedStreamPipeline;
   ledLocator?: LedLocatorState;
   mapping?: MappingParams;
+  mesh?: MeshTargetParams;
+  ui?: UiParams;
 }
 
 export function saveSnapshot(snap: Omit<Snapshot, "version">): void {

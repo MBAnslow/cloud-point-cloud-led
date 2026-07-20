@@ -71,3 +71,19 @@ export function applyMappingOrientation(
 ): Vec3 {
   return applyLeftRightFlip(applyUpDownFlip(dir, flipUpDown), flipLeftRight);
 }
+
+/**
+ * Mirror an arbitrary point/vector across the same planes as the mapping
+ * orientation flips. Used for mesh-mode LEDs whose stored position is a
+ * world-space point (not a unit direction).
+ */
+export function applyMappingOrientationPoint(
+  p: Vec3,
+  flipUpDown: boolean,
+  flipLeftRight: boolean,
+): Vec3 {
+  const x = flipLeftRight ? -p[0] : p[0];
+  const y = flipUpDown ? -p[1] : p[1];
+  return [x, y, p[2]];
+}
+

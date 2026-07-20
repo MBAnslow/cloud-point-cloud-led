@@ -195,7 +195,7 @@ export function SkyTimeline() {
     <div
       style={{
         position: "fixed",
-        top: 12,
+        top: 56,
         left: 12,
         right: 340,
         zIndex: 10,

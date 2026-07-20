@@ -62,9 +62,10 @@ export function Lights() {
       />
       {sky.enabled && (
         <>
-          <ambientLight
-            color={skyLighting.ambientColor}
-            intensity={skyLighting.ambientIntensity}
+          <hemisphereLight
+            color={skyLighting.skyColor}
+            groundColor={skyLighting.groundColor}
+            intensity={skyLighting.hemiIntensity}
           />
           <spotLight
             color={skyLighting.sunColor}
