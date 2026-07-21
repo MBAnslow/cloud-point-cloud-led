@@ -5,7 +5,7 @@ import {
   type FilterParams,
   type MasterFxParams,
 } from "../state";
-import { sampleBreathAt } from "../lighting/breath";
+import { sampleBreathAt, tickBreathClock } from "../lighting/breath";
 import { useDraggable } from "./useDraggable";
 
 const PLOT_W = 360;
@@ -110,7 +110,7 @@ function BreathScope({ active }: { active: boolean }) {
   useEffect(() => {
     let raf = 0;
     const tick = () => {
-      const t = performance.now();
+      const t = tickBreathClock(performance.now(), useSimStore.getState().breath.paused);
       const s = sampleBreathAt(breath, t);
       setLevel(s.level);
       setNowMs(t);

@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { breathLevelAt, sampleBreathAt } from "../lighting/breath";
-import { computeBreathAreaOrigin } from "../lighting/breathArea";
-import { useSimStore, type Breather } from "../state";
+import {
+  breathLevelAt,
+  sampleBreathAt,
+  sampleParticipantBreath,
+  seekBreathClock,
+  tickBreathClock,
+} from "../lighting/breath";
+import {
+  MAX_BREATH_PARTICIPANTS,
+  useSimStore,
+  type BreathParticipant,
+} from "../state";
 import { useDraggable } from "./useDraggable";
 
 const PRESET_COLORS = [
@@ -13,28 +22,14 @@ const PRESET_COLORS = [
   "#90b1ff",
 ];
 
-const ORIGIN_PRESETS: Array<{
-  id: "front" | "back" | "left" | "right" | "top" | "bottom";
-  label: string;
-  azimuth: number;
-  elevation: number;
-}> = [
-  { id: "front", label: "front", azimuth: 90, elevation: 0 },
-  { id: "back", label: "back", azimuth: -90, elevation: 0 },
-  { id: "left", label: "left", azimuth: 180, elevation: 0 },
-  { id: "right", label: "right", azimuth: 0, elevation: 0 },
-  { id: "top", label: "top", azimuth: 0, elevation: 90 },
-  { id: "bottom", label: "bottom", azimuth: 0, elevation: -90 },
-];
-
 function clamp01(v: number): number {
   if (v <= 0) return 0;
   if (v >= 1) return 1;
   return v;
 }
 
-function makeBreatherId(): string {
-  return `breather-${Math.random().toString(36).slice(2, 7)}-${Date.now().toString(36)}`;
+function makeParticipantId(): string {
+  return `participant-${Math.random().toString(36).slice(2, 7)}-${Date.now().toString(36)}`;
 }
 
 function fmtS(v: number): string {
@@ -47,30 +42,41 @@ const PARAM_HELP = {
   holdPeakSeconds:
     "How long breath stays at full inhale before exhaling begins.",
   exhaleSeconds:
-    "Duration of the exhale ramp. Longer values create a slower outward breath release.",
+    "Duration of the exhale ramp. Longer exhales spawn longer / wider travelling waves.",
   holdTroughSeconds:
     "How long breath rests at the trough before the next inhale starts.",
-  areaRadius:
-    "Radius of the breath area of effect on the cloud. LEDs outside are unaffected.",
-  areaFalloff:
-    "How quickly influence drops from the center of the area. Higher means sharper, lower means broader.",
-  breathTintColor:
-    "Marker/guide color used to visualize the breath area in Breath view.",
-  breathTintAmount:
-    "Marker/guide intensity for breath-area visualization only (does not change streamed LED lighting).",
+  horizonDistance:
+    "Vertical offset of participants from the horizon plane. Positive raises them above the plane, negative lowers them.",
+  cloudDistance:
+    "Radial distance from the cloud center out to the participants on the horizon circle.",
+  waveWidth:
+    "Lateral half-size of the breath volume, across the travel path (metres).",
+  waveHeight:
+    "Vertical half-size of the breath volume (metres).",
+  waveDepth:
+    "Half-size along the travel axis — toward / away from the participant (metres).",
+  waveSpeed:
+    "How fast the exhale wave travels from the participant through the cloud (m/s).",
+  falloff:
+    "How quickly influence drops from the wave center. Higher means sharper, lower means broader.",
+  noiseScale:
+    "Size of fog features inside the breath volume. Higher = finer / smaller blobs.",
+  noiseAmount:
+    "How much 3D fog density shapes intensity. 0 = smooth volume only, 1 = fully noisy.",
+  noiseContrast:
+    "Separates dense fog from empty pockets. Higher = sharper cloudy clumps.",
+  rimThickness:
+    "How thick the colour rim is around the outside of the breath volume (metres).",
+  rimAmount:
+    "How strongly LEDs in the rim shift toward the participant colour. 0 = off, 1 = full tint.",
+  rimArc:
+    "Angular width of the rim arc in degrees. Midpoint faces away from the participant. 360 = full ring, smaller = a crescent on the far side.",
   breathTimeMix:
     "Blend in Breath + Time of Day mode. 0 = time-of-day only, 1 = breath-only.",
-  sourceAzimuth:
-    "Horizontal direction around the cloud center for the breath source.",
-  sourceElevation:
-    "Vertical direction of the breath source. -90 is below cloud, +90 is above.",
-  distanceCloud:
-    "Offset of the area center from the cloud surface along the selected direction.",
 };
 
 export function BreathOscillator({ visible: mounted = true }: { visible?: boolean } = {}) {
   const breath = useSimStore((s) => s.breath);
-  const ellipsoid = useSimStore((s) => s.ellipsoid);
   const setBreath = useSimStore((s) => s.setBreath);
   const [nowMs, setNowMs] = useState(() => performance.now());
   const [visible, setVisible] = useState(true);
@@ -80,7 +86,7 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
   useEffect(() => {
     let raf = 0;
     const tick = (t: number) => {
-      setNowMs(t);
+      setNowMs(tickBreathClock(t, useSimStore.getState().breath.paused));
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -98,12 +104,6 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
   const currentLevel = sample.level;
   const inhaleLevel = sample.inhaleIntensity;
   const exhaleLevel = sample.exhaleIntensity;
-
-  const sourcePos = computeBreathAreaOrigin(ellipsoid, {
-    sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
-    sourceElevationDeg: breath.area.sourceElevationDeg,
-    distanceFromCloud: breath.area.distanceFromCloud,
-  });
 
   const segmentPercents = useMemo(() => {
     if (cycleSeconds <= 1e-6) {
@@ -123,51 +123,31 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
     cycleSeconds,
   ]);
 
-  const addBreather = () => {
-    const nextIndex = breath.breathers.length;
-    const newBreather: Breather = {
-      id: makeBreatherId(),
+  const addParticipant = () => {
+    if (breath.participants.length >= MAX_BREATH_PARTICIPANTS) return;
+    const nextIndex = breath.participants.length;
+    const newP: BreathParticipant = {
+      id: makeParticipantId(),
       color: PRESET_COLORS[nextIndex % PRESET_COLORS.length],
+      enabled: true,
+      azimuthDeg: (nextIndex * 90) % 360,
       phaseOffset: (nextIndex * 0.17) % 1,
     };
-    setBreath({ breathers: [...breath.breathers, newBreather] });
+    setBreath({ participants: [...breath.participants, newP] });
   };
 
-  const updateBreather = (id: string, patch: Partial<Breather>) => {
+  const updateParticipant = (id: string, patch: Partial<BreathParticipant>) => {
     setBreath({
-      breathers: breath.breathers.map((b) => (b.id === id ? { ...b, ...patch } : b)),
+      participants: breath.participants.map((p) =>
+        p.id === id ? { ...p, ...patch } : p,
+      ),
     });
   };
 
-  const removeBreather = (id: string) => {
+  const removeParticipant = (id: string) => {
+    if (breath.participants.length <= 1) return;
     setBreath({
-      breathers: breath.breathers.filter((b) => b.id !== id),
-    });
-  };
-
-  const selectedOriginPreset = useMemo(() => {
-    for (const p of ORIGIN_PRESETS) {
-      if (
-        Math.abs(breath.area.sourceAzimuthDeg - p.azimuth) < 0.5 &&
-        Math.abs(breath.area.sourceElevationDeg - p.elevation) < 0.5
-      ) {
-        return p.id;
-      }
-    }
-    return "custom";
-  }, [breath.area.sourceAzimuthDeg, breath.area.sourceElevationDeg]);
-
-  const setOriginPreset = (
-    value: "front" | "back" | "left" | "right" | "top" | "bottom" | "custom",
-  ) => {
-    if (value === "custom") return;
-    const preset = ORIGIN_PRESETS.find((p) => p.id === value);
-    if (!preset) return;
-    setBreath({
-      area: {
-        sourceAzimuthDeg: preset.azimuth,
-        sourceElevationDeg: preset.elevation,
-      },
+      participants: breath.participants.filter((p) => p.id !== id),
     });
   };
 
@@ -232,6 +212,31 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
             />
             enabled
           </label>
+          <button
+            onClick={() => setBreath({ paused: !breath.paused })}
+            title={
+              breath.paused
+                ? "Resume the breath oscillator and travelling waves"
+                : "Pause the oscillator so you can inspect the cloud visualization"
+            }
+            style={{
+              background: breath.paused
+                ? "rgba(250, 204, 21, 0.22)"
+                : "rgba(255,255,255,0.06)",
+              color: "inherit",
+              border: `1px solid ${
+                breath.paused
+                  ? "rgba(250, 204, 21, 0.5)"
+                  : "rgba(255,255,255,0.15)"
+              }`,
+              borderRadius: 6,
+              padding: "3px 10px",
+              cursor: "pointer",
+              fontSize: 11,
+            }}
+          >
+            {breath.paused ? "▶ Resume" : "❚❚ Pause"}
+          </button>
           {visible && (
             <span style={{ opacity: 0.75 }}>
               cycle {fmtS(cycleSeconds)} · level {currentLevel.toFixed(2)} · exhale{" "}
@@ -241,331 +246,380 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
           )}
         </div>
         <button
-          onClick={addBreather}
+          onClick={addParticipant}
+          disabled={breath.participants.length >= MAX_BREATH_PARTICIPANTS}
           style={{
             background: "rgba(255,255,255,0.06)",
             color: "inherit",
             border: "1px solid rgba(255,255,255,0.15)",
             borderRadius: 6,
             padding: "3px 10px",
-            cursor: "pointer",
+            cursor:
+              breath.participants.length >= MAX_BREATH_PARTICIPANTS
+                ? "not-allowed"
+                : "pointer",
             fontSize: 11,
+            opacity: breath.participants.length >= MAX_BREATH_PARTICIPANTS ? 0.5 : 1,
           }}
+          title={
+            breath.participants.length >= MAX_BREATH_PARTICIPANTS
+              ? `Maximum ${MAX_BREATH_PARTICIPANTS} participants`
+              : "Add participant on the horizon"
+          }
         >
-          + add breather
+          + add participant
         </button>
       </div>
 
       {visible && (
-      <>
-      <BreathCurve
-        breath={breath}
-        cycleSeconds={cycleSeconds}
-        leadProgress={leadProgress}
-        nowMs={nowMs}
-      />
+        <>
+          <BreathCurve
+            breath={breath}
+            cycleSeconds={cycleSeconds}
+            leadProgress={leadProgress}
+            nowMs={nowMs}
+            onSeek={(progress01) => {
+              const cycleMsLocal = Math.max(1, cycleSeconds * 1000);
+              seekBreathClock(clamp01(progress01) * cycleMsLocal);
+              setNowMs(clamp01(progress01) * cycleMsLocal);
+              if (!breath.paused) setBreath({ paused: true });
+            }}
+          />
 
-      <div style={{ display: "flex", gap: 6, marginTop: 8, fontSize: 10 }}>
-        <SegmentPill
-          label={`inhale ${fmtS(breath.inhaleSeconds)}`}
-          width={segmentPercents.inhale}
-          color="rgba(116, 201, 255, 0.45)"
-        />
-        <SegmentPill
-          label={`hold peak ${fmtS(breath.holdPeakSeconds)}`}
-          width={segmentPercents.holdPeak}
-          color="rgba(180, 212, 255, 0.35)"
-        />
-        <SegmentPill
-          label={`exhale ${fmtS(breath.exhaleSeconds)}`}
-          width={segmentPercents.exhale}
-          color="rgba(255, 170, 144, 0.42)"
-        />
-        <SegmentPill
-          label={`hold trough ${fmtS(breath.holdTroughSeconds)}`}
-          width={segmentPercents.holdTrough}
-          color="rgba(170, 180, 195, 0.32)"
-        />
-      </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 8, fontSize: 10 }}>
+            <SegmentPill
+              label={`inhale ${fmtS(breath.inhaleSeconds)}`}
+              width={segmentPercents.inhale}
+              color="rgba(116, 201, 255, 0.45)"
+            />
+            <SegmentPill
+              label={`hold peak ${fmtS(breath.holdPeakSeconds)}`}
+              width={segmentPercents.holdPeak}
+              color="rgba(180, 212, 255, 0.35)"
+            />
+            <SegmentPill
+              label={`exhale ${fmtS(breath.exhaleSeconds)}`}
+              width={segmentPercents.exhale}
+              color="rgba(255, 170, 144, 0.42)"
+            />
+            <SegmentPill
+              label={`hold trough ${fmtS(breath.holdTroughSeconds)}`}
+              width={segmentPercents.holdTrough}
+              color="rgba(170, 180, 195, 0.32)"
+            />
+          </div>
 
-      <div
-        style={{
-          marginTop: 8,
-          display: "grid",
-          gap: 10,
-          fontSize: 11,
-        }}
-      >
-        <Section title="Breath Timing">
-          <SliderField
-            label="inhale"
-            tooltip={PARAM_HELP.inhaleSeconds}
-            value={breath.inhaleSeconds}
-            min={0}
-            max={12}
-            step={0.1}
-            onChange={(v) => setBreath({ inhaleSeconds: v })}
-          />
-          <SliderField
-            label="hold peak"
-            tooltip={PARAM_HELP.holdPeakSeconds}
-            value={breath.holdPeakSeconds}
-            min={0}
-            max={8}
-            step={0.1}
-            onChange={(v) => setBreath({ holdPeakSeconds: v })}
-          />
-          <SliderField
-            label="exhale"
-            tooltip={PARAM_HELP.exhaleSeconds}
-            value={breath.exhaleSeconds}
-            min={0}
-            max={14}
-            step={0.1}
-            onChange={(v) => setBreath({ exhaleSeconds: v })}
-          />
-          <SliderField
-            label="hold trough"
-            tooltip={PARAM_HELP.holdTroughSeconds}
-            value={breath.holdTroughSeconds}
-            min={0}
-            max={8}
-            step={0.1}
-            onChange={(v) => setBreath({ holdTroughSeconds: v })}
-          />
-        </Section>
-
-        <Section title="Area of Effect">
-          <SliderField
-            label="source azimuth"
-            tooltip={PARAM_HELP.sourceAzimuth}
-            value={breath.area.sourceAzimuthDeg}
-            min={-180}
-            max={180}
-            step={1}
-            onChange={(v) => setBreath({ area: { sourceAzimuthDeg: v } })}
-          />
-          <SliderField
-            label="source elevation"
-            tooltip={PARAM_HELP.sourceElevation}
-            value={breath.area.sourceElevationDeg}
-            min={-90}
-            max={90}
-            step={1}
-            onChange={(v) => setBreath({ area: { sourceElevationDeg: v } })}
-          />
-          <SliderField
-            label="surface offset"
-            tooltip={PARAM_HELP.distanceCloud}
-            value={breath.area.distanceFromCloud}
-            min={0}
-            max={1.5}
-            step={0.01}
-            onChange={(v) => setBreath({ area: { distanceFromCloud: v } })}
-          />
-          <SliderField
-            label="radius"
-            tooltip={PARAM_HELP.areaRadius}
-            value={breath.area.radius}
-            min={0.1}
-            max={20}
-            step={0.05}
-            onChange={(v) => setBreath({ area: { radius: v } })}
-          />
-          <SliderField
-            label="falloff"
-            tooltip={PARAM_HELP.areaFalloff}
-            value={breath.area.falloffExponent}
-            min={0.2}
-            max={6}
-            step={0.05}
-            onChange={(v) => setBreath({ area: { falloffExponent: v } })}
-          />
-        </Section>
-
-        <Section title="Breath View Visualization">
-          <ColorField
-            label="marker color"
-            tooltip={PARAM_HELP.breathTintColor}
-            value={breath.area.tintColor}
-            onChange={(v) => setBreath({ area: { tintColor: v } })}
-          />
-          <SliderField
-            label="marker intensity"
-            tooltip={PARAM_HELP.breathTintAmount}
-            value={breath.area.tintAmount}
-            min={0}
-            max={3}
-            step={0.01}
-            onChange={(v) => setBreath({ area: { tintAmount: v } })}
-          />
-          <SliderField
-            label="breath/time mix"
-            tooltip={PARAM_HELP.breathTimeMix}
-            value={breath.area.breathVsTimeMix}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => setBreath({ area: { breathVsTimeMix: v } })}
-          />
-        </Section>
-      </div>
-      <div
-        style={{
-          marginTop: 6,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          fontSize: 11,
-        }}
-      >
-        <span style={{ opacity: 0.75, textTransform: "uppercase", fontSize: 10 }}>
-          origin
-        </span>
-        <select
-          value={selectedOriginPreset}
-          title="Snap source direction to a cardinal cloud side."
-          onChange={(e) =>
-            setOriginPreset(
-              e.target.value as
-                | "front"
-                | "back"
-                | "left"
-                | "right"
-                | "top"
-                | "bottom"
-                | "custom",
-            )
-          }
-          style={{
-            background: "rgba(0,0,0,0.35)",
-            color: "inherit",
-            border: "1px solid rgba(255,255,255,0.15)",
-            borderRadius: 6,
-            padding: "2px 6px",
-            fontSize: 11,
-          }}
-        >
-          <option value="custom">custom</option>
-          {ORIGIN_PRESETS.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <span style={{ opacity: 0.7 }}>
-          snap to front/left/right/back/top/bottom, then fine-tune with sliders
-        </span>
-      </div>
-      <div
-        style={{
-          marginTop: 6,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          fontSize: 10,
-          opacity: 0.78,
-        }}
-      >
-        <span>
-          area center ({sourcePos[0].toFixed(2)}, {sourcePos[1].toFixed(2)},{" "}
-          {sourcePos[2].toFixed(2)})
-        </span>
-      </div>
-
-      <div
-        style={{
-          marginTop: 8,
-          display: "grid",
-          gap: 6,
-          maxHeight: 152,
-          overflowY: "auto",
-          paddingRight: 4,
-        }}
-      >
-        {breath.breathers.map((b, idx) => {
-          const shiftedNow = nowMs + b.phaseOffset * cycleMs;
-          const level = breathLevelAt(breath, shiftedNow);
-          return (
-            <div
-              key={b.id}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "auto auto 1fr auto auto",
-                gap: 8,
-                alignItems: "center",
-                fontSize: 11,
-                background: "rgba(255,255,255,0.04)",
-                borderRadius: 6,
-                padding: "5px 7px",
-              }}
-            >
-              <span style={{ opacity: 0.7, width: 20 }}>{idx + 1}</span>
-              <input
-                type="color"
-                value={b.color}
-                onChange={(e) => updateBreather(b.id, { color: e.target.value })}
-                style={{
-                  width: 30,
-                  height: 20,
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  borderRadius: 4,
-                  background: "transparent",
-                  padding: 0,
-                  cursor: "pointer",
-                }}
+          <div
+            style={{
+              marginTop: 8,
+              display: "grid",
+              gap: 10,
+              fontSize: 11,
+            }}
+          >
+            <Section title="Breath Timing">
+              <SliderField
+                label="inhale"
+                tooltip={PARAM_HELP.inhaleSeconds}
+                value={breath.inhaleSeconds}
+                min={0}
+                max={12}
+                step={0.1}
+                onChange={(v) => setBreath({ inhaleSeconds: v })}
               />
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                phase
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={b.phaseOffset}
-                  onChange={(e) =>
-                    updateBreather(b.id, { phaseOffset: clamp01(parseFloat(e.target.value)) })
-                  }
-                  style={{ width: "100%" }}
-                />
-                <span
+              <SliderField
+                label="hold peak"
+                tooltip={PARAM_HELP.holdPeakSeconds}
+                value={breath.holdPeakSeconds}
+                min={0}
+                max={8}
+                step={0.1}
+                onChange={(v) => setBreath({ holdPeakSeconds: v })}
+              />
+              <SliderField
+                label="exhale"
+                tooltip={PARAM_HELP.exhaleSeconds}
+                value={breath.exhaleSeconds}
+                min={0}
+                max={14}
+                step={0.1}
+                onChange={(v) => setBreath({ exhaleSeconds: v })}
+              />
+              <SliderField
+                label="hold trough"
+                tooltip={PARAM_HELP.holdTroughSeconds}
+                value={breath.holdTroughSeconds}
+                min={0}
+                max={8}
+                step={0.1}
+                onChange={(v) => setBreath({ holdTroughSeconds: v })}
+              />
+            </Section>
+
+            <Section title="Horizon Waves">
+              <SliderField
+                label="horizon height"
+                tooltip={PARAM_HELP.horizonDistance}
+                value={breath.horizonDistance}
+                min={-2}
+                max={2}
+                step={0.05}
+                onChange={(v) => setBreath({ horizonDistance: v })}
+              />
+              <SliderField
+                label="cloud distance"
+                tooltip={PARAM_HELP.cloudDistance}
+                value={breath.cloudDistance}
+                min={0.5}
+                max={8}
+                step={0.05}
+                onChange={(v) => setBreath({ cloudDistance: v })}
+              />
+              <SliderField
+                label="wave width"
+                tooltip={PARAM_HELP.waveWidth}
+                value={breath.waveWidth}
+                min={0}
+                max={0.5}
+                step={0.01}
+                onChange={(v) => setBreath({ waveWidth: v })}
+              />
+              <SliderField
+                label="wave height"
+                tooltip={PARAM_HELP.waveHeight}
+                value={breath.waveHeight}
+                min={0}
+                max={0.5}
+                step={0.01}
+                onChange={(v) => setBreath({ waveHeight: v })}
+              />
+              <SliderField
+                label="wave depth"
+                tooltip={PARAM_HELP.waveDepth}
+                value={breath.waveDepth}
+                min={0}
+                max={0.5}
+                step={0.01}
+                onChange={(v) => setBreath({ waveDepth: v })}
+              />
+              <SliderField
+                label="wave speed"
+                tooltip={PARAM_HELP.waveSpeed}
+                value={breath.waveSpeed}
+                min={0}
+                max={2}
+                step={0.05}
+                onChange={(v) => setBreath({ waveSpeed: v })}
+              />
+              <SliderField
+                label="falloff"
+                tooltip={PARAM_HELP.falloff}
+                value={breath.falloffExponent}
+                min={0}
+                max={10}
+                step={0.05}
+                onChange={(v) => setBreath({ falloffExponent: v })}
+              />
+              <SliderField
+                label="fog scale"
+                tooltip={PARAM_HELP.noiseScale}
+                value={breath.noiseScale}
+                min={0.2}
+                max={10}
+                step={0.05}
+                onChange={(v) => setBreath({ noiseScale: v })}
+              />
+              <SliderField
+                label="fog amount"
+                tooltip={PARAM_HELP.noiseAmount}
+                value={breath.noiseAmount}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => setBreath({ noiseAmount: v })}
+              />
+              <SliderField
+                label="fog contrast"
+                tooltip={PARAM_HELP.noiseContrast}
+                value={breath.noiseContrast}
+                min={0.1}
+                max={4}
+                step={0.05}
+                onChange={(v) => setBreath({ noiseContrast: v })}
+              />
+              <SliderField
+                label="rim thickness"
+                tooltip={PARAM_HELP.rimThickness}
+                value={breath.rimThickness}
+                min={0}
+                max={0.2}
+                step={0.005}
+                onChange={(v) => setBreath({ rimThickness: v })}
+              />
+              <SliderField
+                label="rim amount"
+                tooltip={PARAM_HELP.rimAmount}
+                value={breath.rimAmount}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => setBreath({ rimAmount: v })}
+              />
+              <SliderField
+                label="rim arc"
+                tooltip={PARAM_HELP.rimArc}
+                value={breath.rimArcDegrees}
+                min={0}
+                max={360}
+                step={1}
+                onChange={(v) => setBreath({ rimArcDegrees: v })}
+              />
+              <SliderField
+                label="breath/time mix"
+                tooltip={PARAM_HELP.breathTimeMix}
+                value={breath.breathVsTimeMix}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => setBreath({ breathVsTimeMix: v })}
+              />
+            </Section>
+          </div>
+
+          <div
+            style={{
+              marginTop: 8,
+              display: "grid",
+              gap: 6,
+              maxHeight: 220,
+              overflowY: "auto",
+              paddingRight: 4,
+            }}
+          >
+            {breath.participants.map((p, idx) => {
+              const sampleP = sampleParticipantBreath(p, breath, nowMs);
+              return (
+                <div
+                  key={p.id}
                   style={{
-                    minWidth: 38,
-                    textAlign: "right",
-                    fontVariantNumeric: "tabular-nums",
-                    opacity: 0.75,
+                    display: "grid",
+                    gridTemplateColumns: "auto auto auto 1fr 1fr auto auto",
+                    gap: 8,
+                    alignItems: "center",
+                    fontSize: 11,
+                    background: "rgba(255,255,255,0.04)",
+                    borderRadius: 6,
+                    padding: "5px 7px",
+                    opacity: p.enabled ? 1 : 0.55,
                   }}
                 >
-                  {b.phaseOffset.toFixed(2)}
-                </span>
-              </label>
-              <span style={{ minWidth: 64, opacity: 0.8 }}>level {level.toFixed(2)}</span>
-              <button
-                onClick={() => removeBreather(b.id)}
-                disabled={breath.breathers.length <= 1}
-                style={{
-                  background: "rgba(255,90,90,0.14)",
-                  color: "inherit",
-                  border: "1px solid rgba(255,90,90,0.35)",
-                  borderRadius: 5,
-                  padding: "2px 7px",
-                  cursor: breath.breathers.length <= 1 ? "not-allowed" : "pointer",
-                  fontSize: 11,
-                  opacity: breath.breathers.length <= 1 ? 0.5 : 1,
-                }}
-                title={
-                  breath.breathers.length <= 1
-                    ? "Keep at least one breather"
-                    : "Remove this breather"
-                }
-              >
-                remove
-              </button>
-            </div>
-          );
-        })}
-      </div>
-      </>
+                  <span style={{ opacity: 0.7, width: 20 }}>{idx + 1}</span>
+                  <input
+                    type="checkbox"
+                    checked={p.enabled}
+                    onChange={(e) =>
+                      updateParticipant(p.id, { enabled: e.target.checked })
+                    }
+                    title="Enable participant"
+                  />
+                  <input
+                    type="color"
+                    value={p.color}
+                    onChange={(e) =>
+                      updateParticipant(p.id, { color: e.target.value })
+                    }
+                    style={{
+                      width: 30,
+                      height: 20,
+                      border: "1px solid rgba(255,255,255,0.2)",
+                      borderRadius: 4,
+                      background: "transparent",
+                      padding: 0,
+                      cursor: "pointer",
+                    }}
+                  />
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    az
+                    <input
+                      type="range"
+                      min={-180}
+                      max={180}
+                      step={1}
+                      value={((p.azimuthDeg + 180) % 360) - 180}
+                      onChange={(e) =>
+                        updateParticipant(p.id, {
+                          azimuthDeg: parseFloat(e.target.value),
+                        })
+                      }
+                      style={{ width: "100%" }}
+                    />
+                    <span
+                      style={{
+                        minWidth: 36,
+                        textAlign: "right",
+                        fontVariantNumeric: "tabular-nums",
+                        opacity: 0.75,
+                      }}
+                    >
+                      {p.azimuthDeg.toFixed(0)}°
+                    </span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    phase
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={p.phaseOffset}
+                      onChange={(e) =>
+                        updateParticipant(p.id, {
+                          phaseOffset: clamp01(parseFloat(e.target.value)),
+                        })
+                      }
+                      style={{ width: "100%" }}
+                    />
+                    <span
+                      style={{
+                        minWidth: 38,
+                        textAlign: "right",
+                        fontVariantNumeric: "tabular-nums",
+                        opacity: 0.75,
+                      }}
+                    >
+                      {p.phaseOffset.toFixed(2)}
+                    </span>
+                  </label>
+                  <span style={{ minWidth: 72, opacity: 0.8 }}>
+                    {sampleP.phase} {sampleP.level.toFixed(2)}
+                  </span>
+                  <button
+                    onClick={() => removeParticipant(p.id)}
+                    disabled={breath.participants.length <= 1}
+                    style={{
+                      background: "rgba(255,90,90,0.14)",
+                      color: "inherit",
+                      border: "1px solid rgba(255,90,90,0.35)",
+                      borderRadius: 5,
+                      padding: "2px 7px",
+                      cursor:
+                        breath.participants.length <= 1 ? "not-allowed" : "pointer",
+                      fontSize: 11,
+                      opacity: breath.participants.length <= 1 ? 0.5 : 1,
+                    }}
+                    title={
+                      breath.participants.length <= 1
+                        ? "Keep at least one participant"
+                        : "Remove this participant"
+                    }
+                  >
+                    remove
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
@@ -576,11 +630,13 @@ function BreathCurve({
   cycleSeconds,
   leadProgress,
   nowMs,
+  onSeek,
 }: {
   breath: ReturnType<typeof useSimStore.getState>["breath"];
   cycleSeconds: number;
   leadProgress: number;
   nowMs: number;
+  onSeek: (progress01: number) => void;
 }) {
   const WIDTH = 480;
   const HEIGHT = 80;
@@ -588,6 +644,8 @@ function BreathCurve({
   const PAD_Y = 8;
   const usableW = WIDTH - PAD_X * 2;
   const usableH = HEIGHT - PAD_Y * 2;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const draggingRef = useRef(false);
 
   const mainPath = useMemo(() => {
     const samples = 120;
@@ -603,6 +661,37 @@ function BreathCurve({
     return `M${points.join(" L")}`;
   }, [breath, cycleSeconds, usableH, usableW]);
 
+  const leadLevel = breathLevelAt(breath, nowMs);
+  const leadX = PAD_X + leadProgress * usableW;
+  const leadY = PAD_Y + (1 - leadLevel) * usableH;
+
+  const progressFromClientX = (clientX: number): number => {
+    const svg = svgRef.current;
+    if (!svg) return leadProgress;
+    const rect = svg.getBoundingClientRect();
+    const xSvg = ((clientX - rect.left) / Math.max(1e-6, rect.width)) * WIDTH;
+    return clamp01((xSvg - PAD_X) / usableW);
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    onSeek(progressFromClientX(e.clientX));
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!draggingRef.current) return;
+    onSeek(progressFromClientX(e.clientX));
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    draggingRef.current = false;
+    try {
+      (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
   return (
     <div
       style={{
@@ -611,11 +700,17 @@ function BreathCurve({
         border: "1px solid rgba(255,255,255,0.08)",
         padding: 6,
       }}
+      title="Drag the playhead (or anywhere on the curve) to scrub the breath cycle. Scrubbing pauses playback."
     >
       <svg
+        ref={svgRef}
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         preserveAspectRatio="none"
-        style={{ width: "100%", height: 92, display: "block" }}
+        style={{ width: "100%", height: 92, display: "block", cursor: "ew-resize", touchAction: "none" }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
       >
         <line
           x1={PAD_X}
@@ -647,27 +742,57 @@ function BreathCurve({
             vectorEffect="non-scaling-stroke"
           />
         ))}
-        {breath.breathers.map((b) => {
-          const x = PAD_X + (((leadProgress + b.phaseOffset) % 1) * usableW);
-          const y = PAD_Y + (1 - breathLevelAt(breath, nowMs + b.phaseOffset * cycleSeconds * 1000)) * usableH;
-          return (
-            <circle
-              key={b.id}
-              cx={x}
-              cy={y}
-              r={4}
-              fill={b.color}
-              stroke="rgba(255,255,255,0.7)"
-              strokeWidth={1}
-            />
-          );
-        })}
         <path
           d={mainPath}
           fill="none"
           stroke="rgba(120,215,255,0.95)"
           strokeWidth={2}
           vectorEffect="non-scaling-stroke"
+          style={{ pointerEvents: "none" }}
+        />
+        {/* Scrub playhead */}
+        <line
+          x1={leadX}
+          x2={leadX}
+          y1={PAD_Y}
+          y2={PAD_Y + usableH}
+          stroke="rgba(255,255,255,0.35)"
+          strokeWidth={1}
+          vectorEffect="non-scaling-stroke"
+          style={{ pointerEvents: "none" }}
+        />
+        {breath.participants.map((p) => {
+          if (!p.enabled) return null;
+          const x = PAD_X + (((leadProgress + p.phaseOffset) % 1) * usableW);
+          const y =
+            PAD_Y +
+            (1 -
+              breathLevelAt(
+                breath,
+                nowMs + p.phaseOffset * cycleSeconds * 1000,
+              )) *
+              usableH;
+          return (
+            <circle
+              key={p.id}
+              cx={x}
+              cy={y}
+              r={3.5}
+              fill={p.color}
+              stroke="rgba(255,255,255,0.55)"
+              strokeWidth={1}
+              style={{ pointerEvents: "none" }}
+            />
+          );
+        })}
+        <circle
+          cx={leadX}
+          cy={leadY}
+          r={6}
+          fill="rgba(255,255,255,0.95)"
+          stroke="rgba(120,215,255,1)"
+          strokeWidth={2}
+          style={{ pointerEvents: "none" }}
         />
       </svg>
     </div>
@@ -771,70 +896,6 @@ function Section({
   );
 }
 
-function ColorField({
-  label,
-  tooltip,
-  value,
-  onChange,
-}: {
-  label: string;
-  tooltip?: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <label
-      title={tooltip}
-      style={{
-        display: "grid",
-        gridTemplateRows: "auto auto",
-        gap: 4,
-        background: "rgba(255,255,255,0.04)",
-        borderRadius: 6,
-        padding: "6px 8px",
-      }}
-    >
-      <span style={{ fontSize: 10, textTransform: "uppercase", opacity: 0.72 }}>
-        {label}
-      </span>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <input
-          type="color"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          style={{
-            width: 32,
-            height: 22,
-            border: "1px solid rgba(255,255,255,0.2)",
-            borderRadius: 4,
-            background: "transparent",
-            padding: 0,
-            cursor: "pointer",
-          }}
-        />
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => {
-            const v = e.target.value.trim();
-            if (/^#[0-9a-fA-F]{6}$/.test(v)) onChange(v);
-          }}
-          style={{
-            background: "rgba(0,0,0,0.35)",
-            color: "inherit",
-            border: "1px solid rgba(255,255,255,0.15)",
-            borderRadius: 4,
-            padding: "1px 4px",
-            fontSize: 11,
-            width: 86,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          }}
-        />
-      </div>
-    </label>
-  );
-}
-
 function SegmentPill({
   label,
   width,
@@ -861,4 +922,3 @@ function SegmentPill({
     </div>
   );
 }
-

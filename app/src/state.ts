@@ -837,18 +837,38 @@ export interface WledParams {
   enabled: boolean;
 }
 
-export interface Breather {
+/** Max simultaneous horizon participants. */
+export const MAX_BREATH_PARTICIPANTS = 4;
+
+/**
+ * A person standing on the horizon around the cloud. Each runs their
+ * own inhale/exhale cycle (simulated via `phaseOffset` for now; later
+ * a live breath signal can replace the oscillator).
+ */
+export interface BreathParticipant {
   id: string;
   color: string;
+  enabled: boolean;
+  /** Horizon angle around the cloud center, degrees. */
+  azimuthDeg: number;
   /**
-   * Normalized phase shift in cycles, [0, 1). Lets multiple breathers
-   * run the same waveform but offset in time.
+   * Normalized phase shift in cycles, [0, 1). Simulated offset only —
+   * ignored once a live breath signal is wired in.
    */
   phaseOffset: number;
 }
 
+/** @deprecated Prefer BreathParticipant. Kept for snapshot migration. */
+export type Breather = BreathParticipant;
+
 export interface BreathParams {
   enabled: boolean;
+  /**
+   * When true, the shared breath clock freezes so the oscillator,
+   * travelling waves, and LED mask hold their current state — useful
+   * for inspecting the spatial visualization.
+   */
+  paused: boolean;
   /** Duration of inhale ramp (seconds). */
   inhaleSeconds: number;
   /** Duration of hold at the inhalation peak (seconds). */
@@ -857,36 +877,51 @@ export interface BreathParams {
   exhaleSeconds: number;
   /** Duration of hold at the exhalation trough (seconds). */
   holdTroughSeconds: number;
+  /** Shared vertical offset from the horizon plane (metres). +up / −down. */
+  horizonDistance: number;
+  /** Shared radial distance from cloud center to participants (metres). */
+  cloudDistance: number;
+  /** Lateral half-extent of the travelling breath volume (metres). */
+  waveWidth: number;
+  /** Vertical half-extent of the travelling breath volume (metres). */
+  waveHeight: number;
   /**
-   * Area of effect anchored near the cloud surface. Defines where the
-   * breath influence is applied and how it falls off with distance.
+   * Half-extent along the travel axis (metres) — toward/away from the
+   * participant.
    */
-  area: BreathAreaParams;
-  breathers: Breather[];
-}
-
-export interface BreathAreaParams {
-  /** Source direction around cloud center, in degrees. */
-  sourceAzimuthDeg: number;
-  /** Source elevation in degrees (-90 = below, +90 = above). */
-  sourceElevationDeg: number;
-  /** Distance from cloud surface along source direction (metres). */
-  distanceFromCloud: number;
-  /** Radius in metres where influence tapers to zero. */
-  radius: number;
-  /** Falloff exponent (>1 concentrates near source, <1 broadens). */
+  waveDepth: number;
+  /** Wave travel speed toward/through the cloud (m/s). */
+  waveSpeed: number;
+  /** Falloff exponent for the LED mask (>1 concentrates, <1 broadens). */
   falloffExponent: number;
-  /** Visualization color for breath area markers in Breath view. */
-  tintColor: string;
-  /** Visualization intensity for breath area markers in Breath view. */
-  tintAmount: number;
+  /**
+   * Spatial frequency of volumetric fog noise (higher = finer blobs).
+   * World-space inverse metres scale.
+   */
+  noiseScale: number;
+  /** 0 = smooth envelope only, 1 = fully noise-shaped density. */
+  noiseAmount: number;
+  /** Sharpens dense vs empty fog regions (>1 = higher contrast). */
+  noiseContrast: number;
+  /**
+   * Thickness of the participant-colour rim shell around the wave
+   * sphere surface (metres).
+   */
+  rimThickness: number;
+  /** How strongly the rim tints LEDs toward the participant colour [0,1]. */
+  rimAmount: number;
+  /**
+   * Angular width of the rim arc in degrees [0,360]. Midpoint faces
+   * away from the participant (far side of the wave). 360 = full shell.
+   */
+  rimArcDegrees: number;
   /** Blend in combined mode: 0 = time of day, 1 = breath. */
   breathVsTimeMix: number;
+  /** Up to {@link MAX_BREATH_PARTICIPANTS} people on the horizon. */
+  participants: BreathParticipant[];
 }
 
-type BreathPatch = Partial<Omit<BreathParams, "area">> & {
-  area?: Partial<BreathAreaParams>;
-};
+type BreathPatch = Partial<BreathParams>;
 
 export interface SimState {
   ellipsoid: EllipsoidParams;
@@ -1154,21 +1189,34 @@ const DEFAULTS = {
   wled: { host: "192.168.1.50", fps: 30, enabled: false } as WledParams,
   breath: {
     enabled: true,
+    paused: false,
     inhaleSeconds: 2.5,
     holdPeakSeconds: 0.8,
     exhaleSeconds: 3.5,
     holdTroughSeconds: 0.9,
-    area: {
-      sourceAzimuthDeg: 0,
-      sourceElevationDeg: -90,
-      distanceFromCloud: 0.28,
-      radius: 1.2,
-      falloffExponent: 2.1,
-      tintColor: "#8fd8ff",
-      tintAmount: 1.2,
-      breathVsTimeMix: 0.5,
-    },
-    breathers: [{ id: "breather-0", color: "#77d5ff", phaseOffset: 0 }],
+    horizonDistance: 0,
+    cloudDistance: 2.5,
+    waveWidth: 0.25,
+    waveHeight: 0.25,
+    waveDepth: 0.25,
+    waveSpeed: 1.2,
+    falloffExponent: 2.1,
+    noiseScale: 2.0,
+    noiseAmount: 0.85,
+    noiseContrast: 1.2,
+    rimThickness: 0.06,
+    rimAmount: 0.75,
+    rimArcDegrees: 180,
+    breathVsTimeMix: 0.5,
+    participants: [
+      {
+        id: "participant-0",
+        color: "#77d5ff",
+        enabled: true,
+        azimuthDeg: 0,
+        phaseOffset: 0,
+      },
+    ],
   } as BreathParams,
   lightning: {
     enabled: false,
@@ -1642,6 +1690,125 @@ function resolveSamplesParams(
 }
 
 /**
+ * Reconcile a saved breath payload, migrating the legacy single-area +
+ * breathers model into horizon participants + travelling-wave params.
+ */
+function resolveBreath(input: unknown): BreathParams {
+  const d = DEFAULTS.breath;
+  if (!input || typeof input !== "object") return d;
+  const saved = input as Record<string, unknown>;
+  const legacyArea =
+    (saved.area as Record<string, unknown> | undefined) ??
+    (saved.wind as Record<string, unknown> | undefined) ??
+    {};
+
+  const num = (v: unknown, fallback: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+
+  // Legacy `horizonDistance` was radial distance to the cloud. Prefer an
+  // explicit `cloudDistance` when present; otherwise migrate the old field
+  // into cloudDistance and default vertical offset to 0.
+  const hasCloudDistance = typeof saved.cloudDistance === "number";
+  const cloudDistance = hasCloudDistance
+    ? num(saved.cloudDistance, d.cloudDistance)
+    : num(
+        saved.horizonDistance,
+        num(legacyArea.distanceFromCloud, d.cloudDistance) + 1.5,
+      );
+  const horizonDistance = hasCloudDistance
+    ? num(saved.horizonDistance, d.horizonDistance)
+    : 0;
+  const legacyRadius = Math.max(
+    0,
+    Math.min(0.5, num(saved.waveRadius, Math.min(0.5, num(legacyArea.radius, d.waveWidth)))),
+  );
+  const waveWidth = Math.max(
+    0,
+    Math.min(0.5, num(saved.waveWidth, legacyRadius)),
+  );
+  const waveHeight = Math.max(
+    0,
+    Math.min(0.5, num(saved.waveHeight, legacyRadius)),
+  );
+  const waveDepth = Math.max(
+    0,
+    Math.min(0.5, num(saved.waveDepth, waveWidth)),
+  );
+  const falloffExponent = num(
+    saved.falloffExponent,
+    num(legacyArea.falloffExponent, d.falloffExponent),
+  );
+  const breathVsTimeMix = num(
+    saved.breathVsTimeMix,
+    num(legacyArea.breathVsTimeMix, d.breathVsTimeMix),
+  );
+  const waveSpeed = num(saved.waveSpeed, d.waveSpeed);
+  const noiseScale = num(saved.noiseScale, d.noiseScale);
+  const noiseAmount = num(saved.noiseAmount, d.noiseAmount);
+  const noiseContrast = num(saved.noiseContrast, d.noiseContrast);
+  const rimThickness = num(saved.rimThickness, d.rimThickness);
+  const rimAmount = num(saved.rimAmount, d.rimAmount);
+  const rimArcDegrees = num(saved.rimArcDegrees, d.rimArcDegrees);
+
+  const rawList: unknown[] = Array.isArray(saved.participants)
+    ? (saved.participants as unknown[])
+    : Array.isArray(saved.breathers)
+      ? (saved.breathers as unknown[])
+      : [];
+
+  const participants: BreathParticipant[] = [];
+  const n = Math.min(MAX_BREATH_PARTICIPANTS, Math.max(1, rawList.length || 1));
+  for (let i = 0; i < n; i++) {
+    const raw = (rawList[i] ?? {}) as Record<string, unknown>;
+    const evenly = (i / n) * 360;
+    const legacyAz =
+      i === 0 && typeof legacyArea.sourceAzimuthDeg === "number"
+        ? (legacyArea.sourceAzimuthDeg as number)
+        : evenly;
+    participants.push({
+      id:
+        typeof raw.id === "string" && raw.id
+          ? raw.id
+          : `participant-${i}`,
+      color:
+        typeof raw.color === "string" && raw.color
+          ? raw.color
+          : d.participants[0]?.color ?? "#77d5ff",
+      enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
+      azimuthDeg: num(raw.azimuthDeg, legacyAz),
+      phaseOffset: Math.max(0, Math.min(1, num(raw.phaseOffset, (i * 0.17) % 1))),
+    });
+  }
+  if (participants.length === 0) {
+    participants.push({ ...d.participants[0] });
+  }
+
+  return {
+    enabled: typeof saved.enabled === "boolean" ? saved.enabled : d.enabled,
+    paused: typeof saved.paused === "boolean" ? saved.paused : d.paused,
+    inhaleSeconds: Math.max(0, num(saved.inhaleSeconds, d.inhaleSeconds)),
+    holdPeakSeconds: Math.max(0, num(saved.holdPeakSeconds, d.holdPeakSeconds)),
+    exhaleSeconds: Math.max(0, num(saved.exhaleSeconds, d.exhaleSeconds)),
+    holdTroughSeconds: Math.max(0, num(saved.holdTroughSeconds, d.holdTroughSeconds)),
+    horizonDistance,
+    cloudDistance: Math.max(0.2, cloudDistance),
+    waveWidth,
+    waveHeight,
+    waveDepth,
+    waveSpeed: Math.max(0, Math.min(2, waveSpeed)),
+    falloffExponent: Math.max(0, Math.min(10, falloffExponent)),
+    noiseScale: Math.max(0.1, Math.min(20, noiseScale)),
+    noiseAmount: Math.max(0, Math.min(1, noiseAmount)),
+    noiseContrast: Math.max(0.1, Math.min(5, noiseContrast)),
+    rimThickness: Math.max(0, Math.min(0.2, rimThickness)),
+    rimAmount: Math.max(0, Math.min(1, rimAmount)),
+    rimArcDegrees: Math.max(0, Math.min(360, rimArcDegrees)),
+    breathVsTimeMix: Math.max(0, Math.min(1, breathVsTimeMix)),
+    participants,
+  };
+}
+
+/**
  * Reconcile a saved `dayCycle` payload. Falls back to defaults for a
  * missing or malformed slice; unknown activeId → first period.
  */
@@ -1839,18 +2006,7 @@ function initialState() {
     // Don't auto-resume streaming on page load: if the user reopens the app
     // they probably don't want it immediately blasting UDP to the strip.
     wled: { ...DEFAULTS.wled, ...saved.wled, enabled: false },
-    breath: {
-      ...DEFAULTS.breath,
-      ...saved.breath,
-      area: {
-        ...DEFAULTS.breath.area,
-        // Older snapshots stored these params under `wind`; fall back to
-        // that so previously saved settings still apply.
-        ...(saved.breath as { wind?: Partial<BreathAreaParams> } | undefined)
-          ?.wind,
-        ...saved.breath?.area,
-      },
-    },
+    breath: resolveBreath(saved.breath),
     lightning: resolveLightning(saved.lightning),
     drone: resolveDroneParams(
       saved.drone as
@@ -1923,7 +2079,7 @@ export const useSimStore = create<SimState>((set) => ({
       breath: {
         ...s.breath,
         ...b,
-        area: { ...s.breath.area, ...b.area },
+        participants: b.participants ?? s.breath.participants,
       },
     })),
   setLightning: (l) => set((s) => ({ lightning: { ...s.lightning, ...l } })),
@@ -2128,16 +2284,7 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   });
   // Same caveat as initialState — never re-enable streaming via a load.
   s.setWled({ ...snap.wled, enabled: false });
-  s.setBreath({
-    ...DEFAULTS.breath,
-    ...snap.breath,
-    area: {
-      ...DEFAULTS.breath.area,
-      ...(snap.breath as { wind?: Partial<BreathAreaParams> } | undefined)
-        ?.wind,
-      ...snap.breath?.area,
-    },
-  });
+  s.setBreath(resolveBreath(snap.breath));
   s.setLightning(resolveLightning(snap.lightning));
   s.setDrone(
     resolveDroneParams(

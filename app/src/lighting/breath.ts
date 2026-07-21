@@ -1,4 +1,4 @@
-import type { BreathParams } from "../state";
+import type { BreathParams, BreathParticipant } from "../state";
 
 function clamp01(v: number): number {
   if (v <= 0) return 0;
@@ -28,6 +28,44 @@ export interface BreathSample {
 }
 
 /**
+ * Shared breath simulation clock. Advances only while breath is not
+ * paused, so sampling, waves, and UI all freeze together. Safe to call
+ * multiple times per frame — subsequent calls with the same `realNow`
+ * add ~0 dt.
+ */
+let breathClockMs = 0;
+let breathClockLastReal = performance.now();
+
+export function tickBreathClock(realNow: number, paused: boolean): number {
+  const dt = Math.max(0, realNow - breathClockLastReal);
+  breathClockLastReal = realNow;
+  if (!paused) breathClockMs += dt;
+  return breathClockMs;
+}
+
+export function getBreathClockMs(): number {
+  return breathClockMs;
+}
+
+/**
+ * Jump the shared clock to a position within the cycle (or absolute ms).
+ * Resets the real-time anchor so the next tick doesn't apply a huge dt.
+ */
+export function seekBreathClock(ms: number): void {
+  breathClockMs = Math.max(0, ms);
+  breathClockLastReal = performance.now();
+}
+
+export function breathCycleMs(params: BreathParams): number {
+  return (
+    Math.max(0, params.inhaleSeconds) * 1000 +
+    Math.max(0, params.holdPeakSeconds) * 1000 +
+    Math.max(0, params.exhaleSeconds) * 1000 +
+    Math.max(0, params.holdTroughSeconds) * 1000
+  );
+}
+
+/**
  * Breath cycle progress in [0,1], shaped with separate inhale/exhale and
  * explicit holds at peak/trough.
  *
@@ -35,8 +73,6 @@ export interface BreathSample {
  * intensity channels are simple derivations of it:
  *   inhaleIntensity = level        (peaks at full lungs, held through holdPeak)
  *   exhaleIntensity = 1 - level    (peaks at empty lungs, held through holdTrough)
- * They crossfade smoothly across the whole cycle so both effects share the
- * timing dynamics without hard cutoffs at phase boundaries.
  */
 export function sampleBreathAt(params: BreathParams, nowMs: number): BreathSample {
   const inhaleMs = Math.max(0, params.inhaleSeconds) * 1000;
@@ -85,7 +121,21 @@ export function sampleBreathAt(params: BreathParams, nowMs: number): BreathSampl
   };
 }
 
+/**
+ * Sample one participant's breath. Today this is the shared oscillator
+ * shifted by `phaseOffset`. Later this can read a live sensor level
+ * without changing the wave / LED pipeline.
+ */
+export function sampleParticipantBreath(
+  participant: BreathParticipant,
+  params: BreathParams,
+  nowMs: number,
+): BreathSample {
+  const cycle = breathCycleMs(params);
+  const shifted = nowMs + participant.phaseOffset * cycle;
+  return sampleBreathAt(params, shifted);
+}
+
 export function breathLevelAt(params: BreathParams, nowMs: number): number {
   return sampleBreathAt(params, nowMs).level;
 }
-

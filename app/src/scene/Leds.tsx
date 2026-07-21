@@ -19,10 +19,12 @@ import {
   getMeshHalfExtents,
   loadMeshGeometry,
 } from "../mapping/meshAsset";
-import { sampleBreathAt } from "../lighting/breath";
 import {
-  computeBreathAreaOrigin,
-} from "../lighting/breathArea";
+  breathSampleAt,
+  liveWaveExtents,
+  sharedBreathWaveController,
+} from "../lighting/breathWaves";
+import { tickBreathClock } from "../lighting/breath";
 import {
   hexToVec3,
   shadeLeds,
@@ -117,6 +119,10 @@ export function Leds() {
       colorFloats: new Float32Array(n * 3),
       timeColorFloats: new Float32Array(n * 3),
       breathColorFloats: new Float32Array(n * 3),
+      /** Per-LED rim shell weight [0,1] before rimAmount. */
+      breathRimWeights: new Float32Array(n),
+      /** Participant colour for the winning rim contribution. */
+      breathRimColors: new Float32Array(n * 3),
       lightningColorFloats: new Float32Array(n * 3),
       colorBytes: new Uint8Array(n * 3),
     };
@@ -314,8 +320,6 @@ export function Leds() {
       ? 1 - (1 - MANUAL_BLEND_WHEN_SKY) * skyAmount
       : 1;
 
-    const useBreathPipeline =
-      ledStreamPipeline.breathStage && ledViewMode === "breathPlusTimeOfDay";
     const useTimePipeline =
       ledStreamPipeline.timeOfDayStage && ledViewMode !== "breathIntensity";
 
@@ -369,45 +373,63 @@ export function Leds() {
       buffers.timeColorFloats.fill(0);
     }
 
-    if (useBreathPipeline) {
-      // Breath is a filter mask (not a light): inhale gates an area-of-effect.
-      const sample = breath.enabled ? sampleBreathAt(breath, performance.now()) : null;
-      const strength = sample ? sample.inhaleIntensity : 0;
-      const radius = Math.max(0.05, breath.area.radius);
-      const invRadius = 1 / radius;
-      const falloffExp = Math.max(0.0001, breath.area.falloffExponent);
-      const origin = offsetXZ(
-        rotateY(
-          rotateX(
-            computeBreathAreaOrigin(ellipsoid, {
-              sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
-              sourceElevationDeg: breath.area.sourceElevationDeg,
-              distanceFromCloud: breath.area.distanceFromCloud,
-            }),
-            cloudTiltRad,
-          ),
-          cloudYawRad,
-        ),
-        cloud.offsetX,
-        cloud.offsetZ,
-      );
-      const ox = origin[0];
-      const oy = origin[1] + cloud.offsetY;
-      const oz = origin[2];
+    // Advance travelling exhale waves whenever breath is enabled so both
+    // the combined pipeline and pure Breath view see the same fronts.
+    // The shared breath clock freezes while `paused`, holding wave
+    // positions and oscillator phase for visualization work.
+    const nowBreath = tickBreathClock(performance.now(), breath.paused);
+    const cloudXformBreath = {
+      tiltRad: cloudTiltRad,
+      yawRad: cloudYawRad,
+      offsetX: cloud.offsetX,
+      offsetY: cloud.offsetY,
+      offsetZ: cloud.offsetZ,
+    };
+    if (breath.enabled) {
+      sharedBreathWaveController.update(nowBreath, breath, cloudXformBreath);
+    }
+
+    const useBreathMask =
+      breath.enabled &&
+      (ledViewMode === "breathIntensity" ||
+        (ledStreamPipeline.breathStage && ledViewMode === "breathPlusTimeOfDay"));
+
+    if (useBreathMask) {
+      const falloffExp = Math.max(0, breath.falloffExponent);
+      const { width, height, depth } = liveWaveExtents(breath);
+      const fog = {
+        scale: breath.noiseScale,
+        amount: breath.noiseAmount,
+        contrast: breath.noiseContrast,
+      };
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const dx = buffers.positions[i3] - ox;
-        const dy = buffers.positions[i3 + 1] - oy;
-        const dz = buffers.positions[i3 + 2] - oz;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        const prox = clamp01(1 - d * invRadius);
-        const mask = clamp01(strength * Math.pow(prox, falloffExp));
-        buffers.breathColorFloats[i3] = mask;
-        buffers.breathColorFloats[i3 + 1] = mask;
-        buffers.breathColorFloats[i3 + 2] = mask;
+        const sample = breathSampleAt(
+          buffers.positions[i3],
+          buffers.positions[i3 + 1],
+          buffers.positions[i3 + 2],
+          sharedBreathWaveController,
+          nowBreath,
+          falloffExp,
+          width,
+          height,
+          depth,
+          breath.rimThickness,
+          breath.rimArcDegrees,
+          fog,
+        );
+        buffers.breathColorFloats[i3] = sample.mask;
+        buffers.breathColorFloats[i3 + 1] = sample.mask;
+        buffers.breathColorFloats[i3 + 2] = sample.mask;
+        buffers.breathRimWeights[i] = sample.rim;
+        buffers.breathRimColors[i3] = sample.rimR;
+        buffers.breathRimColors[i3 + 1] = sample.rimG;
+        buffers.breathRimColors[i3 + 2] = sample.rimB;
       }
     } else {
       buffers.breathColorFloats.fill(0);
+      buffers.breathRimWeights.fill(0);
+      buffers.breathRimColors.fill(0);
     }
 
     // Lightning: additive contribution independent of view mode. Runs only
@@ -472,43 +494,17 @@ export function Leds() {
       lightningRenderRef.current = 0;
     }
 
+    const rimAmount = clamp01(breath.rimAmount);
+
     // Select or blend pipelines per mode.
     if (ledViewMode === "breathIntensity") {
-      const sample = breath.enabled ? sampleBreathAt(breath, performance.now()) : null;
-      const strength = sample ? sample.inhaleIntensity : 0;
-      const radius = Math.max(0.05, breath.area.radius);
-      const invRadius = 1 / radius;
-      const falloffExp = Math.max(0.0001, breath.area.falloffExponent);
-      const origin = offsetXZ(
-        rotateY(
-          rotateX(
-            computeBreathAreaOrigin(ellipsoid, {
-              sourceAzimuthDeg: breath.area.sourceAzimuthDeg,
-              sourceElevationDeg: breath.area.sourceElevationDeg,
-              distanceFromCloud: breath.area.distanceFromCloud,
-            }),
-            cloudTiltRad,
-          ),
-          cloudYawRad,
-        ),
-        cloud.offsetX,
-        cloud.offsetZ,
-      );
-      const ox = origin[0];
-      const oy = origin[1] + cloud.offsetY;
-      const oz = origin[2];
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const dx = buffers.positions[i3] - ox;
-        const dy = buffers.positions[i3 + 1] - oy;
-        const dz = buffers.positions[i3 + 2] - oz;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        const prox = clamp01(1 - d * invRadius);
-        const influence = strength * Math.pow(prox, falloffExp);
-        const v = clamp01(influence);
-        const r = v;
-        const g = v;
-        const b = v;
+        const v = buffers.breathColorFloats[i3];
+        const w = clamp01(buffers.breathRimWeights[i] * rimAmount);
+        const r = clamp01(v + (buffers.breathRimColors[i3] - v) * w);
+        const g = clamp01(v + (buffers.breathRimColors[i3 + 1] - v) * w);
+        const b = clamp01(v + (buffers.breathRimColors[i3 + 2] - v) * w);
         buffers.colorFloats[i3] = r;
         buffers.colorFloats[i3 + 1] = g;
         buffers.colorFloats[i3 + 2] = b;
@@ -530,7 +526,7 @@ export function Leds() {
         buffers.colorBytes[i3 + 2] = (b * 255 + 0.5) | 0;
       }
     } else {
-      const mix = ledStreamPipeline.breathStage ? clamp01(breath.area.breathVsTimeMix) : 0;
+      const mix = ledStreamPipeline.breathStage ? clamp01(breath.breathVsTimeMix) : 0;
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const tr = buffers.timeColorFloats[i3];
@@ -554,6 +550,13 @@ export function Leds() {
           r = tr * filter;
           g = tg * filter;
           b = tb * filter;
+        }
+        // Participant-colour rim shell around the wave surface.
+        const w = clamp01(buffers.breathRimWeights[i] * rimAmount);
+        if (w > 0) {
+          r = r + (buffers.breathRimColors[i3] - r) * w;
+          g = g + (buffers.breathRimColors[i3 + 1] - g) * w;
+          b = b + (buffers.breathRimColors[i3 + 2] - b) * w;
         }
         r = clamp01(r + buffers.lightningColorFloats[i3]);
         g = clamp01(g + buffers.lightningColorFloats[i3 + 1]);

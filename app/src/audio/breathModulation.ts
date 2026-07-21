@@ -4,7 +4,7 @@ import type {
   SamplesParams,
   SimState,
 } from "../state";
-import { sampleBreathAt } from "../lighting/breath";
+import { sampleParticipantBreath, tickBreathClock } from "../lighting/breath";
 
 interface ParamRange {
   min: number;
@@ -50,13 +50,19 @@ function apply(base: number, r: ParamRange, amount: number, intensity: number): 
 }
 
 /**
- * Compute the current breath drive intensity (0 = inhale rest, 1 = full
- * exhale) — the multiplier applied to each per-slider mod amount before
- * it deviates the base value.
+ * Aggregate breath drive = max exhaleIntensity across enabled
+ * participants (matches the LED mask's max combination).
  */
 export function currentBreathDrive(state: SimState, nowMs: number): number {
-  if (!state.breathModEnabled) return 0;
-  return sampleBreathAt(state.breath, nowMs).exhaleIntensity;
+  if (!state.breathModEnabled || !state.breath.enabled) return 0;
+  const t = tickBreathClock(nowMs, state.breath.paused);
+  let best = 0;
+  for (const p of state.breath.participants) {
+    if (!p.enabled) continue;
+    const ex = sampleParticipantBreath(p, state.breath, t).exhaleIntensity;
+    if (ex > best) best = ex;
+  }
+  return best;
 }
 
 /**
