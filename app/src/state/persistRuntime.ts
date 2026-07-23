@@ -6,7 +6,10 @@
 
 import { currentSnapshot, useSimStore } from "../state";
 import { saveSnapshot } from "./persistence";
-import { reloadBoundFileIfPossible } from "./fileIO";
+import {
+  autosaveBoundFileIfPermitted,
+  reloadBoundFileIfPossible,
+} from "./fileIO";
 
 const AUTOSAVE_MS = 400;
 
@@ -18,12 +21,14 @@ export function startPersistence(): void {
   if (started) return;
   started = true;
 
-  // Debounced mirror of every store change into localStorage so a refresh
-  // restores the latest parameters even if the user never hit Save.
+  // Debounced mirror of every store change into localStorage (and the bound
+  // YAML when write permission is already granted) so breath / panel edits
+  // survive a refresh even if the user never hits Save.
   useSimStore.subscribe(() => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       saveSnapshot(currentSnapshot());
+      void autosaveBoundFileIfPermitted();
     }, AUTOSAVE_MS);
   });
 

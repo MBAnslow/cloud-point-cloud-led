@@ -910,6 +910,11 @@ export interface BreathParams {
   /** Sharpens dense vs empty fog regions (>1 = higher contrast). */
   noiseContrast: number;
   /**
+   * How strongly noise scallops the breath-volume silhouette near the
+   * surface [0,2]. Does not enlarge or brighten the solid core.
+   */
+  edgeNoise: number;
+  /**
    * Thickness of the participant-colour rim shell around the wave
    * sphere surface (metres).
    */
@@ -1249,6 +1254,7 @@ const DEFAULTS = {
     noiseScale: 2.0,
     noiseAmount: 0.85,
     noiseContrast: 1.2,
+    edgeNoise: 0.15,
     rimThickness: 0.06,
     rimAmount: 0.75,
     rimArcDegrees: 180,
@@ -1779,7 +1785,7 @@ function resolveBreath(input: unknown): BreathParams {
   );
   const waveDepth = Math.max(
     0,
-    Math.min(0.5, num(saved.waveDepth, waveWidth)),
+    Math.min(2, num(saved.waveDepth, waveWidth)),
   );
   const falloffExponent = num(
     saved.falloffExponent,
@@ -1793,6 +1799,7 @@ function resolveBreath(input: unknown): BreathParams {
   const noiseScale = num(saved.noiseScale, d.noiseScale);
   const noiseAmount = num(saved.noiseAmount, d.noiseAmount);
   const noiseContrast = num(saved.noiseContrast, d.noiseContrast);
+  const edgeNoise = num(saved.edgeNoise, d.edgeNoise);
   const rimThickness = num(saved.rimThickness, d.rimThickness);
   const rimAmount = num(saved.rimAmount, d.rimAmount);
   const rimArcDegrees = num(saved.rimArcDegrees, d.rimArcDegrees);
@@ -1847,6 +1854,7 @@ function resolveBreath(input: unknown): BreathParams {
     noiseScale: Math.max(0.1, Math.min(20, noiseScale)),
     noiseAmount: Math.max(0, Math.min(1, noiseAmount)),
     noiseContrast: Math.max(0.1, Math.min(5, noiseContrast)),
+    edgeNoise: Math.max(0, Math.min(2, edgeNoise)),
     rimThickness: Math.max(0, Math.min(0.2, rimThickness)),
     rimAmount: Math.max(0, Math.min(1, rimAmount)),
     rimArcDegrees: Math.max(0, Math.min(360, rimArcDegrees)),
@@ -2216,11 +2224,11 @@ export const useSimStore = create<SimState>((set) => ({
   setWled: (w) => set((s) => ({ wled: { ...s.wled, ...w } })),
   setBreath: (b) =>
     set((s) => ({
-      breath: {
+      breath: resolveBreath({
         ...s.breath,
         ...b,
         participants: b.participants ?? s.breath.participants,
-      },
+      }),
     })),
   setLightning: (l) => set((s) => ({ lightning: { ...s.lightning, ...l } })),
   setDrone: (d) => set((s) => ({ drone: { ...s.drone, ...d } })),
@@ -2567,7 +2575,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     directional: s.directional,
     sky: s.sky,
     wled: s.wled,
-    breath: s.breath,
+    breath: resolveBreath(s.breath),
     lightning: s.lightning,
     drone: s.drone,
     pad: s.pad,

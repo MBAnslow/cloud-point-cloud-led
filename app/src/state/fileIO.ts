@@ -151,6 +151,25 @@ export interface SaveOptions {
 }
 
 /**
+ * Silently write the live snapshot to the bound YAML handle when the
+ * File System Access API already has write permission. Never prompts.
+ * Used by the autosave path so breath / panel edits persist to disk.
+ */
+export async function autosaveBoundFileIfPermitted(): Promise<boolean> {
+  if (!fileAccessSupported()) return false;
+  const handle = await getConfigHandle();
+  if (!handle) return false;
+  try {
+    const status = await handle.queryPermission({ mode: "readwrite" });
+    if (status !== "granted") return false;
+    await writeYamlToHandle(handle, snapshotToYaml(currentSnapshot()));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Serialise the live store to YAML and write it to disk. Uses the
  * previously-bound handle when available so users can save with one
  * click; passes `forcePicker` for "Save as…". Falls back to a browser

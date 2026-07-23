@@ -2,7 +2,7 @@ import type { BreathParams, BreathParticipant } from "../state";
 import type { CloudTransform } from "../scene/cloudTransform";
 import { applyCloudTransform } from "../scene/cloudTransform";
 import { sampleParticipantBreath } from "./breath";
-import { fogDensity } from "./noise3d";
+import { fogDensity, signedEdgeNoise } from "./noise3d";
 import { hexToVec3 } from "./shade";
 
 export interface BreathWave {
@@ -92,7 +92,7 @@ export function liveWaveExtents(params: BreathParams): {
   return {
     width: Math.max(0, Math.min(0.5, params.waveWidth)),
     height: Math.max(0, Math.min(0.5, params.waveHeight)),
-    depth: Math.max(0, Math.min(0.5, params.waveDepth)),
+    depth: Math.max(0, Math.min(2, params.waveDepth)),
   };
 }
 
@@ -273,6 +273,8 @@ export function breathSampleAt(
     scale: number;
     amount: number;
     contrast: number;
+    /** Warps the ellipsoidal isosurface (rho units). */
+    edgeNoise?: number;
   },
 ): BreathLedSample {
   const waves = controller.getWaves();
@@ -284,6 +286,7 @@ export function breathSampleAt(
   if (rw <= 1e-6 || rh <= 1e-6 || rd <= 1e-6) return empty;
   const fall = Math.max(0, falloffExponent);
   const amount = fog ? clamp01(fog.amount) : 0;
+  const edgeAmt = fog ? Math.max(0, Math.min(2, fog.edgeNoise ?? 0)) : 0;
   const thick = Math.max(0, rimThickness);
   const arcDeg = Math.max(0, Math.min(360, rimArcDegrees));
   const halfArcRad = (arcDeg * 0.5 * Math.PI) / 180;
@@ -317,8 +320,31 @@ export function breathSampleAt(
     const sz = ld / rd;
     const rho = Math.sqrt(sx * sx + sy * sy + sz * sz);
 
-    // --- Interior fog mask (inside ellipsoid only) ---
-    const prox = clamp01(1 - rho);
+    // Jagged silhouette: displace the surface only inside a thin shell
+    // around rho≈1. The solid core keeps geometric falloff so raising
+    // edge noise can't brighten/enlarge the whole volume.
+    let rhoEff = rho;
+    if (edgeAmt > 1e-6 && fog) {
+      const amp = 0.2 * edgeAmt; // slider 0..2 → ±0..0.4 rho at the surface
+      const band = 0.45; // shell half-width; core & far field stay geometric
+      const dist = Math.abs(rho - 1);
+      if (dist < band) {
+        const n = signedEdgeNoise(
+          sx,
+          sy,
+          sz,
+          fog.scale,
+          tSec,
+          (w.noiseSeed ^ 0x9e3779b9) >>> 0,
+        );
+        const t = 1 - dist / band;
+        const wgt = t * t * (3 - 2 * t); // smoothstep influence
+        rhoEff = rho - n * amp * wgt;
+      }
+    }
+
+    // --- Interior fog mask (geometric core + jagged shell) ---
+    const prox = clamp01(1 - rhoEff);
     if (prox > 0) {
       const envelope = fall <= 0 ? 1 : Math.pow(prox, fall);
       let densityBlend = 1;
@@ -338,11 +364,11 @@ export function breathSampleAt(
       if (mask > bestMask) bestMask = mask;
     }
 
-    // --- Outer rim shell (band around ellipsoid surface, far-side arc) ---
+    // --- Outer rim shell (band around warped surface, far-side arc) ---
     if (thick > 1e-6 && halfArcRad > 1e-6 && d > 1e-6 && rho > 1e-6) {
-      // World-space distance to the ellipsoid surface along this ray.
+      // World-space distance to the (warped) ellipsoid surface along this ray.
       const surfaceDist = d / rho;
-      const edge = Math.abs(d - surfaceDist);
+      const edge = Math.abs(rhoEff - 1) * surfaceDist;
       const shell = clamp01(1 - edge / thick);
       if (shell > 0) {
         // Angle from the far-side axis (depth / travel direction).

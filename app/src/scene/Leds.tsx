@@ -423,6 +423,7 @@ export function Leds() {
         scale: breath.noiseScale,
         amount: breath.noiseAmount,
         contrast: breath.noiseContrast,
+        edgeNoise: breath.edgeNoise,
       };
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;

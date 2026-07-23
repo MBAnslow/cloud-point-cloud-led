@@ -65,6 +65,8 @@ const PARAM_HELP = {
     "How much 3D fog density shapes intensity. 0 = smooth volume only, 1 = fully noisy.",
   noiseContrast:
     "Separates dense fog from empty pockets. Higher = sharper cloudy clumps.",
+  edgeNoise:
+    "Makes the breath-volume silhouette ragged near the surface only. Does not enlarge or brighten the core. Higher = chunkier scallops.",
   rimThickness:
     "How thick the colour rim is around the outside of the breath volume (metres).",
   rimAmount:
@@ -398,7 +400,7 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                 tooltip={PARAM_HELP.waveDepth}
                 value={breath.waveDepth}
                 min={0}
-                max={0.5}
+                max={2}
                 step={0.01}
                 onChange={(v) => setBreath({ waveDepth: v })}
               />
@@ -446,6 +448,15 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                 max={4}
                 step={0.05}
                 onChange={(v) => setBreath({ noiseContrast: v })}
+              />
+              <SliderField
+                label="edge noise"
+                tooltip={PARAM_HELP.edgeNoise}
+                value={breath.edgeNoise}
+                min={0}
+                max={2}
+                step={0.01}
+                onChange={(v) => setBreath({ edgeNoise: v })}
               />
               <SliderField
                 label="rim thickness"

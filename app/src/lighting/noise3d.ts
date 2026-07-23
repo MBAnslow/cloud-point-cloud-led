@@ -121,3 +121,30 @@ export function fogDensity(
   const centered = (n - 0.5) * c + 0.5;
   return clamp01(centered);
 }
+
+/**
+ * Zero-mean edge field in roughly [-1, 1] — no contrast clamp, so it
+ * doesn't bias the breath volume larger/brighter the way fogDensity can.
+ */
+export function signedEdgeNoise(
+  x: number,
+  y: number,
+  z: number,
+  scale: number,
+  timeSec = 0,
+  seed = 0,
+): number {
+  const s = Math.max(0.05, scale);
+  const drift = timeSec * 0.08;
+  const ox = (seed & 1023) * 0.017;
+  const oy = ((seed >> 10) & 1023) * 0.019;
+  const oz = ((seed >> 20) & 1023) * 0.023;
+  const n = fBm3(
+    x * s + drift + ox,
+    y * s + drift * 0.7 + oy,
+    z * s - drift * 0.4 + oz,
+    3,
+    seed,
+  );
+  return (n - 0.5) * 2;
+}
