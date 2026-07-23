@@ -4,6 +4,7 @@ import { applyCloudTransform } from "../scene/cloudTransform";
 import { sampleParticipantBreath } from "./breath";
 import { fogDensity, signedEdgeNoise } from "./noise3d";
 import { hexToVec3 } from "./shade";
+import { consumeOscExhaleTriggers, getOscBreathBinary } from "../breath/oscBreathClient";
 
 export interface BreathWave {
   participantId: string;
@@ -14,10 +15,16 @@ export interface BreathWave {
   /** Unit direction from origin through the cloud center. */
   direction: [number, number, number];
   speed: number;
+  /** Safety max lifetime (missed cloud / runaway). */
   durationMs: number;
   peakStrength: number;
   /** Per-wave fog field seed so each breath looks different. */
   noiseSeed: number;
+  /**
+   * Once true, the volume has overlapped at least one LED. Cleared from
+   * the sim as soon as it later loses all LED contact.
+   */
+  hasTouchedLed: boolean;
 }
 
 export interface BreathLedSample {
@@ -158,68 +165,146 @@ export function waveLocalFrame(
 }
 
 /**
- * Stateful tracker for travelling exhale waves. Spawn on exhale onset;
- * advance each frame; prune when expired.
+ * Stateful tracker for travelling exhale waves. Spawn on exhale onset
+ * (OSC breath-out and/or internal oscillator); advance on wall clock so
+ * motion is decoupled from breath pause/scrub. Despawn as soon as a wave
+ * that has touched the LED cloud loses all LED contact.
  */
 export class BreathWaveController {
   private waves: BreathWave[] = [];
   private lastPhase = new Map<string, BreathSamplePhase>();
+  /** Last OSC binary per participant id (UI / debug). */
+  private lastOscBinary = new Map<string, number>();
 
   getWaves(): BreathWave[] {
     return this.waves;
   }
 
   /**
-   * Advance the simulation. `transform` must match the cloud/mesh
-   * transform used for LED positions so wave centers stay aligned.
+   * Advance the simulation. Wave ages use wall-clock `nowMs`
+   * (`performance.now()`). Pass `breathClockMs` for internal oscillator
+   * phase sampling (may be frozen while paused).
+   *
+   * Call {@link syncLedContact} afterward with live LED positions so
+   * waves despawn when they leave the cloud.
    */
-  update(nowMs: number, params: BreathParams, transform: CloudTransform): void {
-    // Prune expired waves first.
+  update(
+    nowMs: number,
+    params: BreathParams,
+    transform: CloudTransform,
+    breathClockMs: number = nowMs,
+  ): void {
+    // Safety prune only (waves that never hit the cloud).
     this.waves = this.waves.filter((w) => nowMs - w.bornMs <= w.durationMs);
+
+    // Drain every pending OSC pulse (duplicates = independent spawns).
+    const oscExhaleChannels = consumeOscExhaleTriggers();
 
     if (!params.enabled) {
       this.lastPhase.clear();
+      this.lastOscBinary.clear();
+      this.waves = [];
       return;
     }
 
     const center = cloudCenterWorld(transform);
     const cloudDist = Math.max(0.2, params.cloudDistance);
     const metrics = waveMetrics(params, cloudDist);
+    const useInternal = params.triggerSource !== "osc";
 
-    for (const p of params.participants) {
+    const spawnWave = (p: BreathParticipant) => {
+      const origin = participantWorldPos(
+        p,
+        cloudDist,
+        params.horizonDistance,
+        transform,
+      );
+      const dx = center[0] - origin[0];
+      const dy = center[1] - origin[1];
+      const dz = center[2] - origin[2];
+      const len = Math.hypot(dx, dy, dz) || 1;
+      this.waves.push({
+        participantId: p.id,
+        color: p.color,
+        bornMs: nowMs,
+        origin,
+        direction: [dx / len, dy / len, dz / len],
+        speed: metrics.speed,
+        durationMs: metrics.durationMs,
+        peakStrength: 1,
+        noiseSeed: (Math.random() * 0x7fffffff) | 0,
+        hasTouchedLed: false,
+      });
+    };
+
+    for (const channel of oscExhaleChannels) {
+      const pi = channel - 1;
+      if (pi < 0 || pi >= params.participants.length) continue;
+      const p = params.participants[pi];
+      if (!p.enabled) continue;
+      spawnWave(p);
+    }
+
+    for (let pi = 0; pi < params.participants.length; pi++) {
+      const p = params.participants[pi];
       if (!p.enabled) {
         this.lastPhase.delete(p.id);
+        this.lastOscBinary.delete(p.id);
         continue;
       }
-      const sample = sampleParticipantBreath(p, params, nowMs);
-      const prev = this.lastPhase.get(p.id);
-      this.lastPhase.set(p.id, sample.phase);
 
-      // Spawn once on the rising edge into exhale.
-      if (sample.phase === "exhale" && prev !== "exhale") {
-        const origin = participantWorldPos(
-          p,
-          cloudDist,
-          params.horizonDistance,
-          transform,
-        );
-        const dx = center[0] - origin[0];
-        const dy = center[1] - origin[1];
-        const dz = center[2] - origin[2];
-        const len = Math.hypot(dx, dy, dz) || 1;
-        this.waves.push({
-          participantId: p.id,
-          color: p.color,
-          bornMs: nowMs,
-          origin,
-          direction: [dx / len, dy / len, dz / len],
-          speed: metrics.speed,
-          durationMs: metrics.durationMs,
-          peakStrength: 1,
-          noiseSeed: (Math.random() * 0x7fffffff) | 0,
-        });
+      const channel = pi + 1;
+      this.lastOscBinary.set(p.id, getOscBreathBinary(channel));
+
+      if (useInternal) {
+        const sample = sampleParticipantBreath(p, params, breathClockMs);
+        const prev = this.lastPhase.get(p.id);
+        this.lastPhase.set(p.id, sample.phase);
+        if (sample.phase === "exhale" && prev !== "exhale") {
+          spawnWave(p);
+        }
+      } else {
+        this.lastPhase.delete(p.id);
       }
     }
+  }
+
+  /**
+   * Mark waves that currently overlap any LED; remove waves that previously
+   * touched the cloud and no longer overlap any LED.
+   */
+  syncLedContact(
+    nowMs: number,
+    positions: Float32Array,
+    ledCount: number,
+    width: number,
+    height: number,
+    depth: number,
+  ): void {
+    if (this.waves.length === 0 || ledCount <= 0) return;
+    const rw = Math.max(1e-6, width);
+    const rh = Math.max(1e-6, height);
+    const rd = Math.max(1e-6, depth);
+
+    this.waves = this.waves.filter((w) => {
+      const touching = waveTouchesAnyLed(
+        this,
+        w,
+        nowMs,
+        positions,
+        ledCount,
+        rw,
+        rh,
+        rd,
+      );
+      if (touching) {
+        w.hasTouchedLed = true;
+        return true;
+      }
+      // Still approaching the cloud — keep. Once we've been in contact
+      // and lose it, despawn immediately.
+      return !w.hasTouchedLed;
+    });
   }
 
   /** World-space center of a wave at `nowMs`. */
@@ -233,17 +318,42 @@ export class BreathWaveController {
     ];
   }
 
-  /**
-   * Soft envelope: full strength for most of the life, fade in the last
-   * 25% so the wave dissolves as it exits the far side of the cloud.
-   */
-  waveStrength(w: BreathWave, nowMs: number): number {
-    const age = nowMs - w.bornMs;
-    if (age < 0 || age > w.durationMs) return 0;
-    const u = age / w.durationMs;
-    const fade = u < 0.75 ? 1 : 1 - (u - 0.75) / 0.25;
-    return w.peakStrength * clamp01(fade);
+  /** Full strength while alive — lifetime ends via LED-contact prune. */
+  waveStrength(w: BreathWave, _nowMs: number): number {
+    return w.peakStrength;
   }
+}
+
+/** Geometric ellipsoid test: any LED with rho ≤ 1 counts as contact. */
+function waveTouchesAnyLed(
+  controller: BreathWaveController,
+  w: BreathWave,
+  nowMs: number,
+  positions: Float32Array,
+  ledCount: number,
+  rw: number,
+  rh: number,
+  rd: number,
+): boolean {
+  const c = controller.waveCenterAt(w, nowMs);
+  const frame = waveLocalFrame(w.direction);
+  const [rx, ry, rz] = frame.right;
+  const [ux, uy, uz] = frame.up;
+  const [fx, fy, fz] = frame.forward;
+  for (let i = 0; i < ledCount; i++) {
+    const i3 = i * 3;
+    const dx = positions[i3] - c[0];
+    const dy = positions[i3 + 1] - c[1];
+    const dz = positions[i3 + 2] - c[2];
+    const lw = dx * rx + dy * ry + dz * rz;
+    const lh = dx * ux + dy * uy + dz * uz;
+    const ld = dx * fx + dy * fy + dz * fz;
+    const sx = lw / rw;
+    const sy = lh / rh;
+    const sz = ld / rd;
+    if (sx * sx + sy * sy + sz * sz <= 1) return true;
+  }
+  return false;
 }
 
 type BreathSamplePhase = ReturnType<typeof sampleParticipantBreath>["phase"];

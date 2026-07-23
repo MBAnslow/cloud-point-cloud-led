@@ -127,6 +127,40 @@ export interface LightningSample {
   durationSec?: number;
 }
 
+/**
+ * Persistent per-LED breath filter (TOD gate memory). Separate from the
+ * breath wave params and from the participant rim tint.
+ */
+export interface BreathFilterParams {
+  enabled: boolean;
+  /**
+   * Floor for the filter and default TOD activation [0,1]. Decay never
+   * goes below this; at 1 every LED shows full time-of-day.
+   */
+  threshold: number;
+  /**
+   * Hard upper bound (seconds): after the breath wave leaves an LED,
+   * its filter effect is mostly gone within this time — even the
+   * slowest (low-noise) LEDs. Higher noise only clears sooner.
+   */
+  decayMaxSeconds: number;
+  /** Spatial frequency of the cooldown noise field. */
+  cooldownScale: number;
+  /**
+   * Cooldown noise extents: low ≈ flat mid values, high ≈ more fBm
+   * octaves and full [0,1] blotches. Each LED’s relative decay speed
+   * is this noise value.
+   */
+  cooldownContrast: number;
+  /** Seed for the procedural cooldown field; regenerate to reshuffle. */
+  seed: number;
+  /**
+   * Debug: paint each LED with its cooldown noise value (0=black linger,
+   * 1=white snap) instead of the normal shading.
+   */
+  showNoise: boolean;
+}
+
 /** Ellipsoid semi-axes in metres. */
 export interface EllipsoidParams {
   rx: number;
@@ -875,6 +909,12 @@ export interface BreathParams {
    * for inspecting the spatial visualization.
    */
   paused: boolean;
+  /**
+   * Where exhale wave spawns come from:
+   * - `internal` — simulated oscillator rising edge into exhale
+   * - `osc` — TouchDesigner `/breathN/breath_binary` rising edge to 1
+   */
+  triggerSource: "internal" | "osc";
   /** Duration of inhale ramp (seconds). */
   inhaleSeconds: number;
   /** Duration of hold at the inhalation peak (seconds). */
@@ -944,6 +984,7 @@ export interface SimState {
   wled: WledParams;
   breath: BreathParams;
   lightning: LightningParams;
+  breathFilter: BreathFilterParams;
   drone: DroneParams;
   pad: PadParams;
   samples: SamplesParams;
@@ -975,6 +1016,7 @@ export interface SimState {
   setWled: (w: Partial<WledParams>) => void;
   setBreath: (b: BreathPatch) => void;
   setLightning: (l: Partial<LightningParams>) => void;
+  setBreathFilter: (b: Partial<BreathFilterParams>) => void;
   setDrone: (d: Partial<DroneParams>) => void;
   addDroneNote: (note: DroneNote) => void;
   updateDroneNote: (id: string, patch: Partial<DroneNote>) => void;
@@ -1061,6 +1103,7 @@ export interface UiParams {
   showMaster: boolean;
   showBreath: boolean;
   showLightning: boolean;
+  showBreathFilter: boolean;
   showStream: boolean;
 }
 
@@ -1240,6 +1283,7 @@ const DEFAULTS = {
   breath: {
     enabled: true,
     paused: false,
+    triggerSource: "internal",
     inhaleSeconds: 2.5,
     holdPeakSeconds: 0.8,
     exhaleSeconds: 3.5,
@@ -1291,6 +1335,15 @@ const DEFAULTS = {
     thunderDelayMs: 800,
     simFps: 60,
   } as LightningParams,
+  breathFilter: {
+    enabled: true,
+    threshold: 0,
+    decayMaxSeconds: 2,
+    cooldownScale: 2,
+    cooldownContrast: 3,
+    seed: 1,
+    showNoise: false,
+  } as BreathFilterParams,
   drone: {
     enabled: false,
     // Sensible pad defaults: fully open filter so the raw tone is
@@ -1424,6 +1477,7 @@ const DEFAULTS = {
     showMaster: true,
     showBreath: true,
     showLightning: false,
+    showBreathFilter: false,
     showStream: false,
   } as UiParams,
 };
@@ -1840,6 +1894,10 @@ function resolveBreath(input: unknown): BreathParams {
   return {
     enabled: typeof saved.enabled === "boolean" ? saved.enabled : d.enabled,
     paused: typeof saved.paused === "boolean" ? saved.paused : d.paused,
+    triggerSource:
+      saved.triggerSource === "osc" || saved.triggerSource === "internal"
+        ? saved.triggerSource
+        : d.triggerSource,
     inhaleSeconds: Math.max(0, num(saved.inhaleSeconds, d.inhaleSeconds)),
     holdPeakSeconds: Math.max(0, num(saved.holdPeakSeconds, d.holdPeakSeconds)),
     exhaleSeconds: Math.max(0, num(saved.exhaleSeconds, d.exhaleSeconds)),
@@ -2038,6 +2096,32 @@ function resolveLightning(input: unknown): LightningParams {
   };
 }
 
+function resolveBreathFilter(input: unknown): BreathFilterParams {
+  const d = DEFAULTS.breathFilter;
+  if (!input || typeof input !== "object") return d;
+  const saved = input as Record<string, unknown>;
+  const num = (v: unknown, fallback: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  return {
+    enabled: typeof saved.enabled === "boolean" ? saved.enabled : d.enabled,
+    threshold: Math.max(0, Math.min(1, num(saved.threshold, d.threshold))),
+    decayMaxSeconds: Math.max(
+      0.1,
+      Math.min(5, num(saved.decayMaxSeconds, d.decayMaxSeconds)),
+    ),
+    cooldownScale: Math.max(
+      0.1,
+      Math.min(20, num(saved.cooldownScale, d.cooldownScale)),
+    ),
+    cooldownContrast: Math.max(
+      0.1,
+      Math.min(5, num(saved.cooldownContrast, d.cooldownContrast)),
+    ),
+    seed: Math.max(0, Math.floor(num(saved.seed, d.seed))) | 0,
+    showNoise: typeof saved.showNoise === "boolean" ? saved.showNoise : d.showNoise,
+  };
+}
+
 /** Clamp / normalise a saved mapping slice (tool, per-LED offsets). */
 function resolveMapping(input: unknown): MappingParams {
   const d = DEFAULTS.mapping;
@@ -2164,6 +2248,9 @@ function initialState() {
     wled: { ...DEFAULTS.wled, ...saved.wled, enabled: false },
     breath: resolveBreath(saved.breath),
     lightning: resolveLightning(saved.lightning),
+    breathFilter: resolveBreathFilter(
+      (saved as unknown as Record<string, unknown>).breathFilter,
+    ),
     drone: resolveDroneParams(
       saved.drone as
         | (Partial<DroneParams> & Record<string, unknown>)
@@ -2231,6 +2318,10 @@ export const useSimStore = create<SimState>((set) => ({
       }),
     })),
   setLightning: (l) => set((s) => ({ lightning: { ...s.lightning, ...l } })),
+  setBreathFilter: (b) =>
+    set((s) => ({
+      breathFilter: resolveBreathFilter({ ...s.breathFilter, ...b }),
+    })),
   setDrone: (d) => set((s) => ({ drone: { ...s.drone, ...d } })),
   addDroneNote: (note) =>
     set((s) => ({ drone: { ...s.drone, notes: [...s.drone.notes, note] } })),
@@ -2503,6 +2594,7 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   s.setWled({ ...snap.wled, enabled: false });
   s.setBreath(resolveBreath(snap.breath));
   s.setLightning(resolveLightning(snap.lightning));
+  s.setBreathFilter(resolveBreathFilter(snap.breathFilter));
   s.setDrone(
     resolveDroneParams(
       snap.drone as
@@ -2577,6 +2669,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     wled: s.wled,
     breath: resolveBreath(s.breath),
     lightning: s.lightning,
+    breathFilter: resolveBreathFilter(s.breathFilter),
     drone: s.drone,
     pad: s.pad,
     samples: s.samples,

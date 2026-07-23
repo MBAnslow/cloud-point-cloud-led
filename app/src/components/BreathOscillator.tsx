@@ -12,6 +12,15 @@ import {
   type BreathParticipant,
 } from "../state";
 import { useDraggable } from "./useDraggable";
+import {
+  clearOscBreathHistory,
+  getOscBreathBinary,
+  getOscBreathHistory,
+  getOscBreathValueAt,
+  getOscRelayStatus,
+  isOscBreathConnected,
+  subscribeOscBreath,
+} from "../breath/oscBreathClient";
 
 const PRESET_COLORS = [
   "#77d5ff",
@@ -81,20 +90,32 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
   const breath = useSimStore((s) => s.breath);
   const setBreath = useSimStore((s) => s.setBreath);
   const [nowMs, setNowMs] = useState(() => performance.now());
+  const [wallNowMs, setWallNowMs] = useState(() => performance.now());
   const [visible, setVisible] = useState(true);
+  const [oscTick, setOscTick] = useState(0);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const { pos, handleProps } = useDraggable(panelRef);
+  // Keep below the fixed SkyTimeline (top: 56 + ~arc/tracks).
+  const SKY_TIMELINE_CLEARANCE = 300;
+  const { pos, handleProps } = useDraggable(panelRef, {
+    minTop: SKY_TIMELINE_CLEARANCE,
+  });
 
   useEffect(() => {
     let raf = 0;
     const tick = (t: number) => {
       setNowMs(tickBreathClock(t, useSimStore.getState().breath.paused));
+      setWallNowMs(t);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  useEffect(() => {
+    return subscribeOscBreath(() => setOscTick((n) => n + 1));
+  }, []);
+  // Keep oscTick referenced so React tracks OSC-driven re-renders.
+  void oscTick;
   const cycleSeconds =
     breath.inhaleSeconds +
     breath.holdPeakSeconds +
@@ -157,9 +178,11 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
     position: "fixed",
     left: pos ? pos.left : "50%",
     top: pos ? pos.top : undefined,
-    bottom: pos ? undefined : 200,
+    bottom: pos ? undefined : 72,
     transform: pos ? undefined : "translateX(-50%)",
     width: "min(820px, calc(100vw - 390px))",
+    maxHeight: `calc(100vh - ${SKY_TIMELINE_CLEARANCE}px - 64px)`,
+    overflowY: "auto",
     zIndex: 9,
     pointerEvents: "auto",
     background: "rgba(10, 12, 20, 0.72)",
@@ -214,6 +237,57 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
             />
             enabled
           </label>
+          <label
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            title="OSC breath-out always spawns travelling spheroids. Internal also runs the simulated oscillator when selected."
+          >
+            trigger
+            <select
+              value={breath.triggerSource ?? "internal"}
+              onChange={(e) =>
+                setBreath({
+                  triggerSource: e.target.value === "osc" ? "osc" : "internal",
+                })
+              }
+              style={{
+                background: "rgba(0,0,0,0.35)",
+                color: "inherit",
+                border: "1px solid rgba(255,255,255,0.15)",
+                borderRadius: 4,
+                padding: "1px 4px",
+                fontSize: 11,
+              }}
+            >
+              <option value="internal">Internal</option>
+              <option value="osc">OSC</option>
+            </select>
+          </label>
+          {breath.triggerSource === "osc" && (
+            <span
+              style={{
+                fontSize: 10,
+                opacity: 0.75,
+                color: isOscBreathConnected()
+                  ? "rgba(140,220,160,0.95)"
+                  : "rgba(255,180,120,0.95)",
+              }}
+              title="Relay must be running (npm run dev) to receive UDP OSC on port 999"
+            >
+              {(() => {
+                if (!isOscBreathConnected()) return "relay offline";
+                const st = getOscRelayStatus();
+                if (!st || st.packets === 0) return "relay · udp 999 · no packets yet";
+                const age =
+                  st.lastAtMs > 0
+                    ? `${((Date.now() - st.lastAtMs) / 1000).toFixed(1)}s ago`
+                    : "";
+                if (!st.lastMatched) {
+                  return `udp ${st.packets} · unmatched ${st.lastAddress || "?"} ${age}`;
+                }
+                return `udp ${st.packets} · ok ${st.matched} · ${st.lastAddress}=${st.lastValue} ${age}`;
+              })()}
+            </span>
+          )}
           <button
             onClick={() => setBreath({ paused: !breath.paused })}
             title={
@@ -287,6 +361,13 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
               if (!breath.paused) setBreath({ paused: true });
             }}
           />
+
+          {breath.triggerSource === "osc" && (
+            <OscBinaryTimeline
+              participants={breath.participants}
+              wallNowMs={wallNowMs}
+            />
+          )}
 
           <div style={{ display: "flex", gap: 6, marginTop: 8, fontSize: 10 }}>
             <SegmentPill
@@ -509,12 +590,16 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
           >
             {breath.participants.map((p, idx) => {
               const sampleP = sampleParticipantBreath(p, breath, nowMs);
+              const oscBinary = getOscBreathBinary(idx + 1);
               return (
                 <div
                   key={p.id}
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "auto auto auto 1fr 1fr auto auto",
+                    gridTemplateColumns:
+                      breath.triggerSource === "osc"
+                        ? "auto auto auto 1fr 1fr auto auto auto"
+                        : "auto auto auto 1fr 1fr auto auto",
                     gap: 8,
                     alignItems: "center",
                     fontSize: 11,
@@ -575,7 +660,14 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                       {p.azimuthDeg.toFixed(0)}°
                     </span>
                   </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}
+                    title={
+                      breath.triggerSource === "osc"
+                        ? "Phase offset is ignored for wave spawning in OSC mode"
+                        : "Offset this participant within the shared breath cycle"
+                    }
+                  >
                     phase
                     <input
                       type="range"
@@ -589,6 +681,7 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                         })
                       }
                       style={{ width: "100%" }}
+                      disabled={breath.triggerSource === "osc"}
                     />
                     <span
                       style={{
@@ -604,6 +697,26 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                   <span style={{ minWidth: 72, opacity: 0.8 }}>
                     {sampleP.phase} {sampleP.level.toFixed(2)}
                   </span>
+                  {breath.triggerSource === "osc" && (
+                    <span
+                      title={`/breath${idx + 1}/breath_binary`}
+                      style={{
+                        minWidth: 52,
+                        textAlign: "right",
+                        fontVariantNumeric: "tabular-nums",
+                        fontWeight: 600,
+                        color:
+                          oscBinary >= 0.5
+                            ? "rgba(255,170,120,0.95)"
+                            : oscBinary <= -0.5
+                              ? "rgba(120,200,255,0.95)"
+                              : "rgba(180,190,200,0.75)",
+                      }}
+                    >
+                      osc {oscBinary > 0 ? "+" : ""}
+                      {oscBinary.toFixed(0)}
+                    </span>
+                  )}
                   <button
                     onClick={() => removeParticipant(p.id)}
                     disabled={breath.participants.length <= 1}
@@ -632,6 +745,202 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function OscBinaryTimeline({
+  participants,
+  wallNowMs,
+  windowSec = 15,
+}: {
+  participants: BreathParticipant[];
+  wallNowMs: number;
+  windowSec?: number;
+}) {
+  const WIDTH = 480;
+  const LANE_H = 36;
+  const PAD_X = 44;
+  const PAD_TOP = 10;
+  const PAD_BOTTOM = 18;
+  const GAP = 6;
+  const windowMs = windowSec * 1000;
+  const lanes = Math.max(1, Math.min(MAX_BREATH_PARTICIPANTS, participants.length));
+  const HEIGHT = PAD_TOP + PAD_BOTTOM + lanes * LANE_H + Math.max(0, lanes - 1) * GAP;
+  const usableW = WIDTH - PAD_X - 8;
+  const t0 = wallNowMs - windowMs;
+
+  const binaryEvents = getOscBreathHistory(windowMs + 1000, "binary");
+
+  const xAt = (tMs: number) => PAD_X + ((tMs - t0) / windowMs) * usableW;
+  const yInLane = (lane: number, value: number) => {
+    const top = PAD_TOP + lane * (LANE_H + GAP);
+    const n = (Math.max(-1, Math.min(1, value)) + 1) / 2;
+    return top + (1 - n) * (LANE_H - 8) + 4;
+  };
+
+  const stepPath = (channel: number, lane: number): string => {
+    let v = getOscBreathValueAt(channel, "binary", t0);
+    // If older events were pruned, hold the live value across the window.
+    if (
+      v === 0 &&
+      !binaryEvents.some((e) => e.channel === channel && e.tMs <= t0)
+    ) {
+      v = getOscBreathBinary(channel);
+    }
+    const parts: string[] = [`M${xAt(t0).toFixed(1)},${yInLane(lane, v).toFixed(1)}`];
+    for (const e of binaryEvents) {
+      if (e.channel !== channel) continue;
+      if (e.tMs < t0) continue;
+      if (e.tMs > wallNowMs) break;
+      const x = xAt(e.tMs);
+      parts.push(`L${x.toFixed(1)},${yInLane(lane, v).toFixed(1)}`);
+      v = e.value;
+      parts.push(`L${x.toFixed(1)},${yInLane(lane, v).toFixed(1)}`);
+    }
+    parts.push(
+      `L${xAt(wallNowMs).toFixed(1)},${yInLane(lane, v).toFixed(1)}`,
+    );
+    return parts.join(" ");
+  };
+
+  const tickSecs = [0, 5, 10, 15].filter((s) => s <= windowSec);
+
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        borderRadius: 8,
+        background: "rgba(0,0,0,0.25)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        padding: 6,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          marginBottom: 4,
+          fontSize: 10,
+          opacity: 0.8,
+        }}
+      >
+        <span style={{ textTransform: "uppercase", letterSpacing: 0.5 }}>
+          OSC · last {windowSec}s
+        </span>
+        <button
+          type="button"
+          onClick={() => clearOscBreathHistory()}
+          style={{
+            background: "rgba(255,255,255,0.06)",
+            color: "inherit",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 4,
+            padding: "1px 6px",
+            cursor: "pointer",
+            fontSize: 10,
+          }}
+        >
+          clear
+        </button>
+      </div>
+      <svg
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        preserveAspectRatio="none"
+        style={{ width: "100%", height: Math.max(80, lanes * 42 + 28), display: "block" }}
+      >
+        {tickSecs.map((s) => {
+          const x = xAt(wallNowMs - s * 1000);
+          return (
+            <g key={s}>
+              <line
+                x1={x}
+                x2={x}
+                y1={PAD_TOP}
+                y2={HEIGHT - PAD_BOTTOM}
+                stroke="rgba(255,255,255,0.08)"
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+              />
+              <text
+                x={x}
+                y={HEIGHT - 4}
+                fill="rgba(200,210,220,0.55)"
+                fontSize={8}
+                textAnchor="middle"
+              >
+                {s === 0 ? "now" : `−${s}s`}
+              </text>
+            </g>
+          );
+        })}
+        {participants.slice(0, lanes).map((p, lane) => {
+          const channel = lane + 1;
+          const midY = yInLane(lane, 0);
+          const top = PAD_TOP + lane * (LANE_H + GAP);
+          const outY = yInLane(lane, 1);
+          const inY = yInLane(lane, -1);
+          return (
+            <g key={p.id}>
+              <rect
+                x={PAD_X}
+                y={top}
+                width={usableW}
+                height={LANE_H}
+                fill="rgba(255,255,255,0.03)"
+                rx={3}
+              />
+              <line
+                x1={PAD_X}
+                x2={PAD_X + usableW}
+                y1={midY}
+                y2={midY}
+                stroke="rgba(255,255,255,0.12)"
+                strokeWidth={1}
+                strokeDasharray="3 3"
+                vectorEffect="non-scaling-stroke"
+              />
+              <text
+                x={PAD_X - 4}
+                y={outY + 3}
+                fill="rgba(255,170,120,0.9)"
+                fontSize={8}
+                textAnchor="end"
+              >
+                out
+              </text>
+              <text
+                x={PAD_X - 4}
+                y={inY + 3}
+                fill="rgba(120,200,255,0.9)"
+                fontSize={8}
+                textAnchor="end"
+              >
+                in
+              </text>
+              <path
+                d={stepPath(channel, lane)}
+                fill="none"
+                stroke={p.color}
+                strokeWidth={2}
+                vectorEffect="non-scaling-stroke"
+                opacity={p.enabled ? 0.95 : 0.35}
+              />
+            </g>
+          );
+        })}
+        <line
+          x1={xAt(wallNowMs)}
+          x2={xAt(wallNowMs)}
+          y1={PAD_TOP}
+          y2={HEIGHT - PAD_BOTTOM}
+          stroke="rgba(255,255,255,0.4)"
+          strokeWidth={1}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
     </div>
   );
 }

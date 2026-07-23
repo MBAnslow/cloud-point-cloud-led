@@ -9,12 +9,16 @@ import {
   sharedBreathWaveController,
   waveLocalFrame,
 } from "../lighting/breathWaves";
-import { tickBreathClock } from "../lighting/breath";
 import { useSimStore } from "../state";
+
+/** Concurrent travelling spheroids we keep mesh slots for. */
+const MAX_WAVE_MESHES = 16;
 
 /**
  * Horizon participants + travelling exhale waves. Visible in Breath view.
  * Wave state is owned by `sharedBreathWaveController` (advanced from Leds).
+ * Positions advance on wall clock so OSC-triggered waves are not tied to
+ * the internal breath oscillator pause/scrub clock.
  */
 export function BreathArea() {
   const breath = useSimStore((s) => s.breath);
@@ -39,13 +43,10 @@ export function BreathArea() {
     [tiltRad, yawRad, cloud.offsetX, cloud.offsetY, cloud.offsetZ],
   );
 
-  const center = useMemo(
-    () => {
-      const c = cloudCenterWorld(transform);
-      return new Vector3(c[0], c[1], c[2]);
-    },
-    [transform],
-  );
+  const center = useMemo(() => {
+    const c = cloudCenterWorld(transform);
+    return new Vector3(c[0], c[1], c[2]);
+  }, [transform]);
 
   const participants = useMemo(() => {
     return breath.participants
@@ -66,7 +67,7 @@ export function BreathArea() {
   }, [breath.participants, breath.cloudDistance, breath.horizonDistance, transform]);
 
   useFrame(() => {
-    const now = tickBreathClock(performance.now(), breath.paused);
+    const now = performance.now();
     const waves = sharedBreathWaveController.getWaves();
     const { width, height, depth } = liveWaveExtents(breath);
     const sx = Math.max(0.001, width);
@@ -99,10 +100,6 @@ export function BreathArea() {
 
   if (!breath.enabled || ledViewMode !== "breathIntensity") return null;
 
-  const waves = sharedBreathWaveController.getWaves();
-  // Keep a stable pool of wave meshes so we don't thrash the scene graph.
-  const waveSlots = Math.max(4, waves.length);
-
   return (
     <group>
       {participants.map((p) => (
@@ -132,7 +129,7 @@ export function BreathArea() {
           />
         </group>
       ))}
-      {Array.from({ length: waveSlots }, (_, i) => (
+      {Array.from({ length: MAX_WAVE_MESHES }, (_, i) => (
         <mesh
           key={`wave-${i}`}
           ref={(el) => {

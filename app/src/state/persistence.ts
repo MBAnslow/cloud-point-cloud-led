@@ -15,6 +15,7 @@ import type {
   LedLocatorState,
   LedViewMode,
   LightningParams,
+  BreathFilterParams,
   MappingParams,
   MeshTargetParams,
   SkyParams,
@@ -38,6 +39,7 @@ export interface Snapshot {
   wled: WledParams;
   breath?: BreathParams;
   lightning?: LightningParams;
+  breathFilter?: BreathFilterParams;
   drone?: DroneParams;
   pad?: PadParams;
   samples?: SamplesParams;

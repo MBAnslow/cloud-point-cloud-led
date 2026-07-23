@@ -10,6 +10,8 @@ import {
   InstancedMesh,
   Matrix3,
   Matrix4,
+  MeshBasicMaterial,
+  NormalBlending,
   Object3D,
   Quaternion,
   Vector3,
@@ -20,6 +22,11 @@ import {
   getMeshHalfExtents,
   loadMeshGeometry,
 } from "../mapping/meshAsset";
+import {
+  breathFilterGate,
+  buildCooldownRates,
+  updateBreathFilterMemory,
+} from "../lighting/breathFilter";
 import {
   breathSampleAt,
   liveWaveExtents,
@@ -86,6 +93,7 @@ export function Leds() {
   const ambient = useSimStore((s) => s.ambient);
   const sky = useSimStore((s) => s.sky);
   const breath = useSimStore((s) => s.breath);
+  const breathFilter = useSimStore((s) => s.breathFilter);
   const lightning = useSimStore((s) => s.lightning);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
   const ledDisplayMode = useSimStore((s) => s.ledDisplayMode);
@@ -126,9 +134,18 @@ export function Leds() {
       breathRimColors: new Float32Array(n * 3),
       lightningColorFloats: new Float32Array(n * 3),
       colorBytes: new Uint8Array(n * 3),
+      /** Persistent TOD gate memory [0,1] per LED. */
+      breathFilterMemory: new Float32Array(n),
+      /** Seconds since breath mask went inactive, per LED. */
+      breathFilterReleaseAge: new Float32Array(n),
+      /** Procedural cooldown rates [0,1] per LED. */
+      breathCooldownRates: new Float32Array(n),
     };
   }, [ledCount]);
 
+  const breathFilterClockRef = useRef({ lastMs: 0 });
+  const breathCooldownKeyRef = useRef("");
+  const positionsVersionRef = useRef(0);
   // Mesh transform used to convert stored mesh-local LED coords into
   // world coords. Kept identical to the mapping app's mesh transform.
   const meshMatrix = useMemo(() => {
@@ -255,6 +272,7 @@ export function Leds() {
       mesh.instanceMatrix.needsUpdate = true;
       mesh.count = buffers.n;
     }
+    positionsVersionRef.current += 1;
   }, [
     ellipsoid.rx,
     ellipsoid.ry,
@@ -395,11 +413,10 @@ export function Leds() {
       buffers.timeColorFloats.fill(0);
     }
 
-    // Advance travelling exhale waves whenever breath is enabled so both
-    // the combined pipeline and pure Breath view see the same fronts.
-    // The shared breath clock freezes while `paused`, holding wave
-    // positions and oscillator phase for visualization work.
-    const nowBreath = tickBreathClock(performance.now(), breath.paused);
+    // Travelling waves use wall clock (decoupled from breath pause/scrub).
+    // Internal oscillator phase still uses the shared breath clock.
+    const wallNow = performance.now();
+    const nowBreath = tickBreathClock(wallNow, breath.paused);
     const cloudXformBreath = {
       tiltRad: cloudTiltRad,
       yawRad: cloudYawRad,
@@ -407,8 +424,22 @@ export function Leds() {
       offsetY: cloud.offsetY,
       offsetZ: cloud.offsetZ,
     };
-    if (breath.enabled) {
-      sharedBreathWaveController.update(nowBreath, breath, cloudXformBreath);
+    sharedBreathWaveController.update(
+      wallNow,
+      breath,
+      cloudXformBreath,
+      nowBreath,
+    );
+    {
+      const { width, height, depth } = liveWaveExtents(breath);
+      sharedBreathWaveController.syncLedContact(
+        wallNow,
+        buffers.positions,
+        buffers.n,
+        width,
+        height,
+        depth,
+      );
     }
 
     const useBreathMask =
@@ -416,7 +447,12 @@ export function Leds() {
       (ledViewMode === "breathIntensity" ||
         (ledStreamPipeline.breathStage && ledViewMode === "breathPlusTimeOfDay"));
 
-    if (useBreathMask) {
+    // Also sample when the persistent filter needs live mask input even if
+    // the current view isn't showing breath (e.g. time-of-day only).
+    const sampleBreathForFilter =
+      breath.enabled && breathFilter.enabled && !useBreathMask;
+
+    if (useBreathMask || sampleBreathForFilter) {
       const falloffExp = Math.max(0, breath.falloffExponent);
       const { width, height, depth } = liveWaveExtents(breath);
       const fog = {
@@ -432,27 +468,77 @@ export function Leds() {
           buffers.positions[i3 + 1],
           buffers.positions[i3 + 2],
           sharedBreathWaveController,
-          nowBreath,
+          wallNow,
           falloffExp,
           width,
           height,
           depth,
-          breath.rimThickness,
-          breath.rimArcDegrees,
+          useBreathMask ? breath.rimThickness : 0,
+          useBreathMask ? breath.rimArcDegrees : 0,
           fog,
         );
         buffers.breathColorFloats[i3] = sample.mask;
         buffers.breathColorFloats[i3 + 1] = sample.mask;
         buffers.breathColorFloats[i3 + 2] = sample.mask;
-        buffers.breathRimWeights[i] = sample.rim;
-        buffers.breathRimColors[i3] = sample.rimR;
-        buffers.breathRimColors[i3 + 1] = sample.rimG;
-        buffers.breathRimColors[i3 + 2] = sample.rimB;
+        if (useBreathMask) {
+          buffers.breathRimWeights[i] = sample.rim;
+          buffers.breathRimColors[i3] = sample.rimR;
+          buffers.breathRimColors[i3 + 1] = sample.rimG;
+          buffers.breathRimColors[i3 + 2] = sample.rimB;
+        } else {
+          buffers.breathRimWeights[i] = 0;
+          buffers.breathRimColors[i3] = 0;
+          buffers.breathRimColors[i3 + 1] = 0;
+          buffers.breathRimColors[i3 + 2] = 0;
+        }
       }
     } else {
       buffers.breathColorFloats.fill(0);
       buffers.breathRimWeights.fill(0);
       buffers.breathRimColors.fill(0);
+    }
+
+    // Persistent breath-filter memory (TOD gate). Rebuild cooldown field
+    // when layout or procedural params change; update memory whenever
+    // the filter is enabled and breath is sampling.
+    const needCooldownField = breathFilter.enabled || breathFilter.showNoise;
+    if (needCooldownField) {
+      const coolKey = `v8|${positionsVersionRef.current}|${buffers.n}|${breathFilter.seed}|${breathFilter.cooldownScale}|${breathFilter.cooldownContrast}`;
+      if (coolKey !== breathCooldownKeyRef.current) {
+        buildCooldownRates(
+          buffers.positions,
+          buffers.n,
+          breathFilter,
+          buffers.breathCooldownRates,
+        );
+        breathCooldownKeyRef.current = coolKey;
+      }
+    }
+    if (breathFilter.enabled) {
+      const nowMs = performance.now();
+      const prevMs = breathFilterClockRef.current.lastMs;
+      const dtSec = prevMs > 0 ? (nowMs - prevMs) / 1000 : 0;
+      breathFilterClockRef.current.lastMs = nowMs;
+      if (useBreathMask || sampleBreathForFilter) {
+        updateBreathFilterMemory(
+          buffers.breathFilterMemory,
+          buffers.breathFilterReleaseAge,
+          buffers.breathColorFloats,
+          buffers.breathCooldownRates,
+          buffers.n,
+          breathFilter.threshold,
+          breathFilter.decayMaxSeconds,
+          dtSec,
+        );
+      } else {
+        // Still enforce the floor when breath isn't sampling this frame.
+        const floor = clamp01(breathFilter.threshold);
+        for (let i = 0; i < buffers.n; i++) {
+          const v = buffers.breathFilterMemory[i];
+          buffers.breathFilterMemory[i] =
+            !(v >= 0) || !Number.isFinite(v) ? floor : Math.max(floor, v);
+        }
+      }
     }
 
     // Lightning: additive contribution independent of view mode. Runs only
@@ -521,9 +607,15 @@ export function Leds() {
 
     // Select or blend pipelines per mode.
     if (ledViewMode === "breathIntensity") {
+      // When the breath filter is on, show filter *memory* (not the live
+      // wave mask) so per-LED decay variation is visible in this view.
+      const showMemory = breathFilter.enabled;
+      const thresh = clamp01(breathFilter.threshold);
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const v = buffers.breathColorFloats[i3];
+        const v = showMemory
+          ? breathFilterGate(buffers.breathFilterMemory[i], thresh)
+          : buffers.breathColorFloats[i3];
         const w = clamp01(buffers.breathRimWeights[i] * rimAmount);
         const r = clamp01(v + (buffers.breathRimColors[i3] - v) * w);
         const g = clamp01(v + (buffers.breathRimColors[i3 + 1] - v) * w);
@@ -550,6 +642,8 @@ export function Leds() {
       }
     } else {
       const mix = ledStreamPipeline.breathStage ? clamp01(breath.breathVsTimeMix) : 0;
+      const useMemFilter = breathFilter.enabled;
+      const thresh = clamp01(breathFilter.threshold);
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const tr = buffers.timeColorFloats[i3];
@@ -561,9 +655,11 @@ export function Leds() {
         let r = tr;
         let g = tg;
         let b = tb;
-        const inhaleMask = clamp01((br + bg + bb) / 3);
+        const inhaleMask = useMemFilter
+          ? breathFilterGate(buffers.breathFilterMemory[i], thresh)
+          : clamp01((br + bg + bb) / 3);
         if (breathTimeCombineMode === "revealOnInhale") {
-          // Hide time-of-day by default and reveal it where inhale activates.
+          // Hide time-of-day by default and reveal it where the filter is active.
           r = tr * inhaleMask;
           g = tg * inhaleMask;
           b = tb * inhaleMask;
@@ -593,11 +689,44 @@ export function Leds() {
       }
     }
 
+    // Final debug override: cooldown noise wins over view mode + locator.
+    const showNoise = breathFilter.showNoise;
+    if (showNoise) {
+      for (let i = 0; i < buffers.n; i++) {
+        const i3 = i * 3;
+        const v = clamp01(buffers.breathCooldownRates[i] ?? 0);
+        buffers.colorFloats[i3] = v;
+        buffers.colorFloats[i3 + 1] = v;
+        buffers.colorFloats[i3 + 2] = v;
+        buffers.colorBytes[i3] = (v * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 1] = (v * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 2] = (v * 255 + 0.5) | 0;
+      }
+    }
+
+    // Noise preview needs normal blending so mid-greys are visible; additive
+    // emission mode makes anything near black disappear.
+    if (ledDisplayMode === "leds" && mesh) {
+      const mat = mesh.material as MeshBasicMaterial;
+      if (showNoise) {
+        mat.blending = NormalBlending;
+        mat.transparent = false;
+        mat.depthTest = true;
+        mat.depthWrite = true;
+      } else {
+        mat.blending = AdditiveBlending;
+        mat.transparent = true;
+        mat.depthTest = false;
+        mat.depthWrite = false;
+      }
+    }
+
     const locatorColor = hexToVec3(ledLocator.color);
     if (ledDisplayMode === "leds") {
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         if (
+          !showNoise &&
           ledStreamPipeline.locatorOverrideStage &&
           ledLocator.enabled &&
           locatedSet.has(i)
@@ -627,10 +756,18 @@ export function Leds() {
       // every frame (with optional locator highlights) to avoid stale/zero
       // instance colors making sensors appear black.
       for (let i = 0; i < buffers.n; i++) {
-        if (ledLocator.enabled && locatedSet.has(i)) {
+        const i3 = i * 3;
+        if (showNoise) {
+          tmpColor.setRGB(
+            buffers.colorFloats[i3],
+            buffers.colorFloats[i3 + 1],
+            buffers.colorFloats[i3 + 2],
+          );
+        } else if (ledLocator.enabled && locatedSet.has(i)) {
           tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
+        } else {
+          tmpColor.setRGB(1, 1, 1);
         }
-        else tmpColor.setRGB(1, 1, 1);
         mesh.setColorAt(i, tmpColor);
       }
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;

@@ -22,9 +22,14 @@ export interface DragPos {
  * survive re-renders. Pointer capture ensures drags don't get stolen
  * by other elements.
  */
-export function useDraggable(elRef: React.RefObject<HTMLElement | null>) {
+export function useDraggable(
+  elRef: React.RefObject<HTMLElement | null>,
+  options?: { minTop?: number; minLeft?: number },
+) {
   const [pos, setPos] = useState<DragPos | null>(null);
   const dragRef = useRef<{ offX: number; offY: number } | null>(null);
+  const minTop = options?.minTop ?? 0;
+  const minLeft = options?.minLeft ?? 0;
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -55,8 +60,14 @@ export function useDraggable(elRef: React.RefObject<HTMLElement | null>) {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
       if (!d) return;
-      const left = Math.max(0, Math.min(window.innerWidth - 40, e.clientX - d.offX));
-      const top = Math.max(0, Math.min(window.innerHeight - 24, e.clientY - d.offY));
+      const left = Math.max(
+        minLeft,
+        Math.min(window.innerWidth - 40, e.clientX - d.offX),
+      );
+      const top = Math.max(
+        minTop,
+        Math.min(window.innerHeight - 24, e.clientY - d.offY),
+      );
       setPos({ left, top });
     };
     const onUp = () => {
@@ -70,7 +81,7 @@ export function useDraggable(elRef: React.RefObject<HTMLElement | null>) {
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, []);
+  }, [minLeft, minTop]);
 
   return { pos, handleProps: { onPointerDown, style: { cursor: "move" as const } } };
 }

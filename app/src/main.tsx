@@ -11,8 +11,10 @@ import { SampleRuntime } from "./audio/SampleRuntime";
 import { MasterFxRuntime } from "./audio/MasterFxRuntime";
 import { LightningAudioRuntime } from "./audio/LightningAudioRuntime";
 import { startPersistence } from "./state/persistRuntime";
+import { startOscBreathClient } from "./breath/oscBreathClient";
 
 startPersistence();
+startOscBreathClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <HashRouter>

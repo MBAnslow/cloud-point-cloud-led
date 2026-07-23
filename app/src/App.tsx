@@ -6,6 +6,7 @@ import { ControlPanel } from "./controls/Panel";
 import { Histogram } from "./components/Histogram";
 import { StreamMatrix } from "./components/StreamMatrix";
 import { BreathOscillator } from "./components/BreathOscillator";
+import { BreathFilterPanel } from "./components/BreathFilterPanel";
 import { DayCyclePanel } from "./components/DayCyclePanel";
 import { LedViewModePanel } from "./components/LedViewModePanel";
 import { LightningPanel } from "./components/LightningPanel";
@@ -30,10 +31,14 @@ export default function App() {
         showMaster={ui.showMaster}
         showBreath={ui.showBreath}
         showLightning={ui.showLightning}
+        showBreathFilter={ui.showBreathFilter}
         showStream={ui.showStream}
         onToggleMaster={() => setUi({ showMaster: !ui.showMaster })}
         onToggleBreath={() => setUi({ showBreath: !ui.showBreath })}
         onToggleLightning={() => setUi({ showLightning: !ui.showLightning })}
+        onToggleBreathFilter={() =>
+          setUi({ showBreathFilter: !ui.showBreathFilter })
+        }
         onToggleStream={() => setUi({ showStream: !ui.showStream })}
       />
       <ControlPanel />
@@ -43,6 +48,7 @@ export default function App() {
       <MasterFrequencyPanel visible={ui.showMaster} />
       <BreathOscillator visible={ui.showBreath} />
       <LightningPanel visible={ui.showLightning} />
+      <BreathFilterPanel visible={ui.showBreathFilter} />
       <Histogram />
       <StreamMatrix visible={ui.showStream} />
       <Canvas
@@ -213,19 +219,23 @@ function Footer({
   showMaster,
   showBreath,
   showLightning,
+  showBreathFilter,
   showStream,
   onToggleMaster,
   onToggleBreath,
   onToggleLightning,
+  onToggleBreathFilter,
   onToggleStream,
 }: {
   showMaster: boolean;
   showBreath: boolean;
   showLightning: boolean;
+  showBreathFilter: boolean;
   showStream: boolean;
   onToggleMaster: () => void;
   onToggleBreath: () => void;
   onToggleLightning: () => void;
+  onToggleBreathFilter: () => void;
   onToggleStream: () => void;
 }) {
   return (
@@ -248,7 +258,7 @@ function Footer({
           "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
       }}
     >
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button
           onClick={onToggleMaster}
           style={footerToggleStyle(showMaster)}
@@ -262,6 +272,13 @@ function Footer({
           title="Toggle Breath oscillator panel"
         >
           {showBreath ? "▾" : "▸"} Breath
+        </button>
+        <button
+          onClick={onToggleBreathFilter}
+          style={footerToggleStyle(showBreathFilter)}
+          title="Toggle Breath filter panel"
+        >
+          {showBreathFilter ? "▾" : "▸"} Breath filter
         </button>
         <button
           onClick={onToggleLightning}
