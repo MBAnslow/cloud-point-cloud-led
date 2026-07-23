@@ -22,7 +22,7 @@ import {
   useSimStore,
   type SimState,
 } from "../state";
-import type { Snapshot } from "./persistence";
+import { saveSnapshot, type Snapshot } from "./persistence";
 import { getSampleBlob } from "../samples/sampleStorage";
 import { getMeshBlob } from "../mapping/meshAsset";
 import {
@@ -75,6 +75,23 @@ const w = (): FsWindow => window as FsWindow;
 
 function fileAccessSupported(): boolean {
   return typeof w().showSaveFilePicker === "function";
+}
+
+async function verifyReadable(handle: FileSystemFileHandle): Promise<boolean> {
+  const h = handle as FileSystemFileHandle & {
+    queryPermission?: (opts: { mode: "read" }) => Promise<PermissionState>;
+    requestPermission?: (opts: { mode: "read" }) => Promise<PermissionState>;
+  };
+  if (!h.queryPermission || !h.requestPermission) return true;
+  const state = await h.queryPermission({ mode: "read" });
+  if (state === "granted") return true;
+  try {
+    const asked = await h.requestPermission({ mode: "read" });
+    return asked === "granted";
+  } catch {
+    // Without a user gesture the prompt may be blocked — fall through.
+    return false;
+  }
 }
 
 async function verifyWritable(handle: FileSystemFileHandle): Promise<boolean> {
@@ -167,6 +184,7 @@ export async function saveToFile(opts: SaveOptions = {}): Promise<void> {
     }
     await writeYamlToHandle(handle, yaml);
     await putConfigHandle(handle);
+    saveSnapshot(currentSnapshot());
     return;
   }
   // Fallback: trigger a browser download.
@@ -179,6 +197,7 @@ export async function saveToFile(opts: SaveOptions = {}): Promise<void> {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  saveSnapshot(currentSnapshot());
 }
 
 export interface LoadResult {
@@ -233,8 +252,35 @@ export async function loadFromFile(): Promise<LoadResult | null> {
   }
   const snap = yamlToSnapshot(text);
   applySnapshot(snap);
+  // Keep the browser auto-restore copy in sync with the file we just opened.
+  saveSnapshot(currentSnapshot());
   const missing = await auditBinaryAssets(useSimStore.getState());
   return { fileName, missingAssets: missing };
+}
+
+/**
+ * If a YAML config was opened/saved previously, reload it into the live
+ * store. Used on startup so the last bound file is the default session.
+ * Returns null when there is no handle, permission is denied, or the
+ * browser doesn't support the File System Access API.
+ */
+export async function reloadBoundFileIfPossible(): Promise<LoadResult | null> {
+  if (!fileAccessSupported()) return null;
+  const handle = await getConfigHandle();
+  if (!handle) return null;
+  if (!(await verifyReadable(handle))) return null;
+  try {
+    const file = await handle.getFile();
+    const text = await file.text();
+    const snap = yamlToSnapshot(text);
+    applySnapshot(snap);
+    saveSnapshot(currentSnapshot());
+    const missing = await auditBinaryAssets(useSimStore.getState());
+    return { fileName: file.name, missingAssets: missing };
+  } catch (err) {
+    console.warn("[fileIO] reloadBoundFileIfPossible failed", err);
+    return null;
+  }
 }
 
 function pickTextFallback(): Promise<string> {

@@ -10,6 +10,9 @@ import { PadRuntime } from "./audio/PadRuntime";
 import { SampleRuntime } from "./audio/SampleRuntime";
 import { MasterFxRuntime } from "./audio/MasterFxRuntime";
 import { LightningAudioRuntime } from "./audio/LightningAudioRuntime";
+import { startPersistence } from "./state/persistRuntime";
+
+startPersistence();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <HashRouter>

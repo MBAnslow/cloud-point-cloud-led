@@ -1983,6 +1983,18 @@ function resolveLightning(input: unknown): LightningParams {
   };
 }
 
+/** Clamp a saved breath-modulation map into [-1, 1] per key. */
+function resolveBreathModMap(input: unknown): Record<string, number> {
+  if (!input || typeof input !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out[k] = Math.max(-1, Math.min(1, v));
+    }
+  }
+  return out;
+}
+
 /** Seed the store from a localStorage snapshot if one exists. */
 function initialState() {
   const saved = loadSnapshot();
@@ -2028,17 +2040,9 @@ function initialState() {
       saved.masterFx as Partial<MasterFxParams> | undefined,
       saved.drone as Record<string, unknown> | undefined,
     ),
-    breathMod: (() => {
-      const src = (saved as unknown as Record<string, unknown>).breathMod;
-      if (!src || typeof src !== "object") return {};
-      const out: Record<string, number> = {};
-      for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
-        if (typeof v === "number" && Number.isFinite(v)) {
-          out[k] = Math.max(-1, Math.min(1, v));
-        }
-      }
-      return out;
-    })(),
+    breathMod: resolveBreathModMap(
+      (saved as unknown as Record<string, unknown>).breathMod,
+    ),
     breathModEnabled: (() => {
       const v = (saved as unknown as Record<string, unknown>).breathModEnabled;
       return typeof v === "boolean" ? v : DEFAULTS.breathModEnabled;
@@ -2314,6 +2318,14 @@ export function applySnapshot(snap: Snapshot): Snapshot {
       snap.drone as Record<string, unknown> | undefined,
     ),
   );
+  // Full replace — setBreathMod is per-key and would leave stale entries.
+  useSimStore.setState({
+    breathMod: resolveBreathModMap(snap.breathMod),
+    breathModEnabled:
+      typeof snap.breathModEnabled === "boolean"
+        ? snap.breathModEnabled
+        : DEFAULTS.breathModEnabled,
+  });
   s.setLedViewMode(normalizeLedViewMode(snap.ledViewMode));
   if (snap.ledDisplayMode === "leds" || snap.ledDisplayMode === "sensors") {
     s.setLedDisplayMode(snap.ledDisplayMode);

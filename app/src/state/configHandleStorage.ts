@@ -1,9 +1,8 @@
 /**
  * Tiny IndexedDB store for a single FileSystemFileHandle — the last
  * YAML config file the user picked. Handles survive across page reloads
- * (Chrome/Edge), so once the user has picked a file we can silently
- * re-save/re-load to it without another picker prompt, subject to a
- * one-time permission re-request per session.
+ * (Chrome/Edge). On startup `reloadBoundFileIfPossible` re-reads that
+ * file when permission is still granted; Save reuses the same handle.
  */
 
 const DB_NAME = "cloudLeds.configHandle";
