@@ -38,6 +38,10 @@ export function ControlPanel() {
         label: "opacity (light)",
       },
       showOpacity: { value: initial.cloud.showOpacity, label: "show cloud" },
+      applyLedOffset: {
+        value: initial.cloud.applyLedOffset ?? true,
+        label: "apply LED bumps",
+      },
       rotationYDeg: {
         value: initial.cloud.rotationYDeg ?? 0,
         min: -180,
@@ -204,6 +208,7 @@ export function ControlPanel() {
     setCl({
       opacity: snap.cloud.opacity,
       showOpacity: snap.cloud.showOpacity,
+      applyLedOffset: snap.cloud.applyLedOffset ?? true,
       rotationXDeg: snap.cloud.rotationXDeg ?? 0,
       rotationYDeg: snap.cloud.rotationYDeg ?? 0,
       offsetX: snap.cloud.offsetX ?? 0,
@@ -276,6 +281,7 @@ export function ControlPanel() {
     setCloud({
       opacity: cl.opacity,
       showOpacity: cl.showOpacity,
+      applyLedOffset: cl.applyLedOffset,
       rotationXDeg: cl.rotationXDeg,
       rotationYDeg: cl.rotationYDeg,
       offsetX: cl.offsetX,
@@ -285,6 +291,7 @@ export function ControlPanel() {
   }, [
     cl.opacity,
     cl.showOpacity,
+    cl.applyLedOffset,
     cl.rotationXDeg,
     cl.rotationYDeg,
     cl.offsetX,

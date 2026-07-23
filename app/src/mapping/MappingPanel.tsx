@@ -13,23 +13,39 @@ import { deleteMeshBlob, invalidateMeshGeometry, putMeshBlob } from "./meshAsset
 interface Props {
   selected: number | null;
   setSelected: (index: number | null) => void;
+  selectedGaussianId: string | null;
+  setSelectedGaussianId: (id: string | null) => void;
 }
 
 const NUDGE_DEG = 2;
 const NUDGE_RAD = (NUDGE_DEG * Math.PI) / 180;
 
-export function MappingPanel({ selected, setSelected }: Props) {
+export function MappingPanel({
+  selected,
+  setSelected,
+  selectedGaussianId,
+  setSelectedGaussianId,
+}: Props) {
   const mapping = useSimStore((s) => s.mapping);
   const setMapping = useSimStore((s) => s.setMapping);
   const mesh = useSimStore((s) => s.mesh);
   const setMesh = useSimStore((s) => s.setMesh);
-  const moveMappedLed = useSimStore((s) => s.moveMappedLed);
+  const updateMappedLed = useSimStore((s) => s.updateMappedLed);
   const removeLastMappedLed = useSimStore((s) => s.removeLastMappedLed);
   const clearMappedLeds = useSimStore((s) => s.clearMappedLeds);
+  const updateMappingGaussian = useSimStore((s) => s.updateMappingGaussian);
+  const removeMappingGaussian = useSimStore((s) => s.removeMappingGaussian);
+  const clearMappingBumps = useSimStore((s) => s.clearMappingBumps);
 
   const count = mapping.leds.length;
   const lastIndex = count - 1;
   const reversed = mapping.reversed;
+  const tool = mapping.tool;
+  const gaussians = mapping.gaussians ?? [];
+  const selectedGaussian =
+    selectedGaussianId == null
+      ? null
+      : gaussians.find((g) => g.id === selectedGaussianId) ?? null;
   // Display number for a placement index, honoring the reverse toggle.
   const displayNumber = (i: number) => (reversed ? count - i : i + 1);
   // The physical threading end (where add/delete happen) shown as its number.
@@ -50,14 +66,13 @@ export function MappingPanel({ selected, setSelected }: Props) {
       Math.min(Math.PI / 2 - 1e-3, el + dEl),
     );
     const nextDisplayDir: Vec3 = azElToDir(az + dAz, nextEl);
-    moveMappedLed(
-      selected,
-      applyMappingOrientation(
+    updateMappedLed(selected, {
+      dir: applyMappingOrientation(
         nextDisplayDir,
         mapping.flipUpDown,
         mapping.flipLeftRight,
       ),
-    );
+    });
   };
 
   const deleteLast = () => {
@@ -298,10 +313,141 @@ export function MappingPanel({ selected, setSelected }: Props) {
       </Section>
 
       <Section title={`Sequence — ${count} LED${count === 1 ? "" : "s"}`}>
-        <div style={{ opacity: 0.7, lineHeight: 1.4, marginBottom: 8 }}>
-          Click the cloud surface to place the next LED. Drag a bead to move
-          it. You can only add or delete at the end of the string.
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            marginBottom: 8,
+          }}
+        >
+          <ToolButton
+            active={tool === "place"}
+            onClick={() => setMapping({ tool: "place" })}
+          >
+            Place
+          </ToolButton>
+          <ToolButton
+            active={tool === "offset"}
+            onClick={() => setMapping({ tool: "offset" })}
+          >
+            Offset
+          </ToolButton>
+          <ToolButton
+            active={tool === "gaussian"}
+            onClick={() => setMapping({ tool: "gaussian" })}
+          >
+            Gaussian
+          </ToolButton>
         </div>
+        <div style={{ opacity: 0.7, lineHeight: 1.4, marginBottom: 8 }}>
+          {tool === "place"
+            ? "Click the cloud surface to place the next LED. Drag a bead to slide it on the surface. You can only add or delete at the end of the string."
+            : tool === "offset"
+              ? "Drag a bead along its surface normal to offset it without changing the hand-placed position."
+              : "Click the surface to place a Gaussian bump. Drag its marker to move the centre. Edit height and width below."}
+        </div>
+        {tool === "offset" && selected !== null && mapping.leds[selected] && (
+          <div style={{ marginBottom: 8, opacity: 0.85 }}>
+            LED #{displayNumber(selected)} offset:{" "}
+            {((mapping.leds[selected].offset ?? 0) * 100).toFixed(1)} cm
+          </div>
+        )}
+        {tool === "gaussian" && (
+          <div style={{ marginBottom: 8, opacity: 0.85 }}>
+            {gaussians.length} bump{gaussians.length === 1 ? "" : "s"}
+          </div>
+        )}
+        {tool === "gaussian" && selectedGaussian && (
+          <div
+            style={{
+              display: "grid",
+              gap: 8,
+              marginBottom: 10,
+              padding: 8,
+              background: "rgba(255,255,255,0.04)",
+              borderRadius: 8,
+              border: "1px solid rgba(255,255,255,0.1)",
+            }}
+          >
+            <label style={{ display: "grid", gap: 4 }}>
+              <span style={{ opacity: 0.75 }}>
+                amplitude {(selectedGaussian.amplitude * 100).toFixed(1)} cm
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={0.5}
+                step={0.005}
+                value={selectedGaussian.amplitude}
+                onChange={(e) =>
+                  updateMappingGaussian(selectedGaussian.id, {
+                    amplitude: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span style={{ opacity: 0.75 }}>
+                width {(selectedGaussian.width * 100).toFixed(1)} cm
+              </span>
+              <input
+                type="range"
+                min={0.005}
+                max={0.5}
+                step={0.005}
+                value={selectedGaussian.width}
+                onChange={(e) =>
+                  updateMappingGaussian(selectedGaussian.id, {
+                    width: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span style={{ opacity: 0.75 }}>
+                height {(selectedGaussian.height * 100).toFixed(1)} cm
+              </span>
+              <input
+                type="range"
+                min={0.005}
+                max={0.5}
+                step={0.005}
+                value={selectedGaussian.height}
+                onChange={(e) =>
+                  updateMappingGaussian(selectedGaussian.id, {
+                    height: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span style={{ opacity: 0.75 }}>
+                rotation {Math.round(selectedGaussian.rotationDeg ?? 0)}°
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={360}
+                step={1}
+                value={selectedGaussian.rotationDeg ?? 0}
+                onChange={(e) =>
+                  updateMappingGaussian(selectedGaussian.id, {
+                    rotationDeg: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <Button
+              danger
+              onClick={() => {
+                removeMappingGaussian(selectedGaussian.id);
+                setSelectedGaussianId(null);
+              }}
+            >
+              Delete bump
+            </Button>
+          </div>
+        )}
         <label
           style={{
             display: "flex",
@@ -322,8 +468,26 @@ export function MappingPanel({ selected, setSelected }: Props) {
           <Button onClick={deleteLast} disabled={count === 0} danger>
             Delete last (#{endNumber})
           </Button>
-          <Button onClick={() => { clearMappedLeds(); setSelected(null); }} disabled={count === 0}>
+          <Button
+            onClick={() => {
+              clearMappedLeds();
+              setSelected(null);
+            }}
+            disabled={count === 0}
+          >
             Clear all
+          </Button>
+          <Button
+            onClick={() => {
+              clearMappingBumps();
+              setSelectedGaussianId(null);
+            }}
+            disabled={
+              gaussians.length === 0 &&
+              !mapping.leds.some((l) => (l.offset ?? 0) > 0)
+            }
+          >
+            Clear bumps
           </Button>
         </div>
       </Section>
@@ -354,7 +518,12 @@ export function MappingPanel({ selected, setSelected }: Props) {
       </Section>
 
       <Section title="Configuration">
-        <ConfigButtons onLoaded={() => setSelected(null)} />
+        <ConfigButtons
+          onLoaded={() => {
+            setSelected(null);
+            setSelectedGaussianId(null);
+          }}
+        />
       </Section>
 
       <Section title="LEDs">
@@ -605,6 +774,40 @@ function Button({
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.45 : 1,
         fontSize: 11,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ToolButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        flex: 1,
+        background: active
+          ? "rgba(111,168,255,0.22)"
+          : "rgba(255,255,255,0.06)",
+        color: "inherit",
+        border: `1px solid ${
+          active ? "rgba(111,168,255,0.55)" : "rgba(255,255,255,0.15)"
+        }`,
+        borderRadius: 6,
+        padding: "5px 10px",
+        cursor: "pointer",
+        fontSize: 11,
+        fontWeight: active ? 600 : 400,
       }}
     >
       {children}

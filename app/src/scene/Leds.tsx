@@ -15,6 +15,7 @@ import {
   Vector3,
 } from "three";
 import { applyMappingOrientationPoint } from "../mapping/geometry";
+import { displaceLed, orientGaussians } from "../mapping/gaussians";
 import {
   getMeshHalfExtents,
   loadMeshGeometry,
@@ -151,6 +152,14 @@ export function Leds() {
   );
 
   useEffect(() => {
+    const orientedGauss = cloud.applyLedOffset
+      ? orientGaussians(
+          mapping.gaussians ?? [],
+          mapping.flipUpDown,
+          mapping.flipLeftRight,
+          applyMappingOrientationPoint,
+        )
+      : [];
     for (let i = 0; i < buffers.n; i++) {
       // `i` is the logical strand index; map it to the placement index so
       // the reverse toggle flips which physical end is LED #0.
@@ -164,16 +173,27 @@ export function Leds() {
       const rawNrm: [number, number, number] = led.normal
         ? [led.normal[0], led.normal[1], led.normal[2]]
         : [0, 1, 0];
-      const lp = applyMappingOrientationPoint(
+      let lp = applyMappingOrientationPoint(
         rawPos,
         mapping.flipUpDown,
         mapping.flipLeftRight,
       );
-      const ln = applyMappingOrientationPoint(
+      let ln = applyMappingOrientationPoint(
         rawNrm,
         mapping.flipUpDown,
         mapping.flipLeftRight,
       );
+      // Gaussian bumps + optional per-LED offset (mesh-local), then world.
+      if (cloud.applyLedOffset) {
+        const displaced = displaceLed(
+          lp,
+          ln,
+          orientedGauss,
+          led.offset ?? 0,
+        );
+        lp = displaced.pos;
+        ln = displaced.normal;
+      }
       // Transform the stored mesh-local point + normal by the current
       // mesh transform so LEDs stay attached to the surface as the
       // scale/rotation/offset sliders change.
@@ -241,9 +261,11 @@ export function Leds() {
     ellipsoid.rz,
     strand.ledSize,
     mapping.leds,
+    mapping.gaussians,
     mapping.flipUpDown,
     mapping.flipLeftRight,
     mapping.reversed,
+    cloud.applyLedOffset,
     cloudTiltRad,
     cloudYawRad,
     cloud.offsetX,

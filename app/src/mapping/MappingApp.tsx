@@ -5,6 +5,9 @@ import { MappingScene } from "./MappingScene";
 
 export function MappingApp() {
   const [selected, setSelected] = useState<number | null>(null);
+  const [selectedGaussianId, setSelectedGaussianId] = useState<string | null>(
+    null,
+  );
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "#05070d" }}>
@@ -14,9 +17,19 @@ export function MappingApp() {
         gl={{ antialias: true }}
       >
         <color attach="background" args={["#05070d"]} />
-        <MappingScene selected={selected} setSelected={setSelected} />
+        <MappingScene
+          selected={selected}
+          setSelected={setSelected}
+          selectedGaussianId={selectedGaussianId}
+          setSelectedGaussianId={setSelectedGaussianId}
+        />
       </Canvas>
-      <MappingPanel selected={selected} setSelected={setSelected} />
+      <MappingPanel
+        selected={selected}
+        setSelected={setSelected}
+        selectedGaussianId={selectedGaussianId}
+        setSelectedGaussianId={setSelectedGaussianId}
+      />
     </div>
   );
 }

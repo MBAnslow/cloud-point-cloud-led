@@ -161,6 +161,12 @@ export interface CloudParams {
   offsetY: number;
   /** World-space Z offset of the cloud center, in metres. */
   offsetZ: number;
+  /**
+   * When true, per-LED mapping offsets (along surface normals) are applied
+   * in the simulator. When false, LEDs sit on their hand-placed surface
+   * positions only.
+   */
+  applyLedOffset: boolean;
 }
 
 export interface StrandParams {
@@ -1001,8 +1007,14 @@ export interface SimState {
   setUi: (u: Partial<UiParams>) => void;
   addMappedLed: (dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
   moveMappedLed: (index: number, dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
+  updateMappedLed: (index: number, patch: Partial<MappedLed>) => void;
   removeLastMappedLed: () => void;
   clearMappedLeds: () => void;
+  addMappingGaussian: (g: Omit<MappingGaussian, "id"> & { id?: string }) => void;
+  updateMappingGaussian: (id: string, patch: Partial<MappingGaussian>) => void;
+  removeMappingGaussian: (id: string) => void;
+  /** Zero all per-LED offsets and remove every Gaussian bump. */
+  clearMappingBumps: () => void;
 }
 
 export interface LedLocatorState {
@@ -1024,10 +1036,15 @@ export interface MappedLed {
    * helpers continue to work uniformly, but bead placement uses `pos`.
    */
   dir: Vec3;
-  /** World-space surface point on the uploaded mesh (mesh mode only). */
+  /** Mesh-local surface point on the uploaded mesh (mesh mode only). */
   pos?: Vec3;
   /** Outward-pointing surface normal at `pos` (mesh mode only). */
   normal?: Vec3;
+  /**
+   * Metres along the outward normal from the hand-placed surface point.
+   * Does not mutate `pos`; applied at display / sim time. Default 0.
+   */
+  offset?: number;
 }
 
 /**
@@ -1043,6 +1060,29 @@ export interface UiParams {
 }
 
 export type MappingMode = "ellipsoid" | "mesh";
+
+/** Active tool in the mapping app. */
+export type MappingTool = "place" | "offset" | "gaussian";
+
+/**
+ * A Gaussian bump on the mesh surface. Lifts nearby LEDs along their
+ * surface normals and tilts normals from the bump slope.
+ */
+export interface MappingGaussian {
+  id: string;
+  /** Mesh-local surface point at the bump centre. */
+  pos: Vec3;
+  /** Outward surface normal at the centre (mesh-local). */
+  normal: Vec3;
+  /** Peak lift along the normal (metres). */
+  amplitude: number;
+  /** Tangential half-width of the elliptical falloff (metres). */
+  width: number;
+  /** Tangential half-height of the elliptical falloff (metres). */
+  height: number;
+  /** Rotation of the ellipse around the surface normal (degrees). */
+  rotationDeg: number;
+}
 
 export interface MeshTargetParams {
   /** IndexedDB blob id, or null if no mesh is loaded. */
@@ -1064,6 +1104,8 @@ export interface MappingParams {
   leds: MappedLed[];
   /** Which surface the mapping app targets — the ellipsoid or an uploaded mesh. */
   mode: MappingMode;
+  /** Active interaction tool in the mapping view. */
+  tool: MappingTool;
   /** Mirror mapping orientation vertically (swap top/bottom). */
   flipUpDown: boolean;
   /** Mirror mapping orientation horizontally (swap left/right). */
@@ -1085,6 +1127,8 @@ export interface MappingParams {
    * bead in the strand.
    */
   maxSegmentLength: number;
+  /** Surface Gaussian bumps that lift / tilt nearby LEDs. */
+  gaussians: MappingGaussian[];
 }
 
 /**
@@ -1157,6 +1201,7 @@ const DEFAULTS = {
     offsetX: 0,
     offsetY: 0,
     offsetZ: 0,
+    applyLedOffset: true,
   } as CloudParams,
   strand: {
     ledSize: 0.04,
@@ -1353,11 +1398,13 @@ const DEFAULTS = {
   mapping: {
     leds: [],
     mode: "ellipsoid",
+    tool: "place",
     flipUpDown: false,
     flipLeftRight: false,
     reversed: false,
     ledSize: 0.01,
     maxSegmentLength: 0.05,
+    gaussians: [],
   } as MappingParams,
   mesh: {
     id: null,
@@ -1983,6 +2030,95 @@ function resolveLightning(input: unknown): LightningParams {
   };
 }
 
+/** Clamp / normalise a saved mapping slice (tool, per-LED offsets). */
+function resolveMapping(input: unknown): MappingParams {
+  const d = DEFAULTS.mapping;
+  if (!input || typeof input !== "object") return d;
+  const saved = input as Partial<MappingParams> & Record<string, unknown>;
+  const tool: MappingTool =
+    saved.tool === "offset" ||
+    saved.tool === "place" ||
+    saved.tool === "gaussian"
+      ? saved.tool
+      : d.tool;
+  const rawLeds = Array.isArray(saved.leds) ? saved.leds : d.leds;
+  const leds: MappedLed[] = rawLeds.map((led) => {
+    const l = (led ?? {}) as MappedLed;
+    const offset =
+      typeof l.offset === "number" && Number.isFinite(l.offset)
+        ? Math.max(0, Math.min(0.5, l.offset))
+        : 0;
+    return { ...l, offset };
+  });
+  const rawGauss = Array.isArray(saved.gaussians) ? saved.gaussians : d.gaussians;
+  const gaussians: MappingGaussian[] = [];
+  for (let i = 0; i < rawGauss.length; i++) {
+    const g = (rawGauss[i] ?? {}) as Partial<MappingGaussian>;
+    const pos = Array.isArray(g.pos) && g.pos.length === 3
+      ? ([g.pos[0], g.pos[1], g.pos[2]] as Vec3)
+      : null;
+    const normal = Array.isArray(g.normal) && g.normal.length === 3
+      ? ([g.normal[0], g.normal[1], g.normal[2]] as Vec3)
+      : null;
+    if (!pos || !normal) continue;
+    const amplitude =
+      typeof g.amplitude === "number" && Number.isFinite(g.amplitude)
+        ? Math.max(0, Math.min(0.5, g.amplitude))
+        : 0.05;
+    const legacySigma =
+      typeof (g as { sigma?: number }).sigma === "number" &&
+      Number.isFinite((g as { sigma?: number }).sigma)
+        ? Math.max(0.005, Math.min(0.5, (g as { sigma: number }).sigma))
+        : 0.08;
+    const width =
+      typeof g.width === "number" && Number.isFinite(g.width)
+        ? Math.max(0.005, Math.min(0.5, g.width))
+        : legacySigma;
+    const height =
+      typeof g.height === "number" && Number.isFinite(g.height)
+        ? Math.max(0.005, Math.min(0.5, g.height))
+        : legacySigma;
+    let rotationDeg =
+      typeof g.rotationDeg === "number" && Number.isFinite(g.rotationDeg)
+        ? g.rotationDeg
+        : 0;
+    rotationDeg = ((rotationDeg % 360) + 360) % 360;
+    gaussians.push({
+      id:
+        typeof g.id === "string" && g.id
+          ? g.id
+          : `gaussian-${i}-${Date.now().toString(36)}`,
+      pos,
+      normal,
+      amplitude,
+      width,
+      height,
+      rotationDeg,
+    });
+  }
+  return {
+    ...d,
+    ...saved,
+    tool,
+    leds,
+    gaussians,
+    ledSize:
+      typeof saved.ledSize === "number" && Number.isFinite(saved.ledSize)
+        ? saved.ledSize
+        : d.ledSize,
+    maxSegmentLength:
+      typeof saved.maxSegmentLength === "number" &&
+      Number.isFinite(saved.maxSegmentLength)
+        ? saved.maxSegmentLength
+        : d.maxSegmentLength,
+    flipUpDown: typeof saved.flipUpDown === "boolean" ? saved.flipUpDown : d.flipUpDown,
+    flipLeftRight:
+      typeof saved.flipLeftRight === "boolean" ? saved.flipLeftRight : d.flipLeftRight,
+    reversed: typeof saved.reversed === "boolean" ? saved.reversed : d.reversed,
+    mode: saved.mode === "mesh" || saved.mode === "ellipsoid" ? saved.mode : d.mode,
+  };
+}
+
 /** Clamp a saved breath-modulation map into [-1, 1] per key. */
 function resolveBreathModMap(input: unknown): Record<string, number> {
   if (!input || typeof input !== "object") return {};
@@ -2062,7 +2198,7 @@ function initialState() {
       ...saved.ledStreamPipeline,
     },
     ledLocator: { ...DEFAULTS.ledLocator, ...saved.ledLocator },
-    mapping: { ...DEFAULTS.mapping, ...saved.mapping },
+    mapping: resolveMapping(saved.mapping),
     mesh: { ...DEFAULTS.mesh, ...(saved.mesh ?? {}) },
     ui: { ...DEFAULTS.ui, ...(saved.ui ?? {}) },
   };
@@ -2244,7 +2380,7 @@ export const useSimStore = create<SimState>((set) => ({
     set((s) => ({
       mapping: {
         ...s.mapping,
-        leds: [...s.mapping.leds, { dir, pos, normal }],
+        leds: [...s.mapping.leds, { dir, pos, normal, offset: 0 }],
       },
     })),
   moveMappedLed: (index, dir, pos, normal) =>
@@ -2252,7 +2388,16 @@ export const useSimStore = create<SimState>((set) => ({
       mapping: {
         ...s.mapping,
         leds: s.mapping.leds.map((l, i) =>
-          i === index ? { dir, pos, normal } : l,
+          i === index ? { ...l, dir, pos, normal } : l,
+        ),
+      },
+    })),
+  updateMappedLed: (index, patch) =>
+    set((s) => ({
+      mapping: {
+        ...s.mapping,
+        leds: s.mapping.leds.map((l, i) =>
+          i === index ? { ...l, ...patch } : l,
         ),
       },
     })),
@@ -2262,6 +2407,66 @@ export const useSimStore = create<SimState>((set) => ({
     })),
   clearMappedLeds: () =>
     set((s) => ({ mapping: { ...s.mapping, leds: [] } })),
+  addMappingGaussian: (g) =>
+    set((s) => {
+      const id =
+        g.id && typeof g.id === "string"
+          ? g.id
+          : `gaussian-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
+      const next: MappingGaussian = {
+        id,
+        pos: g.pos,
+        normal: g.normal,
+        amplitude: Math.max(0, Math.min(0.5, g.amplitude)),
+        width: Math.max(0.005, Math.min(0.5, g.width)),
+        height: Math.max(0.005, Math.min(0.5, g.height)),
+        rotationDeg: ((g.rotationDeg % 360) + 360) % 360,
+      };
+      return {
+        mapping: {
+          ...s.mapping,
+          gaussians: [...(s.mapping.gaussians ?? []), next],
+        },
+      };
+    }),
+  updateMappingGaussian: (id, patch) =>
+    set((s) => ({
+      mapping: {
+        ...s.mapping,
+        gaussians: (s.mapping.gaussians ?? []).map((g) => {
+          if (g.id !== id) return g;
+          const next = { ...g, ...patch, id: g.id };
+          if (typeof next.amplitude === "number") {
+            next.amplitude = Math.max(0, Math.min(0.5, next.amplitude));
+          }
+          if (typeof next.width === "number") {
+            next.width = Math.max(0.005, Math.min(0.5, next.width));
+          }
+          if (typeof next.height === "number") {
+            next.height = Math.max(0.005, Math.min(0.5, next.height));
+          }
+          if (typeof next.rotationDeg === "number") {
+            next.rotationDeg = ((next.rotationDeg % 360) + 360) % 360;
+          }
+          return next;
+        }),
+      },
+    })),
+  removeMappingGaussian: (id) =>
+    set((s) => ({
+      mapping: {
+        ...s.mapping,
+        gaussians: (s.mapping.gaussians ?? []).filter((g) => g.id !== id),
+      },
+    })),
+  clearMappingBumps: () =>
+    set((s) => ({
+      mapping: {
+        ...s.mapping,
+        gaussians: [],
+        leds: s.mapping.leds.map((l) => ({ ...l, offset: 0 })),
+      },
+    })),
 }));
 
 /**
@@ -2345,7 +2550,7 @@ export function applySnapshot(snap: Snapshot): Snapshot {
     ...snap.ledStreamPipeline,
   });
   s.setLedLocator({ ...DEFAULTS.ledLocator, ...snap.ledLocator });
-  s.setMapping({ ...DEFAULTS.mapping, ...snap.mapping });
+  s.setMapping(resolveMapping(snap.mapping));
   s.setMesh({ ...DEFAULTS.mesh, ...(snap.mesh ?? {}) });
   s.setUi({ ...DEFAULTS.ui, ...(snap.ui ?? {}) });
   return snap;

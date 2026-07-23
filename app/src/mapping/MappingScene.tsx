@@ -1,33 +1,53 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useThree, type ThreeEvent } from "@react-three/fiber";
-import { Billboard, Grid, Line, OrbitControls, Text } from "@react-three/drei";
+import { Billboard, Line, OrbitControls, Text } from "@react-three/drei";
 import {
   BufferGeometry,
   Euler,
   Matrix3,
   Matrix4,
   Quaternion,
+  Raycaster,
+  Vector2,
   Vector3,
 } from "three";
 import { useSimStore, type Vec3 } from "../state";
 import { applyMappingOrientationPoint } from "./geometry";
+import { displaceLed, gaussianTangentFrame, orientGaussians } from "./gaussians";
 import { loadMeshGeometry } from "./meshAsset";
 
 interface Props {
   selected: number | null;
   setSelected: (index: number | null) => void;
+  selectedGaussianId: string | null;
+  setSelectedGaussianId: (id: string | null) => void;
 }
 
 const BASE_COLOR = "#ff9a3c";
 const LAST_COLOR = "#46e16e";
 const SELECTED_COLOR = "#ffffff";
+const GAUSS_COLOR = "#7ec8ff";
+const GAUSS_SELECTED = "#ffe14d";
 
-export function MappingScene({ selected, setSelected }: Props) {
+/** Allowed range for per-LED normal offset (metres). Outward only. */
+const OFFSET_MIN = 0;
+const OFFSET_MAX = 0.5;
+
+export function MappingScene({
+  selected,
+  setSelected,
+  selectedGaussianId,
+  setSelectedGaussianId,
+}: Props) {
   const mapping = useSimStore((s) => s.mapping);
   const mesh = useSimStore((s) => s.mesh);
   const addMappedLed = useSimStore((s) => s.addMappedLed);
   const moveMappedLed = useSimStore((s) => s.moveMappedLed);
+  const updateMappedLed = useSimStore((s) => s.updateMappedLed);
+  const addMappingGaussian = useSimStore((s) => s.addMappingGaussian);
+  const updateMappingGaussian = useSimStore((s) => s.updateMappingGaussian);
   const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
 
   const [meshGeom, setMeshGeom] = useState<BufferGeometry | null>(null);
   useEffect(() => {
@@ -46,19 +66,76 @@ export function MappingScene({ selected, setSelected }: Props) {
 
   const draggingRef = useRef<number | null>(null);
   const downPosRef = useRef<{ x: number; y: number } | null>(null);
+  const offsetDragRef = useRef<{
+    index: number;
+    baseWorld: Vector3;
+    axis: Vector3;
+    ledSize: number;
+  } | null>(null);
+  const gaussianDragIdRef = useRef<string | null>(null);
+  const raycaster = useMemo(() => new Raycaster(), []);
+  const pointerNdc = useMemo(() => new Vector2(), []);
   const [orbitEnabled, setOrbitEnabled] = useState(true);
   const [hover, setHover] = useState<{ pos: Vec3; normal: Vec3 } | null>(null);
 
+  const isOffsetTool = mapping.tool === "offset";
+  const isGaussianTool = mapping.tool === "gaussian";
+  const isPlaceTool = mapping.tool === "place";
+
   useEffect(() => {
     const up = () => {
-      if (draggingRef.current !== null) {
+      if (
+        draggingRef.current !== null ||
+        offsetDragRef.current !== null ||
+        gaussianDragIdRef.current !== null
+      ) {
         draggingRef.current = null;
+        offsetDragRef.current = null;
+        gaussianDragIdRef.current = null;
         setOrbitEnabled(true);
       }
     };
     window.addEventListener("pointerup", up);
     return () => window.removeEventListener("pointerup", up);
   }, []);
+
+  // Offset mode: project the camera ray onto the LED's outward-normal
+  // axis and write only `offset` (hand-placed pos/normal unchanged).
+  useEffect(() => {
+    if (!isOffsetTool) return;
+    const onMove = (ev: PointerEvent) => {
+      const drag = offsetDragRef.current;
+      if (!drag) return;
+      const rect = gl.domElement.getBoundingClientRect();
+      pointerNdc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+      pointerNdc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointerNdc, camera);
+      const ray = raycaster.ray;
+      const r0 = ray.origin;
+      const rd = ray.direction;
+      const p0 = drag.baseWorld;
+      const d = drag.axis;
+      const w0x = r0.x - p0.x;
+      const w0y = r0.y - p0.y;
+      const w0z = r0.z - p0.z;
+      const a = d.dot(d);
+      const b = d.dot(rd);
+      const c = rd.dot(rd);
+      const dW = d.x * w0x + d.y * w0y + d.z * w0z;
+      const e = rd.x * w0x + rd.y * w0y + rd.z * w0z;
+      const denom = a * c - b * b;
+      let t: number;
+      if (Math.abs(denom) < 1e-10) {
+        t = dW / (a || 1);
+      } else {
+        t = (b * e - c * dW) / denom;
+      }
+      const next = Math.max(OFFSET_MIN, Math.min(OFFSET_MAX, t - drag.ledSize));
+      updateMappedLed(drag.index, { offset: next });
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => window.removeEventListener("pointermove", onMove);
+  }, [isOffsetTool, camera, gl.domElement, raycaster, pointerNdc, updateMappedLed]);
 
   // World-space transform of the uploaded mesh — recomputed whenever
   // scale/offset/rotation change so LEDs (stored in mesh-local space)
@@ -95,12 +172,23 @@ export function MappingScene({ selected, setSelected }: Props) {
     return [v.x, v.y, v.z];
   };
 
+  const orientedGaussians = useMemo(
+    () =>
+      orientGaussians(
+        mapping.gaussians,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+        applyMappingOrientationPoint,
+      ),
+    [mapping.gaussians, mapping.flipUpDown, mapping.flipLeftRight],
+  );
+
   const beads = useMemo(() => {
-    const off = mapping.ledSize;
     // LEDs without a mesh-mode surface record (pos+normal) can't be
     // placed on an arbitrary mesh, so they're skipped here. Stored pos
-    // and normal are in mesh-local space; we transform them to world via
-    // the current mesh transform so beads follow scale/rotate/offset.
+    // and normal are in mesh-local space; Gaussians + per-LED offset
+    // displace first, then we transform to world. Hemispheres sit flat
+    // on that surface with the dome along the (tilted) normal.
     return mapping.leds
       .map((led) => {
         if (!led.pos || !led.normal) return null;
@@ -114,21 +202,82 @@ export function MappingScene({ selected, setSelected }: Props) {
           mapping.flipUpDown,
           mapping.flipLeftRight,
         );
-        const wp = localToWorldPos(lp);
-        const wn = localToWorldNrm(ln);
-        const pos: Vec3 = [
-          wp[0] + wn[0] * off,
-          wp[1] + wn[1] * off,
-          wp[2] + wn[2] * off,
-        ];
-        return { pos, normal: wn };
+        const displaced = displaceLed(
+          lp,
+          ln,
+          orientedGaussians,
+          led.offset ?? 0,
+        );
+        const displaced0 = displaceLed(lp, ln, orientedGaussians, 0);
+        const wp = localToWorldPos(displaced.pos);
+        const wn = localToWorldNrm(displaced.normal);
+        const baseWorld = localToWorldPos(displaced0.pos);
+        const baseNormal = localToWorldNrm(displaced0.normal);
+        const quat = new Quaternion().setFromUnitVectors(
+          new Vector3(0, 1, 0),
+          new Vector3(wn[0], wn[1], wn[2]),
+        );
+        return {
+          pos: wp,
+          normal: wn,
+          quat,
+          baseWorld,
+          baseNormal,
+        };
       })
-      .filter((b): b is { pos: Vec3; normal: Vec3 } => b !== null);
+      .filter(
+        (
+          b,
+        ): b is {
+          pos: Vec3;
+          normal: Vec3;
+          quat: Quaternion;
+          baseWorld: Vec3;
+          baseNormal: Vec3;
+        } => b !== null,
+      );
   }, [
     mapping.leds,
-    mapping.ledSize,
     mapping.flipUpDown,
     mapping.flipLeftRight,
+    orientedGaussians,
+    meshMatrix,
+    meshNormalMat,
+  ]);
+
+  const gaussianMarkers = useMemo(() => {
+    return orientedGaussians.map((g) => {
+      const wp = localToWorldPos(g.pos);
+      const wn = localToWorldNrm(g.normal);
+      const lift = mapping.ledSize * 0.5;
+      const pos: Vec3 = [
+        wp[0] + wn[0] * lift,
+        wp[1] + wn[1] * lift,
+        wp[2] + wn[2] * lift,
+      ];
+      // Elliptical ring at ~2× width/height in the tangent plane.
+      const ring: Vec3[] = [];
+      const rw = g.width * 2;
+      const rh = g.height * 2;
+      const frame = gaussianTangentFrame(wn, g.rotationDeg ?? 0);
+      const t1 = new Vector3(frame.tW[0], frame.tW[1], frame.tW[2]);
+      const t2 = new Vector3(frame.tH[0], frame.tH[1], frame.tH[2]);
+      const steps = 48;
+      for (let i = 0; i <= steps; i++) {
+        const a = (i / steps) * Math.PI * 2;
+        const c = Math.cos(a);
+        const s = Math.sin(a);
+        ring.push([
+          wp[0] + t1.x * c * rw + t2.x * s * rh + wn[0] * lift * 0.2,
+          wp[1] + t1.y * c * rw + t2.y * s * rh + wn[1] * lift * 0.2,
+          wp[2] + t1.z * c * rw + t2.z * s * rh + wn[2] * lift * 0.2,
+        ]);
+      }
+      return { id: g.id, pos, normal: wn, ring };
+    });
+  }, [
+    orientedGaussians,
+    mapping.ledSize,
     meshMatrix,
     meshNormalMat,
   ]);
@@ -212,7 +361,8 @@ export function MappingScene({ selected, setSelected }: Props) {
   };
 
   const onSurfaceClick = (e: ThreeEvent<MouseEvent>) => {
-    if (draggingRef.current !== null) return;
+    if (isOffsetTool) return;
+    if (draggingRef.current !== null || gaussianDragIdRef.current !== null) return;
     const down = downPosRef.current;
     downPosRef.current = null;
     if (down) {
@@ -225,11 +375,41 @@ export function MappingScene({ selected, setSelected }: Props) {
     e.stopPropagation();
     const hit = surfaceFromEvent(e);
     if (!hit) return;
-    const off = mapping.ledSize;
+
+    if (isGaussianTool) {
+      const dispPos = applyMappingOrientationPoint(
+        hit.localPos,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+      );
+      const dispNrm = applyMappingOrientationPoint(
+        hit.localNormal,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+      );
+      // Store un-flipped? LEDs store after flip application on write.
+      // Same as LED place: store flipped coords.
+      const id = `gaussian-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
+      addMappingGaussian({
+        id,
+        pos: dispPos,
+        normal: dispNrm,
+        amplitude: 0.05,
+        width: 0.08,
+        height: 0.08,
+        rotationDeg: 0,
+      });
+      setSelectedGaussianId(id);
+      setSelected(null);
+      setHover(null);
+      return;
+    }
+
+    if (!isPlaceTool) return;
     const previewWorld: Vec3 = [
-      hit.worldPos[0] + hit.worldNormal[0] * off,
-      hit.worldPos[1] + hit.worldNormal[1] * off,
-      hit.worldPos[2] + hit.worldNormal[2] * off,
+      hit.worldPos[0],
+      hit.worldPos[1],
+      hit.worldPos[2],
     ];
     if (!withinMaxSeg(previewWorld)) return;
     if (overlapsExisting(previewWorld)) return;
@@ -247,29 +427,20 @@ export function MappingScene({ selected, setSelected }: Props) {
     addMappedLed(hit.dir, dispPos, dispNrm);
     setHover(null);
     setSelected(nextIndex);
+    setSelectedGaussianId(null);
   };
 
   const onSurfacePointerMove = (e: ThreeEvent<PointerEvent>) => {
+    if (isOffsetTool) {
+      setHover(null);
+      return;
+    }
     const hit = surfaceFromEvent(e);
     if (!hit) return;
-    const idx = draggingRef.current;
-    if (idx !== null) {
+
+    const gaussId = gaussianDragIdRef.current;
+    if (gaussId !== null) {
       e.stopPropagation();
-      const off = mapping.ledSize;
-      const candidateWorld: Vec3 = [
-        hit.worldPos[0] + hit.worldNormal[0] * off,
-        hit.worldPos[1] + hit.worldNormal[1] * off,
-        hit.worldPos[2] + hit.worldNormal[2] * off,
-      ];
-      // Reject drags that would stretch either adjacent strand segment
-      // beyond the max segment length. Neighbours are unaffected while
-      // this bead is being moved, so their world positions are stable.
-      const prev = idx > 0 ? beads[idx - 1] : null;
-      const next = idx < beads.length - 1 ? beads[idx + 1] : null;
-      const max = mapping.maxSegmentLength + 1e-6;
-      if (prev && distance(candidateWorld, prev.pos) > max) return;
-      if (next && distance(candidateWorld, next.pos) > max) return;
-      if (overlapsExisting(candidateWorld, idx)) return;
       const dispPos = applyMappingOrientationPoint(
         hit.localPos,
         mapping.flipUpDown,
@@ -280,14 +451,49 @@ export function MappingScene({ selected, setSelected }: Props) {
         mapping.flipUpDown,
         mapping.flipLeftRight,
       );
-      moveMappedLed(idx, hit.dir, dispPos, dispNrm);
+      updateMappingGaussian(gaussId, { pos: dispPos, normal: dispNrm });
       return;
     }
-    const off = mapping.ledSize;
+
+    if (isGaussianTool) {
+      setHover(null);
+      return;
+    }
+
+    const idx = draggingRef.current;
+    if (idx !== null) {
+      e.stopPropagation();
+      const led = mapping.leds[idx];
+      const lp = applyMappingOrientationPoint(
+        hit.localPos,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+      );
+      const ln = applyMappingOrientationPoint(
+        hit.localNormal,
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+      );
+      const displaced = displaceLed(
+        lp,
+        ln,
+        orientedGaussians,
+        led?.offset ?? 0,
+      );
+      const candidateWorld = localToWorldPos(displaced.pos);
+      const prev = idx > 0 ? beads[idx - 1] : null;
+      const next = idx < beads.length - 1 ? beads[idx + 1] : null;
+      const max = mapping.maxSegmentLength + 1e-6;
+      if (prev && distance(candidateWorld, prev.pos) > max) return;
+      if (next && distance(candidateWorld, next.pos) > max) return;
+      if (overlapsExisting(candidateWorld, idx)) return;
+      moveMappedLed(idx, hit.dir, lp, ln);
+      return;
+    }
     const previewWorld: Vec3 = [
-      hit.worldPos[0] + hit.worldNormal[0] * off,
-      hit.worldPos[1] + hit.worldNormal[1] * off,
-      hit.worldPos[2] + hit.worldNormal[2] * off,
+      hit.worldPos[0],
+      hit.worldPos[1],
+      hit.worldPos[2],
     ];
     setHover({ pos: previewWorld, normal: hit.worldNormal });
   };
@@ -336,9 +542,13 @@ export function MappingScene({ selected, setSelected }: Props) {
         <Line points={linePoints} color="#7f8ca3" lineWidth={1.5} />
       )}
 
-      {hover && draggingRef.current === null && (() => {
+      {hover && draggingRef.current === null && isPlaceTool && (() => {
         const valid = withinMaxSeg(hover.pos) && !overlapsExisting(hover.pos);
         const ghostColor = valid ? "#46e16e" : "#ff5a5a";
+        const hoverQuat = new Quaternion().setFromUnitVectors(
+          new Vector3(0, 1, 0),
+          new Vector3(hover.normal[0], hover.normal[1], hover.normal[2]),
+        );
         return (
           <group>
             {prevBeadPos && (
@@ -353,8 +563,10 @@ export function MappingScene({ selected, setSelected }: Props) {
                 opacity={0.7}
               />
             )}
-            <mesh position={hover.pos}>
-              <sphereGeometry args={[mapping.ledSize, 16, 12]} />
+            <mesh position={hover.pos} quaternion={hoverQuat}>
+              <sphereGeometry
+                args={[mapping.ledSize, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2]}
+              />
               <meshStandardMaterial
                 color={ghostColor}
                 emissive={ghostColor}
@@ -368,7 +580,7 @@ export function MappingScene({ selected, setSelected }: Props) {
         );
       })()}
 
-      {beads.map(({ pos, normal }, i) => {
+      {beads.map(({ pos, normal, quat, baseWorld, baseNormal }, i) => {
         const count = beads.length;
         const isLast = i === count - 1;
         const isSelected = i === selected;
@@ -379,24 +591,55 @@ export function MappingScene({ selected, setSelected }: Props) {
           : isLast
             ? LAST_COLOR
             : BASE_COLOR;
+        const labelPos: Vec3 = [
+          pos[0] + normal[0] * mapping.ledSize * 2.4,
+          pos[1] + normal[1] * mapping.ledSize * 2.4,
+          pos[2] + normal[2] * mapping.ledSize * 2.4,
+        ];
         return (
           <group key={i}>
             <mesh
               position={pos}
+              quaternion={quat}
               onPointerDown={(e) => {
+                if (isGaussianTool) return;
                 if (!facesCamera(pos, normal)) return;
                 e.stopPropagation();
-                draggingRef.current = i;
                 setSelected(i);
+                setSelectedGaussianId(null);
                 setOrbitEnabled(false);
+                if (isOffsetTool) {
+                  offsetDragRef.current = {
+                    index: i,
+                    baseWorld: new Vector3(
+                      baseWorld[0],
+                      baseWorld[1],
+                      baseWorld[2],
+                    ),
+                    axis: new Vector3(
+                      baseNormal[0],
+                      baseNormal[1],
+                      baseNormal[2],
+                    ),
+                    ledSize: mapping.ledSize,
+                  };
+                  draggingRef.current = null;
+                } else {
+                  draggingRef.current = i;
+                  offsetDragRef.current = null;
+                }
               }}
               onClick={(e) => {
+                if (isGaussianTool) return;
                 if (!facesCamera(pos, normal)) return;
                 e.stopPropagation();
                 setSelected(i);
+                setSelectedGaussianId(null);
               }}
             >
-              <sphereGeometry args={[mapping.ledSize, 16, 12]} />
+              <sphereGeometry
+                args={[mapping.ledSize, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2]}
+              />
               <meshStandardMaterial
                 color={color}
                 emissive={color}
@@ -406,9 +649,7 @@ export function MappingScene({ selected, setSelected }: Props) {
                 opacity={front ? 1 : 0.25}
               />
             </mesh>
-            <Billboard
-              position={[pos[0], pos[1] + mapping.ledSize * 2.4, pos[2]]}
-            >
+            <Billboard position={labelPos}>
               <Text
                 fontSize={mapping.ledSize * 2.6}
                 color={isSelected ? "#ffffff" : "#cfd6e6"}
@@ -422,6 +663,52 @@ export function MappingScene({ selected, setSelected }: Props) {
                 {displayNumber}
               </Text>
             </Billboard>
+          </group>
+        );
+      })}
+
+      {gaussianMarkers.map(({ id, pos, normal, ring }) => {
+        const isSel = id === selectedGaussianId;
+        const front = facesCamera(pos, normal);
+        const color = isSel ? GAUSS_SELECTED : GAUSS_COLOR;
+        return (
+          <group key={id}>
+            <Line
+              points={ring}
+              color={color}
+              lineWidth={isSel ? 2 : 1.2}
+              transparent
+              opacity={front ? 0.85 : 0.25}
+            />
+            <mesh
+              position={pos}
+              onPointerDown={(e) => {
+                if (!isGaussianTool) return;
+                if (!facesCamera(pos, normal)) return;
+                e.stopPropagation();
+                setSelectedGaussianId(id);
+                setSelected(null);
+                setOrbitEnabled(false);
+                gaussianDragIdRef.current = id;
+              }}
+              onClick={(e) => {
+                if (!isGaussianTool) return;
+                if (!facesCamera(pos, normal)) return;
+                e.stopPropagation();
+                setSelectedGaussianId(id);
+                setSelected(null);
+              }}
+            >
+              <sphereGeometry args={[mapping.ledSize * 1.4, 16, 12]} />
+              <meshStandardMaterial
+                color={color}
+                emissive={color}
+                emissiveIntensity={isSel ? 0.7 : 0.35}
+                roughness={0.4}
+                transparent
+                opacity={front ? 0.95 : 0.3}
+              />
+            </mesh>
           </group>
         );
       })}
