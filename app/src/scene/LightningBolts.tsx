@@ -4,13 +4,14 @@ import { AdditiveBlending } from "three";
 import { Line } from "@react-three/drei";
 import {
   boltTravelHead,
+  peakIntensityRange,
   sharedLightningController,
   type BoltStrike,
 } from "../lighting/lightning";
-import { useSimStore } from "../state";
+import { activeWindowProgress, useSimStore } from "../state";
 
 interface VisibleBolt {
-  id: number;
+  id: string;
   points: Array<[number, number, number]>;
   opacity: number;
   head: number;
@@ -52,34 +53,75 @@ export function LightningBolts() {
     if (now - lastTickRef.current < 1000 / fps) return;
     lastTickRef.current = now;
     const strikes = sharedLightningController.getStrikes();
-    // Reference the top of the user-set intensity range so the strongest
-    // configured strike renders at full opacity; weaker strikes look
-    // overtly dimmer as a visual cue.
-    const intensityMax = Math.max(1, lightning.intensityRange[1]);
+    const keyframeU = activeWindowProgress(
+      useSimStore.getState().sky.timeHours,
+      lightning.activeStartHour,
+      lightning.activeEndHour,
+    );
+    const peak = peakIntensityRange(lightning.keyframes, keyframeU);
+    const intensityMax = Math.max(1, peak[1], 0.001);
     const next: VisibleBolt[] = [];
     for (const s of strikes) {
       const env = sharedLightningController.strikeEnvelope(s, now);
       if (env <= 0.001) continue;
-      let id = idByStrike.get(s);
-      if (id === undefined) {
-        id = nextId++;
-        idByStrike.set(s, id);
+      let sid = idByStrike.get(s);
+      if (sid === undefined) {
+        sid = nextId++;
+        idByStrike.set(s, sid);
       }
-      const head = boltTravelHead(now - s.bornMs, s.durationMs);
-      const points = partialPath(s.path, head);
-      if (points.length < 2) continue;
+      const age = now - s.bornMs;
+      const mainHead = boltTravelHead(age, s.durationMs);
+      const mainPoints = partialPath(s.path, mainHead);
       const c = sharedLightningController.strikeColor(s, now);
-      const iNorm = Math.max(0, Math.min(1, s.intensity / intensityMax));
-      const opacity = Math.max(0, Math.min(1, env * (0.35 + 0.65 * iNorm)));
-      const lineWidth = 1.5 + iNorm * 1.5;
-      next.push({
-        id,
-        points,
-        opacity,
-        head,
-        color: rgbToHex(c[0], c[1], c[2]),
-        lineWidth,
-      });
+      const iNorm = Math.max(0, Math.min(1, env / intensityMax));
+      const color = rgbToHex(c[0], c[1], c[2]);
+      const isGround = s.kind === "strike";
+      if (mainPoints.length >= 2) {
+        next.push({
+          id: `${sid}-main`,
+          points: mainPoints,
+          opacity: Math.max(
+            0,
+            Math.min(1, env * (isGround ? 0.55 + 0.45 * iNorm : 0.35 + 0.65 * iNorm)),
+          ),
+          head: mainHead,
+          color,
+          lineWidth: isGround ? 2.8 + iNorm * 2.4 : 1.5 + iNorm * 1.5,
+        });
+      }
+
+      const totalSegs = s.path.length / 3 - 1;
+      const travelMs = Math.max(30, s.durationMs * 0.25);
+      const segTravel = totalSegs > 0 ? travelMs / totalSegs : travelMs;
+      for (let bi = 0; bi < s.branches.length; bi++) {
+        const branch = s.branches[bi];
+        const forkDelay = branch.forkVertex * segTravel;
+        const branchAge = age - forkDelay;
+        if (branchAge < 0) continue;
+        // Match main tip pace: branch deploys over the same travel window
+        // scaled to its own segment count.
+        const branchSegs = branch.path.length / 3 - 1;
+        if (branchSegs < 1) continue;
+        const branchTravelMs = branchSegs * segTravel;
+        const branchHead = Math.min(
+          1,
+          branchAge / Math.max(1e-3, branchTravelMs),
+        );
+        const points = partialPath(branch.path, branchHead);
+        if (points.length < 2) continue;
+        const strength = Math.max(0.15, Math.min(1, branch.strength));
+        next.push({
+          id: `${sid}-b${bi}`,
+          points,
+          opacity: Math.max(
+            0,
+            Math.min(1, env * strength * (0.3 + 0.55 * iNorm)),
+          ),
+          head: branchHead,
+          color,
+          lineWidth: 0.8 + iNorm * strength,
+        });
+      }
     }
     // Cheap change check: compare counts + ids + rounded opacities.
     let changed = next.length !== bolts.length;

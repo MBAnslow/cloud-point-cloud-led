@@ -1,7 +1,8 @@
 /**
  * Tiny deterministic 3D value noise + fBm for volumetric fog.
  * No external deps — cheap enough for per-LED sampling each frame.
- * Pass a per-wave `seed` so each breath looks different.
+ * Pass a per-participant `seed` so each breath fog field differs
+ * while sharing the same scale/contrast params.
  */
 
 function clamp01(v: number): number {
@@ -90,8 +91,10 @@ export function fBm3(
 
 /**
  * Fog density in [0, 1] from local-space fBm, with contrast remapping.
- * `contrast` > 1 pushes midtones apart (sharper blobs); 1 = linear.
- * `seed` selects a unique fog field (new seed per breath wave).
+ * `contrast` > 1 pushes midtones apart (sharper blobs); 1 = linear;
+ * values below 1 soften. Uses a soft (tanh) curve so greys survive —
+ * the old linear×clamp path crushed most of the field to on/off by ~2–3.
+ * `seed` selects a unique fog field (per participant for breath).
  */
 export function fogDensity(
   x: number,
@@ -116,10 +119,26 @@ export function fogDensity(
     3,
     seed,
   );
-  const c = Math.max(0.05, contrast);
-  // Remap around 0.5 with contrast: denser peaks, emptier troughs.
-  const centered = (n - 0.5) * c + 0.5;
-  return clamp01(centered);
+  return applySoftContrast(n, contrast);
+}
+
+/**
+ * Soft contrast around 0.5. Unlike `(n-0.5)*c+0.5` clamped to [0,1],
+ * this never hard-clips intermediates: high contrast steepens the mid
+ * while troughs/peaks still hold a continuous grey ramp.
+ */
+export function applySoftContrast(raw: number, contrast: number): number {
+  const n = clamp01(raw);
+  const c = Math.max(0.1, Math.min(8, contrast));
+  if (Math.abs(c - 1) < 1e-4) return n;
+  // Map to [-1,1], apply gain with tanh soft-knee, renormalize so the
+  // endpoints stay reachable. Softens (c<1) and sharpens (c>1) without
+  // dumping half the field to 0/1.
+  const t = n * 2 - 1;
+  const g = c;
+  const denom = Math.tanh(g);
+  const shaped = denom > 1e-6 ? Math.tanh(t * g) / denom : t;
+  return clamp01(0.5 + 0.5 * shaped);
 }
 
 /**

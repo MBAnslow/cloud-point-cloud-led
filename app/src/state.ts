@@ -32,27 +32,124 @@ export interface LedStreamPipeline {
   locatorOverrideStage: boolean;
 }
 
+/**
+ * Animatable lightning params — stored per keyframe and linearly
+ * interpolated across the lightning active window (sky timeline).
+ * Only these fields ride the storm envelope; geometry/look extras stay global.
+ */
+/** main, highlight1, highlight2 — sampled live from colour-stop timelines. */
+export type LightningPalette = [string, string, string];
+
+/**
+ * A colour pin on a lightning colour/tint timeline. `t` is progress
+ * through the lightning active window, [0, 1] (same axis as storm keys).
+ */
+export interface LightningColorStop {
+  id: string;
+  t: number;
+  color: string;
+}
+
+/** Default bolt colour: main + two highlight channel timelines. */
+export interface LightningColorTracks {
+  main: LightningColorStop[];
+  highlight1: LightningColorStop[];
+  highlight2: LightningColorStop[];
+}
+
+function makeColorStopId(): string {
+  return `lcs-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function channelStopsPair(
+  colorA: string,
+  colorB: string,
+): LightningColorStop[] {
+  return [
+    { id: makeColorStopId(), t: 0, color: colorA },
+    { id: makeColorStopId(), t: 1, color: colorB },
+  ];
+}
+
+export function buildDefaultLightningColors(): LightningColorTracks {
+  return {
+    main: channelStopsPair("#cfe7ff", "#e8f4ff"),
+    highlight1: channelStopsPair("#a8c8ff", "#c4d9ff"),
+    highlight2: channelStopsPair("#fff2c9", "#fff6d6"),
+  };
+}
+
+export interface LightningAnimParams {
+  intensityRange: [number, number];
+  /** Cloud-flash strikes per real (wall-clock) minute at this storm point. */
+  strikesPerMinute: number;
+  /**
+   * Cloud-to-ground "strike" bolts per real minute. These start at the
+   * cloud top, hit the ground, and flood-light the whole cloud.
+   */
+  strikePerMinute: number;
+  /**
+   * Per-segment branch probability in [0, 1]. At each interior main-bolt
+   * vertex, a weaker side branch spawns with this chance (1 = every segment).
+   */
+  subFlashes: number;
+  /** Max bolt endpoint span as a fraction of cloud size, [0, 1]. */
+  spanScale: number;
+  /** Min bolt length as a fraction of mean cloud radius. */
+  minSpanScale: number;
+  boltGain: number;
+  backgroundGain: number;
+  thunderDelayMs: number;
+  /** Stereo pan for bolt/background audio, −1 = left … +1 = right. */
+  pan: number;
+  /**
+   * How strongly a spawned bolt blends from the default lightning colours
+   * toward the chosen breath participant's colour, [0, 1]. 0 = pure
+   * default, 1 = fully tinted.
+   */
+  tintMix: number;
+}
+
+export interface LightningKeyframe {
+  id: string;
+  /**
+   * Normalized progress through the lightning active window, [0, 1].
+   * Sampled from the current sky timeline position.
+   */
+  t: number;
+  values: LightningAnimParams;
+}
+
 export interface LightningParams {
   enabled: boolean;
   /**
-   * Three bolt tint colors. Each strike shuffles the order and
-   * interpolates through them across its flash so the color varies
-   * mid-strike (start → mid → end).
+   * Default bolt colour timelines (main + 2 highlights). Interpolate
+   * across the storm window like sky sun/moon pins.
    */
-  colors: [string, string, string];
+  colors: LightningColorTracks;
   /**
-   * Per-strike additive gain range applied to the per-LED
-   * contribution. Each strike samples a random value from this
-   * `[min, max]` window at birth time.
+   * Per-strike additive gain range. Mirrored in keyframes; live flashes
+   * interpolate the range and map a frozen per-strike random through it.
    */
   intensityRange: [number, number];
-  /** Average number of strikes per minute (Poisson-ish scheduling). */
+  /**
+   * Keyframes over the lightning active window (sky timeline progress).
+   * Current sky time maps to u∈[0,1] within Start→End hour; values are
+   * linearly interpolated. ≥2 stops.
+   */
+  keyframes: LightningKeyframe[];
+  /** Average cloud-flash strikes per real (wall-clock) minute. Also keyframed. */
   strikesPerMinute: number;
+  /**
+   * Average cloud-to-ground strikes per real minute. Also keyframed.
+   * Separate from in-cloud flashes.
+   */
+  strikePerMinute: number;
   /**
    * Characteristic distance (m) over which an LED's contribution from a
    * lit segment drops by 1/e. Continuous exponential falloff — every
    * LED receives some light, larger values = more diffuse glow through
-   * the cloud.
+   * the cloud. Global (not keyframed).
    */
   falloffDistance: number;
   /** Number of samples in a bolt polyline (jaggedness). */
@@ -67,7 +164,10 @@ export interface LightningParams {
    * envelope split.
    */
   travelSpeedRange: [number, number];
-  /** Number of flicker sub-pulses within a single strike. */
+  /**
+   * Per-segment branch probability in [0, 1]. Mirrored in keyframes;
+   * live strikes sample the interpolated value at spawn.
+   */
   subFlashes: number;
   /** Max portion of the ellipsoid extents the bolt endpoints span, [0,1]. */
   spanScale: number;
@@ -102,9 +202,20 @@ export interface LightningParams {
    * Delay in milliseconds between the visual bolt spawning and the
    * bolt sample being triggered. Mimics thunder arriving after the
    * flash (sound travels ~340 m/s vs. instantaneous light). 0 = fire
-   * simultaneously. Clamped to [0, 10000] on load.
+   * simultaneously. Clamped to [0, 2000] on load.
    */
   thunderDelayMs: number;
+  /**
+   * Stereo pan for bolt and background audio (−1 left … +1 right).
+   * Also keyframed across the active window.
+   */
+  pan: number;
+  /**
+   * Blend toward the chosen breath participant's colour at the live
+   * storm sample. Mirrored in keyframes; bolts freeze the mix at spawn.
+   * 0 = pure default lightning, 1 = fully participant-coloured.
+   */
+  tintMix: number;
   /**
    * Target simulation FPS for lightning updates + LED contribution.
    * Lower values create a stroboscopic, film-like flicker by
@@ -131,13 +242,30 @@ export interface LightningSample {
  * Persistent per-LED breath filter (TOD gate memory). Separate from the
  * breath wave params and from the participant rim tint.
  */
+export interface BreathFilterKeyframe {
+  id: string;
+  /**
+   * Normalized progress through the breath active window, [0, 1]
+   * (same axis as breath `activeStartHour` → `activeEndHour`).
+   */
+  t: number;
+  /** Filter threshold floor at this storm point, [0, 1]. */
+  threshold: number;
+}
+
 export interface BreathFilterParams {
   enabled: boolean;
   /**
    * Floor for the filter and default TOD activation [0,1]. Decay never
-   * goes below this; at 1 every LED shows full time-of-day.
+   * goes below this; at 1 every LED shows full time-of-day. Mirrored
+   * from the selected keyframe; live value is sampled from keyframes.
    */
   threshold: number;
+  /**
+   * Threshold envelope over the breath active window (≥2 stops).
+   * Current sky time maps to u∈[0,1] within breath Start→End hour.
+   */
+  keyframes: BreathFilterKeyframe[];
   /**
    * Hard upper bound (seconds): after the breath wave leaves an LED,
    * its filter effect is mostly gone within this time — even the
@@ -784,7 +912,7 @@ export interface SamplesParams {
 
 /**
  * A named contiguous slice of the 24h day. `endHour < startHour`
- * means the period wraps midnight (e.g. Night = 20 → 5).
+ * means the period wraps midnight (e.g. Night = 20 → 0).
  * Two adjacent periods share an edge — the "next" period always
  * begins where the previous one ends.
  */
@@ -865,10 +993,138 @@ export function hourInRange(
   endHour: number,
 ): boolean {
   const n = ((hour % 24) + 24) % 24;
-  if (endHour === startHour) return false;
-  return endHour > startHour
-    ? n >= startHour && n < endHour
-    : n >= startHour || n < endHour;
+  const start = Math.max(0, Math.min(24, startHour));
+  const end = Math.max(0, Math.min(24, endHour));
+  if (end === start) return false;
+  return end > start
+    ? n >= start && n < end
+    : n >= start || n < end;
+}
+
+/**
+ * Progress through an active hour window as `u ∈ [0, 1]`.
+ * Maps the current sky hour onto a keyframe timeline.
+ * Returns 0 when outside the window.
+ */
+export function activeWindowProgress(
+  hour: number,
+  startHour: number,
+  endHour: number,
+): number {
+  if (!hourInRange(hour, startHour, endHour)) return 0;
+  const n = ((hour % 24) + 24) % 24;
+  const start = ((startHour % 24) + 24) % 24;
+  // Allow endHour === 24 to mean end-of-day (exclusive midnight).
+  const end =
+    endHour >= 24 ? 24 : ((endHour % 24) + 24) % 24;
+  let elapsed: number;
+  let duration: number;
+  if (end > start) {
+    elapsed = n - start;
+    duration = end - start;
+  } else if (end === 24 && start === 0) {
+    elapsed = n;
+    duration = 24;
+  } else {
+    duration = 24 - start + end;
+    elapsed = n >= start ? n - start : 24 - start + n;
+  }
+  if (duration <= 1e-9) return 0;
+  return Math.max(0, Math.min(1, elapsed / duration));
+}
+
+/** True when breath is enabled and the sky clock is inside its active window. */
+export function isBreathActive(
+  breath: Pick<BreathParams, "enabled" | "activeStartHour" | "activeEndHour">,
+  skyHour: number,
+): boolean {
+  return (
+    breath.enabled &&
+    hourInRange(skyHour, breath.activeStartHour, breath.activeEndHour)
+  );
+}
+
+/** Length of `[startHour, endHour)` on the cyclic 24h axis. */
+export function activeWindowDurationHours(
+  startHour: number,
+  endHour: number,
+): number {
+  const start = ((startHour % 24) + 24) % 24;
+  const end = ((endHour % 24) + 24) % 24;
+  if (end === start) return 0;
+  return end > start ? end - start : 24 - start + end;
+}
+
+function linearHourSpans(
+  startHour: number,
+  endHour: number,
+): Array<[number, number]> {
+  const start = ((startHour % 24) + 24) % 24;
+  const end = ((endHour % 24) + 24) % 24;
+  if (end === start) return [];
+  if (end > start) return [[start, end]];
+  return [
+    [start, 24],
+    [0, end],
+  ];
+}
+
+/**
+ * Hours elapsed from `startHour` to `hour` along the active window
+ * (supports `hour === 24` as end-of-day for exclusive span ends).
+ */
+function offsetHoursFromWindowStart(hour: number, startHour: number): number {
+  const start = ((startHour % 24) + 24) % 24;
+  const h = hour >= 24 ? 24 : ((hour % 24) + 24) % 24;
+  if (h >= start) return h - start;
+  return 24 - start + h;
+}
+
+export interface PeriodWindowSpan {
+  periodId: string;
+  name: string;
+  color: string;
+  /** Inclusive start on the keyframe axis. */
+  u0: number;
+  /** Exclusive end on the keyframe axis. */
+  u1: number;
+}
+
+/**
+ * Day-cycle periods that overlap the lightning active window, as
+ * contiguous spans on the keyframe timeline `u ∈ [0, 1]`.
+ */
+export function periodsCrossingActiveWindow(
+  periods: DayPeriod[],
+  startHour: number,
+  endHour: number,
+): PeriodWindowSpan[] {
+  const duration = activeWindowDurationHours(startHour, endHour);
+  if (duration <= 1e-9) return [];
+  const windowSpans = linearHourSpans(startHour, endHour);
+  const out: PeriodWindowSpan[] = [];
+  for (const p of periods) {
+    const periodSpans = linearHourSpans(p.startHour, p.endHour);
+    for (const [wa, wb] of windowSpans) {
+      for (const [pa, pb] of periodSpans) {
+        const lo = Math.max(wa, pa);
+        const hi = Math.min(wb, pb);
+        if (hi - lo <= 1e-6) continue;
+        const u0 = offsetHoursFromWindowStart(lo, startHour) / duration;
+        const u1 = offsetHoursFromWindowStart(hi, startHour) / duration;
+        if (u1 - u0 <= 1e-6) continue;
+        out.push({
+          periodId: p.id,
+          name: p.name,
+          color: p.color,
+          u0: Math.max(0, Math.min(1, u0)),
+          u1: Math.max(0, Math.min(1, u1)),
+        });
+      }
+    }
+  }
+  out.sort((a, b) => a.u0 - b.u0 || a.u1 - b.u1);
+  return out;
 }
 
 export interface WledParams {
@@ -896,6 +1152,27 @@ export interface BreathParticipant {
    * ignored once a live breath signal is wired in.
    */
   phaseOffset: number;
+  /**
+   * Stable seed for this participant's cloud-fixed fog field. Shared
+   * fog params (scale/amount/contrast/edge) apply to all participants;
+   * only the seed differs so each person gets a unique volume look.
+   */
+  fogSeed: number;
+}
+
+/** New random fog-field seed for a participant. */
+export function makeBreathFogSeed(): number {
+  return (Math.random() * 0x7fffffff) | 0;
+}
+
+/** Deterministic seed from an id (migration when fogSeed is missing). */
+export function fogSeedFromId(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
 }
 
 /** @deprecated Prefer BreathParticipant. Kept for snapshot migration. */
@@ -942,7 +1219,8 @@ export interface BreathParams {
   falloffExponent: number;
   /**
    * Spatial frequency of volumetric fog noise (higher = finer blobs).
-   * World-space inverse metres scale.
+   * Sampled in metres from the cloud center (fixed fog volume); the
+   * travelling spheroid only gates / envelopes that field.
    */
   noiseScale: number;
   /** 0 = smooth envelope only, 1 = fully noise-shaped density. */
@@ -950,8 +1228,8 @@ export interface BreathParams {
   /** Sharpens dense vs empty fog regions (>1 = higher contrast). */
   noiseContrast: number;
   /**
-   * How strongly noise scallops the breath-volume silhouette near the
-   * surface [0,2]. Does not enlarge or brighten the solid core.
+   * How strongly the cloud-fixed fog scallops the spheroid, from the
+   * surface deep into the volume [0,2].
    */
   edgeNoise: number;
   /**
@@ -968,6 +1246,17 @@ export interface BreathParams {
   rimArcDegrees: number;
   /** Blend in combined mode: 0 = time of day, 1 = breath. */
   breathVsTimeMix: number;
+  /**
+   * Hour in [0, 24] at which breath waves / mask / audio mod switch on.
+   * Pairs with {@link activeEndHour}; wraps midnight when end < start.
+   * Use end = 24 for "through end of day" with start = 0 (always on).
+   */
+  activeStartHour: number;
+  /**
+   * Hour in [0, 24] at which breath activity switches off.
+   * Same wrap rules as lightning's active window.
+   */
+  activeEndHour: number;
   /** Up to {@link MAX_BREATH_PARTICIPANTS} people on the horizon. */
   participants: BreathParticipant[];
 }
@@ -1104,6 +1393,8 @@ export interface UiParams {
   showBreath: boolean;
   showLightning: boolean;
   showBreathFilter: boolean;
+  showTimeOfDay: boolean;
+  showCloud: boolean;
   showStream: boolean;
 }
 
@@ -1303,6 +1594,9 @@ const DEFAULTS = {
     rimAmount: 0.75,
     rimArcDegrees: 180,
     breathVsTimeMix: 0.5,
+    // Full day by default — narrow via Breath panel / sky timeline strip.
+    activeStartHour: 0,
+    activeEndHour: 24,
     participants: [
       {
         id: "participant-0",
@@ -1310,19 +1604,74 @@ const DEFAULTS = {
         enabled: true,
         azimuthDeg: 0,
         phaseOffset: 0,
+        fogSeed: fogSeedFromId("participant-0"),
       },
     ],
   } as BreathParams,
   lightning: {
     enabled: false,
-    colors: ["#cfe7ff", "#a8c8ff", "#fff2c9"],
+    colors: buildDefaultLightningColors(),
     intensityRange: [0.9, 1.5],
-    strikesPerMinute: 12,
-    falloffDistance: 0.6,
+    keyframes: [
+      {
+        id: "kf-0",
+        t: 0,
+        values: {
+          intensityRange: [0.5, 0.9],
+          strikesPerMinute: 2,
+          strikePerMinute: 0.3,
+          subFlashes: 0.25,
+          spanScale: 0.7,
+          minSpanScale: 0.4,
+          boltGain: 0.6,
+          backgroundGain: 0.25,
+          thunderDelayMs: 800,
+          pan: 0,
+          tintMix: 0.35,
+        },
+      },
+      {
+        id: "kf-1",
+        t: 0.5,
+        values: {
+          intensityRange: [0.9, 1.5],
+          strikesPerMinute: 8,
+          strikePerMinute: 1,
+          subFlashes: 0.4,
+          spanScale: 0.85,
+          minSpanScale: 0.5,
+          boltGain: 0.8,
+          backgroundGain: 0.35,
+          thunderDelayMs: 800,
+          pan: 0,
+          tintMix: 0.55,
+        },
+      },
+      {
+        id: "kf-2",
+        t: 1,
+        values: {
+          intensityRange: [0.5, 0.9],
+          strikesPerMinute: 2,
+          strikePerMinute: 0.3,
+          subFlashes: 0.25,
+          spanScale: 0.7,
+          minSpanScale: 0.4,
+          boltGain: 0.6,
+          backgroundGain: 0.25,
+          thunderDelayMs: 800,
+          pan: 0,
+          tintMix: 0.35,
+        },
+      },
+    ],
+    strikesPerMinute: 2,
+    strikePerMinute: 0.5,
+    falloffDistance: 0.1,
     boltSegments: 10,
     boltJitterRange: [0.25, 0.55],
     travelSpeedRange: [0.5, 2],
-    subFlashes: 2,
+    subFlashes: 0.4,
     spanScale: 0.85,
     minSpanScale: 0.5,
     activeStartHour: 20,
@@ -1333,11 +1682,17 @@ const DEFAULTS = {
     backgroundGain: 0.35,
     boltPitchJitterCents: 200,
     thunderDelayMs: 800,
+    pan: 0,
+    tintMix: 0.35,
     simFps: 60,
   } as LightningParams,
   breathFilter: {
     enabled: true,
     threshold: 0,
+    keyframes: [
+      { id: "bf-kf-0", t: 0, threshold: 0 },
+      { id: "bf-kf-1", t: 1, threshold: 0 },
+    ],
     decayMaxSeconds: 2,
     cooldownScale: 2,
     cooldownContrast: 3,
@@ -1422,7 +1777,14 @@ const DEFAULTS = {
       { id: "dawn", name: "Dawn", startHour: 5, endHour: 8, color: "#f472b6" },
       { id: "day", name: "Day", startHour: 8, endHour: 17, color: "#facc15" },
       { id: "dusk", name: "Dusk", startHour: 17, endHour: 20, color: "#fb923c" },
-      { id: "night", name: "Night", startHour: 20, endHour: 5, color: "#6366f1" },
+      { id: "night", name: "Night", startHour: 20, endHour: 0, color: "#6366f1" },
+      {
+        id: "magicalNight",
+        name: "Magical night",
+        startHour: 0,
+        endHour: 5,
+        color: "#c084fc",
+      },
     ],
     activePeriodId: "dawn",
     autoNext: false,
@@ -1478,6 +1840,8 @@ const DEFAULTS = {
     showBreath: true,
     showLightning: false,
     showBreathFilter: false,
+    showTimeOfDay: false,
+    showCloud: false,
     showStream: false,
   } as UiParams,
 };
@@ -1885,6 +2249,16 @@ function resolveBreath(input: unknown): BreathParams {
       enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
       azimuthDeg: num(raw.azimuthDeg, legacyAz),
       phaseOffset: Math.max(0, Math.min(1, num(raw.phaseOffset, (i * 0.17) % 1))),
+      fogSeed: (() => {
+        if (typeof raw.fogSeed === "number" && Number.isFinite(raw.fogSeed)) {
+          return raw.fogSeed >>> 0;
+        }
+        const id =
+          typeof raw.id === "string" && raw.id
+            ? raw.id
+            : `participant-${i}`;
+        return fogSeedFromId(id);
+      })(),
     });
   }
   if (participants.length === 0) {
@@ -1917,6 +2291,14 @@ function resolveBreath(input: unknown): BreathParams {
     rimAmount: Math.max(0, Math.min(1, rimAmount)),
     rimArcDegrees: Math.max(0, Math.min(360, rimArcDegrees)),
     breathVsTimeMix: Math.max(0, Math.min(1, breathVsTimeMix)),
+    activeStartHour: Math.max(
+      0,
+      Math.min(24, num(saved.activeStartHour, d.activeStartHour)),
+    ),
+    activeEndHour: Math.max(
+      0,
+      Math.min(24, num(saved.activeEndHour, d.activeEndHour)),
+    ),
     participants,
   };
 }
@@ -1924,12 +2306,13 @@ function resolveBreath(input: unknown): BreathParams {
 /**
  * Reconcile a saved `dayCycle` payload. Falls back to defaults for a
  * missing or malformed slice; unknown activeId → first period.
+ * Migrates the legacy single Night (20→5) into Night + Magical night.
  */
 function resolveDayCycle(
   saved: Partial<DayCycleParams> | undefined,
 ): DayCycleParams {
   if (!saved) return DEFAULTS.dayCycle;
-  const periods: DayPeriod[] = Array.isArray(saved.periods) && saved.periods.length > 0
+  let periods: DayPeriod[] = Array.isArray(saved.periods) && saved.periods.length > 0
     ? saved.periods
         .filter((p): p is DayPeriod =>
           !!p &&
@@ -1947,6 +2330,7 @@ function resolveDayCycle(
           color: p.color,
         }))
     : DEFAULTS.dayCycle.periods;
+  periods = migrateLegacyNightPeriod(periods);
   const activePeriodId =
     saved.activePeriodId && periods.some((p) => p.id === saved.activePeriodId)
       ? saved.activePeriodId
@@ -1954,6 +2338,36 @@ function resolveDayCycle(
   const autoNext =
     typeof saved.autoNext === "boolean" ? saved.autoNext : DEFAULTS.dayCycle.autoNext;
   return { periods, activePeriodId, autoNext };
+}
+
+/**
+ * If the saved cycle still has a single Night spanning 20→5 (and no
+ * Magical night yet), split it into Night 20→0 and Magical night 0→5.
+ */
+function migrateLegacyNightPeriod(periods: DayPeriod[]): DayPeriod[] {
+  if (periods.some((p) => p.id === "magicalNight")) return periods;
+  const nightIdx = periods.findIndex((p) => p.id === "night");
+  if (nightIdx < 0) return periods;
+  const night = periods[nightIdx];
+  // Only rewrite the classic default span; leave custom night ranges alone.
+  const isLegacySpan =
+    Math.abs(night.startHour - 20) < 1e-6 && Math.abs(night.endHour - 5) < 1e-6;
+  if (!isLegacySpan) return periods;
+  const next = [...periods];
+  next[nightIdx] = {
+    ...night,
+    name: night.name || "Night",
+    startHour: 20,
+    endHour: 0,
+  };
+  next.splice(nightIdx + 1, 0, {
+    id: "magicalNight",
+    name: "Magical night",
+    startHour: 0,
+    endHour: 5,
+    color: "#c084fc",
+  });
+  return next;
 }
 
 /**
@@ -2007,6 +2421,293 @@ function resolveMasterFx(
  * back-filled from its legacy scalar so previously-saved snapshots
  * (before the ranges existed) keep working with sensible values.
  */
+function cloneColorStop(s: LightningColorStop): LightningColorStop {
+  return { id: s.id, t: s.t, color: s.color };
+}
+
+function cloneColorStops(list: LightningColorStop[]): LightningColorStop[] {
+  return list.map(cloneColorStop);
+}
+
+export function cloneColorTracks(
+  t: LightningColorTracks,
+): LightningColorTracks {
+  return {
+    main: cloneColorStops(t.main),
+    highlight1: cloneColorStops(t.highlight1),
+    highlight2: cloneColorStops(t.highlight2),
+  };
+}
+
+/**
+ * Participant slot indices whose breath colour may tint a bolt
+ * (enabled participants, clamped to MAX_BREATH_PARTICIPANTS).
+ */
+export function enabledLightningTintIndices(
+  participants: BreathParticipant[],
+): number[] {
+  const out: number[] = [];
+  const n = Math.min(MAX_BREATH_PARTICIPANTS, participants.length);
+  for (let i = 0; i < n; i++) {
+    if (participants[i]?.enabled) out.push(i);
+  }
+  return out;
+}
+
+function resolveColorStops(
+  input: unknown,
+  fallback: LightningColorStop[],
+): LightningColorStop[] {
+  if (!Array.isArray(input) || input.length === 0) {
+    return cloneColorStops(fallback);
+  }
+  const out: LightningColorStop[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const raw = input[i];
+    if (!raw || typeof raw !== "object") continue;
+    const rec = raw as Record<string, unknown>;
+    if (typeof rec.color !== "string") continue;
+    const t =
+      typeof rec.t === "number" && Number.isFinite(rec.t)
+        ? Math.max(0, Math.min(1, rec.t))
+        : typeof rec.timeHours === "number" && Number.isFinite(rec.timeHours)
+          ? Math.max(0, Math.min(1, rec.timeHours / 24))
+          : NaN;
+    if (!Number.isFinite(t)) continue;
+    const id =
+      typeof rec.id === "string" && rec.id.length > 0
+        ? rec.id
+        : `lcs-${i}-${Math.random().toString(36).slice(2, 6)}`;
+    out.push({ id, t, color: rec.color });
+  }
+  return out.length > 0 ? out : cloneColorStops(fallback);
+}
+
+function resolveColorTracks(
+  input: unknown,
+  fallback: LightningColorTracks,
+): LightningColorTracks {
+  if (!input || typeof input !== "object") return cloneColorTracks(fallback);
+  const rec = input as Record<string, unknown>;
+  return {
+    main: resolveColorStops(rec.main, fallback.main),
+    highlight1: resolveColorStops(rec.highlight1, fallback.highlight1),
+    highlight2: resolveColorStops(rec.highlight2, fallback.highlight2),
+  };
+}
+
+function trackFromStaticPalette(palette: LightningPalette): LightningColorTracks {
+  return {
+    main: channelStopsPair(palette[0], palette[0]),
+    highlight1: channelStopsPair(palette[1], palette[1]),
+    highlight2: channelStopsPair(palette[2], palette[2]),
+  };
+}
+
+/**
+ * Prefer `colors`; migrate legacy `paletteTracks` / `palettes` / trio
+ * `colors` so old snapshots keep working.
+ */
+function resolveLightningColors(
+  saved: Record<string, unknown>,
+  fallbackColors: LightningColorTracks,
+): LightningColorTracks {
+  if (saved.colors && typeof saved.colors === "object" && !Array.isArray(saved.colors)) {
+    return resolveColorTracks(saved.colors, fallbackColors);
+  }
+  if (Array.isArray(saved.paletteTracks) && saved.paletteTracks[0]) {
+    return resolveColorTracks(saved.paletteTracks[0], fallbackColors);
+  }
+  if (Array.isArray(saved.palettes) && saved.palettes[0]) {
+    const p = saved.palettes[0];
+    if (
+      Array.isArray(p) &&
+      p.length === 3 &&
+      typeof p[0] === "string" &&
+      typeof p[1] === "string" &&
+      typeof p[2] === "string"
+    ) {
+      return trackFromStaticPalette([p[0], p[1], p[2]]);
+    }
+  }
+  if (
+    Array.isArray(saved.color) &&
+    saved.color.length === 3 &&
+    typeof saved.color[0] === "string"
+  ) {
+    return trackFromStaticPalette([
+      saved.color[0] as string,
+      saved.color[1] as string,
+      saved.color[2] as string,
+    ]);
+  }
+  return cloneColorTracks(fallbackColors);
+}
+
+function cloneAnimParams(src: LightningAnimParams): LightningAnimParams {
+  return {
+    intensityRange: [src.intensityRange[0], src.intensityRange[1]],
+    strikesPerMinute: src.strikesPerMinute,
+    strikePerMinute: src.strikePerMinute,
+    subFlashes: src.subFlashes,
+    spanScale: src.spanScale,
+    minSpanScale: src.minSpanScale,
+    boltGain: src.boltGain,
+    backgroundGain: src.backgroundGain,
+    thunderDelayMs: src.thunderDelayMs,
+    pan: src.pan,
+    tintMix: src.tintMix,
+  };
+}
+
+/**
+ * `subFlashes` used to be an integer flicker count (0–4). Values above 1
+ * are treated as legacy and remapped onto [0, 1] via `/4`.
+ */
+function migrateSubFlashes(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  if (v > 1) return Math.min(1, v / 4);
+  return Math.max(0, Math.min(1, v));
+}
+
+function animParamsFromRoot(p: {
+  intensityRange: [number, number];
+  strikesPerMinute: number;
+  strikePerMinute: number;
+  subFlashes: number;
+  spanScale: number;
+  minSpanScale: number;
+  boltGain: number;
+  backgroundGain: number;
+  thunderDelayMs: number;
+  pan: number;
+  tintMix: number;
+}): LightningAnimParams {
+  return cloneAnimParams(p);
+}
+
+function scaleIntensityRange(
+  base: [number, number],
+  scale: number,
+): [number, number] {
+  const s = Math.max(0, scale);
+  return [base[0] * s, base[1] * s];
+}
+
+function resolveAnimParams(
+  input: unknown,
+  fallback: LightningAnimParams,
+): LightningAnimParams {
+  if (!input || typeof input !== "object") return cloneAnimParams(fallback);
+  const rec = input as Record<string, unknown>;
+  const intensityRange = (() => {
+    const v = rec.intensityRange;
+    if (
+      Array.isArray(v) &&
+      v.length === 2 &&
+      typeof v[0] === "number" &&
+      typeof v[1] === "number"
+    ) {
+      return [Math.min(v[0], v[1]), Math.max(v[0], v[1])] as [number, number];
+    }
+    return fallback.intensityRange;
+  })();
+  const num = (v: unknown, fb: number) =>
+    typeof v === "number" && Number.isFinite(v) ? v : fb;
+  const spanScale = Math.max(0, Math.min(1, num(rec.spanScale, fallback.spanScale)));
+  const minSpanScale = Math.max(
+    0,
+    Math.min(spanScale, num(rec.minSpanScale, fallback.minSpanScale)),
+  );
+  return {
+    intensityRange,
+    strikesPerMinute: Math.max(
+      0,
+      Math.min(40, num(rec.strikesPerMinute, fallback.strikesPerMinute)),
+    ),
+    strikePerMinute: Math.max(
+      0,
+      Math.min(40, num(rec.strikePerMinute, fallback.strikePerMinute)),
+    ),
+    subFlashes: migrateSubFlashes(num(rec.subFlashes, fallback.subFlashes)),
+    spanScale,
+    minSpanScale,
+    boltGain: Math.max(0, Math.min(3, num(rec.boltGain, fallback.boltGain))),
+    backgroundGain: Math.max(
+      0,
+      Math.min(3, num(rec.backgroundGain, fallback.backgroundGain)),
+    ),
+    thunderDelayMs: Math.max(
+      0,
+      Math.min(2000, num(rec.thunderDelayMs, fallback.thunderDelayMs)),
+    ),
+    pan: Math.max(-1, Math.min(1, num(rec.pan, fallback.pan))),
+    tintMix: Math.max(0, Math.min(1, num(rec.tintMix, fallback.tintMix))),
+  };
+}
+
+function resolveLightningKeyframes(
+  input: unknown,
+  legacyEnvelope: unknown,
+  fallback: LightningKeyframe[],
+  rootAnim: LightningAnimParams,
+): LightningKeyframe[] {
+  if (Array.isArray(input) && input.length >= 2) {
+    const out: LightningKeyframe[] = [];
+    for (let i = 0; i < input.length; i++) {
+      const raw = input[i];
+      if (!raw || typeof raw !== "object") continue;
+      const rec = raw as Record<string, unknown>;
+      const t = typeof rec.t === "number" && Number.isFinite(rec.t) ? rec.t : NaN;
+      if (!Number.isFinite(t)) continue;
+      const id =
+        typeof rec.id === "string" && rec.id.length > 0
+          ? rec.id
+          : `kf-${i}-${Math.random().toString(36).slice(2, 7)}`;
+      out.push({
+        id,
+        t: Math.max(0, Math.min(1, t)),
+        values: resolveAnimParams(rec.values, rootAnim),
+      });
+    }
+    if (out.length >= 2) {
+      out.sort((a, b) => a.t - b.t);
+      return out;
+    }
+  }
+  // Migrate intensityEnvelope → keyframes scaling intensityRange by value.
+  if (Array.isArray(legacyEnvelope) && legacyEnvelope.length >= 2) {
+    const out: LightningKeyframe[] = [];
+    for (let i = 0; i < legacyEnvelope.length; i++) {
+      const raw = legacyEnvelope[i];
+      if (!raw || typeof raw !== "object") continue;
+      const rec = raw as Record<string, unknown>;
+      const t = typeof rec.t === "number" && Number.isFinite(rec.t) ? rec.t : NaN;
+      const value =
+        typeof rec.value === "number" && Number.isFinite(rec.value)
+          ? rec.value
+          : NaN;
+      if (!Number.isFinite(t) || !Number.isFinite(value)) continue;
+      const id =
+        typeof rec.id === "string" && rec.id.length > 0
+          ? rec.id
+          : `kf-mig-${i}`;
+      const values = cloneAnimParams(rootAnim);
+      values.intensityRange = scaleIntensityRange(rootAnim.intensityRange, value);
+      out.push({ id, t: Math.max(0, Math.min(1, t)), values });
+    }
+    if (out.length >= 2) {
+      out.sort((a, b) => a.t - b.t);
+      return out;
+    }
+  }
+  return fallback.map((k) => ({
+    id: k.id,
+    t: k.t,
+    values: cloneAnimParams(k.values),
+  }));
+}
+
 function resolveLightning(input: unknown): LightningParams {
   const d = DEFAULTS.lightning;
   if (!input || typeof input !== "object") return d;
@@ -2035,38 +2736,89 @@ function resolveLightning(input: unknown): LightningParams {
   return {
     ...d,
     ...saved,
-    colors: (() => {
-      const c = (saved as Record<string, unknown>).colors;
-      if (
-        Array.isArray(c) &&
-        c.length === 3 &&
-        typeof c[0] === "string" &&
-        typeof c[1] === "string" &&
-        typeof c[2] === "string"
-      ) {
-        return [c[0], c[1], c[2]] as [string, string, string];
-      }
-      const legacy = (saved as Record<string, unknown>).color;
-      if (typeof legacy === "string") {
-        return [legacy, legacy, legacy] as [string, string, string];
-      }
-      return d.colors;
-    })(),
+    colors: resolveLightningColors(
+      saved as Record<string, unknown>,
+      d.colors,
+    ),
     intensityRange: asPairFromScalar(
       "intensityRange",
       "intensity",
       d.intensityRange,
     ),
+    strikesPerMinute: (() => {
+      const v =
+        typeof saved.strikesPerMinute === "number"
+          ? saved.strikesPerMinute
+          : d.strikesPerMinute;
+      return Math.max(0, Math.min(40, v));
+    })(),
+    strikePerMinute: (() => {
+      const v =
+        typeof saved.strikePerMinute === "number"
+          ? saved.strikePerMinute
+          : d.strikePerMinute;
+      return Math.max(0, Math.min(40, v));
+    })(),
+    keyframes: (() => {
+      const intensityRange = asPairFromScalar(
+        "intensityRange",
+        "intensity",
+        d.intensityRange,
+      );
+      const tintMix = (() => {
+        const v =
+          typeof saved.tintMix === "number" ? saved.tintMix : d.tintMix;
+        return Math.max(0, Math.min(1, v));
+      })();
+      const rootAnim = animParamsFromRoot({
+        intensityRange,
+        strikesPerMinute:
+          typeof saved.strikesPerMinute === "number"
+            ? saved.strikesPerMinute
+            : d.strikesPerMinute,
+        strikePerMinute:
+          typeof saved.strikePerMinute === "number"
+            ? saved.strikePerMinute
+            : d.strikePerMinute,
+        subFlashes: migrateSubFlashes(
+          typeof saved.subFlashes === "number" ? saved.subFlashes : d.subFlashes,
+        ),
+        spanScale:
+          typeof saved.spanScale === "number" ? saved.spanScale : d.spanScale,
+        minSpanScale:
+          typeof saved.minSpanScale === "number"
+            ? saved.minSpanScale
+            : d.minSpanScale,
+        boltGain: typeof saved.boltGain === "number" ? saved.boltGain : d.boltGain,
+        backgroundGain:
+          typeof saved.backgroundGain === "number"
+            ? saved.backgroundGain
+            : d.backgroundGain,
+        thunderDelayMs:
+          typeof saved.thunderDelayMs === "number"
+            ? saved.thunderDelayMs
+            : d.thunderDelayMs,
+        pan: typeof saved.pan === "number" ? saved.pan : d.pan,
+        tintMix,
+      });
+      return resolveLightningKeyframes(
+        (saved as Record<string, unknown>).keyframes,
+        (saved as Record<string, unknown>).intensityEnvelope,
+        d.keyframes,
+        rootAnim,
+      );
+    })(),
     falloffDistance: (() => {
       const rec = saved as Record<string, unknown>;
+      const clamp = (v: number) => Math.max(0, Math.min(0.2, v));
       const explicit = rec.falloffDistance;
       if (typeof explicit === "number" && Number.isFinite(explicit)) {
-        return Math.max(0.02, explicit);
+        return clamp(explicit);
       }
       // Migration from the old fixed-radius model.
       const legacy = rec.boltRadius;
       if (typeof legacy === "number" && Number.isFinite(legacy)) {
-        return Math.max(0.02, legacy);
+        return clamp(legacy);
       }
       const range = rec.boltRadiusRange;
       if (
@@ -2074,7 +2826,7 @@ function resolveLightning(input: unknown): LightningParams {
         typeof range[0] === "number" &&
         typeof range[1] === "number"
       ) {
-        return Math.max(0.02, (range[0] + range[1]) / 2);
+        return clamp((range[0] + range[1]) / 2);
       }
       return d.falloffDistance;
     })(),
@@ -2088,12 +2840,61 @@ function resolveLightning(input: unknown): LightningParams {
       "travelSpeed",
       d.travelSpeedRange,
     ),
+    subFlashes: migrateSubFlashes(
+      typeof saved.subFlashes === "number" ? saved.subFlashes : d.subFlashes,
+    ),
     thunderDelayMs: (() => {
       const v = (saved as Record<string, unknown>).thunderDelayMs;
       if (typeof v !== "number" || !Number.isFinite(v)) return d.thunderDelayMs;
-      return Math.max(0, Math.min(10000, v));
+      return Math.max(0, Math.min(2000, v));
+    })(),
+    pan: (() => {
+      const v = (saved as Record<string, unknown>).pan;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.pan;
+      return Math.max(-1, Math.min(1, v));
+    })(),
+    tintMix: (() => {
+      const v = (saved as Record<string, unknown>).tintMix;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.tintMix;
+      return Math.max(0, Math.min(1, v));
     })(),
   };
+}
+
+function resolveBreathFilterKeyframes(
+  input: unknown,
+  fallbackThreshold: number,
+  defaults: BreathFilterKeyframe[],
+): BreathFilterKeyframe[] {
+  if (Array.isArray(input) && input.length >= 2) {
+    const out: BreathFilterKeyframe[] = [];
+    for (let i = 0; i < input.length; i++) {
+      const raw = input[i];
+      if (!raw || typeof raw !== "object") continue;
+      const rec = raw as Record<string, unknown>;
+      const t = typeof rec.t === "number" && Number.isFinite(rec.t) ? rec.t : NaN;
+      if (!Number.isFinite(t)) continue;
+      const threshold =
+        typeof rec.threshold === "number" && Number.isFinite(rec.threshold)
+          ? Math.max(0, Math.min(1, rec.threshold))
+          : fallbackThreshold;
+      const id =
+        typeof rec.id === "string" && rec.id.length > 0
+          ? rec.id
+          : `bf-kf-${i}-${Math.random().toString(36).slice(2, 6)}`;
+      out.push({ id, t: Math.max(0, Math.min(1, t)), threshold });
+    }
+    if (out.length >= 2) {
+      out.sort((a, b) => a.t - b.t);
+      return out;
+    }
+  }
+  // Migrate scalar-only snapshots → flat envelope at the saved threshold.
+  const th = Math.max(0, Math.min(1, fallbackThreshold));
+  return [
+    { id: defaults[0]?.id ?? "bf-kf-0", t: 0, threshold: th },
+    { id: defaults[1]?.id ?? "bf-kf-1", t: 1, threshold: th },
+  ];
 }
 
 function resolveBreathFilter(input: unknown): BreathFilterParams {
@@ -2102,9 +2903,16 @@ function resolveBreathFilter(input: unknown): BreathFilterParams {
   const saved = input as Record<string, unknown>;
   const num = (v: unknown, fallback: number): number =>
     typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  const threshold = Math.max(0, Math.min(1, num(saved.threshold, d.threshold)));
+  const keyframes = resolveBreathFilterKeyframes(
+    saved.keyframes,
+    threshold,
+    d.keyframes,
+  );
   return {
     enabled: typeof saved.enabled === "boolean" ? saved.enabled : d.enabled,
-    threshold: Math.max(0, Math.min(1, num(saved.threshold, d.threshold))),
+    threshold,
+    keyframes,
     decayMaxSeconds: Math.max(
       0.1,
       Math.min(5, num(saved.decayMaxSeconds, d.decayMaxSeconds)),

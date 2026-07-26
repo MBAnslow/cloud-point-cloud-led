@@ -9,7 +9,7 @@ import {
   sharedBreathWaveController,
   waveLocalFrame,
 } from "../lighting/breathWaves";
-import { useSimStore } from "../state";
+import { isBreathActive, useSimStore } from "../state";
 
 /** Concurrent travelling spheroids we keep mesh slots for. */
 const MAX_WAVE_MESHES = 16;
@@ -22,6 +22,7 @@ const MAX_WAVE_MESHES = 16;
  */
 export function BreathArea() {
   const breath = useSimStore((s) => s.breath);
+  const skyTimeHours = useSimStore((s) => s.sky.timeHours);
   const cloud = useSimStore((s) => s.cloud);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
   const waveMeshesRef = useRef<(Mesh | null)[]>([]);
@@ -98,7 +99,12 @@ export function BreathArea() {
     }
   });
 
-  if (!breath.enabled || ledViewMode !== "breathIntensity") return null;
+  if (
+    !isBreathActive(breath, skyTimeHours) ||
+    ledViewMode !== "breathIntensity"
+  ) {
+    return null;
+  }
 
   return (
     <group>

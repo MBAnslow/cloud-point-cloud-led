@@ -18,8 +18,11 @@ export interface BreathWave {
   /** Safety max lifetime (missed cloud / runaway). */
   durationMs: number;
   peakStrength: number;
-  /** Per-wave fog field seed so each breath looks different. */
-  noiseSeed: number;
+  /**
+   * Participant fog-field seed. Fog is sampled in cloud-centered world
+   * space (fixed volume); the travelling spheroid only gates it.
+   */
+  fogSeed: number;
   /**
    * Once true, the volume has overlapped at least one LED. Cleared from
    * the sim as soon as it later loses all LED contact.
@@ -232,7 +235,7 @@ export class BreathWaveController {
         speed: metrics.speed,
         durationMs: metrics.durationMs,
         peakStrength: 1,
-        noiseSeed: (Math.random() * 0x7fffffff) | 0,
+        fogSeed: p.fogSeed >>> 0,
         hasTouchedLed: false,
       });
     };
@@ -362,10 +365,11 @@ type BreathSamplePhase = ReturnType<typeof sampleParticipantBreath>["phase"];
  * Per-LED breath sample: interior volumetric fog mask + outer rim shell
  * tinted toward the participant colour.
  *
- * The breath volume is an ellipsoid oriented so depth points along the
- * wave travel axis (away from the participant); width/height are the
- * lateral axes. Rim is a metre-thick band around that surface; only an
- * arc of `rimArcDegrees` is active on the far side.
+ * The travelling spheroid is an ellipsoid oriented so depth points along
+ * the wave travel axis; it only gates / envelopes intensity. Fog density
+ * and edge scalloping are sampled from a **fixed volume around the cloud
+ * center**, using each participant's `fogSeed` (shared scale/amount/
+ * contrast/edge params).
  */
 export function breathSampleAt(
   px: number,
@@ -386,6 +390,8 @@ export function breathSampleAt(
     /** Warps the ellipsoidal isosurface (rho units). */
     edgeNoise?: number;
   },
+  /** World-space cloud center — fog is fixed relative to this point. */
+  cloudCenter: [number, number, number] = [0, 0, 0],
 ): BreathLedSample {
   const waves = controller.getWaves();
   const empty: BreathLedSample = { mask: 0, rim: 0, rimR: 0, rimG: 0, rimB: 0 };
@@ -401,6 +407,10 @@ export function breathSampleAt(
   const arcDeg = Math.max(0, Math.min(360, rimArcDegrees));
   const halfArcRad = (arcDeg * 0.5 * Math.PI) / 180;
   const tSec = nowMs / 1000;
+  // Cloud-centered world offset — shared fog volume for all waves.
+  const fox = px - cloudCenter[0];
+  const foy = py - cloudCenter[1];
+  const foz = pz - cloudCenter[2];
   let bestMask = 0;
   let bestRim = 0;
   let rimR = 0;
@@ -419,7 +429,7 @@ export function breathSampleAt(
     const [rx, ry, rz] = frame.right;
     const [ux, uy, uz] = frame.up;
     const [fx, fy, fz] = frame.forward;
-    // Local ellipsoid coords: width / height / depth.
+    // Local ellipsoid coords: width / height / depth (spheroid gate only).
     const lw = dx * rx + dy * ry + dz * rz;
     const lh = dx * ux + dy * uy + dz * uz;
     const ld = dx * fx + dy * fy + dz * fz;
@@ -430,43 +440,47 @@ export function breathSampleAt(
     const sz = ld / rd;
     const rho = Math.sqrt(sx * sx + sy * sy + sz * sz);
 
-    // Jagged silhouette: displace the surface only inside a thin shell
-    // around rho≈1. The solid core keeps geometric falloff so raising
-    // edge noise can't brighten/enlarge the whole volume.
+    const fogSeed = w.fogSeed >>> 0;
+
+    // Jagged silhouette from cloud-fixed fog: strongest at the surface,
+    // falling off toward the center so scallops reach deep into the volume
+    // (not just a thin outer shell).
     let rhoEff = rho;
-    if (edgeAmt > 1e-6 && fog) {
-      const amp = 0.2 * edgeAmt; // slider 0..2 → ±0..0.4 rho at the surface
-      const band = 0.45; // shell half-width; core & far field stay geometric
-      const dist = Math.abs(rho - 1);
-      if (dist < band) {
+    if (edgeAmt > 1e-6 && fog && rho < 1.5) {
+      const amp = 0.22 * edgeAmt; // slider 0..2 → ±0..0.44 rho at the surface
+      // Reach from the surface all the way to the center (dist = 1 − rho).
+      const distFromSurface = Math.max(0, 1 - rho);
+      const band = 1; // full interior depth
+      if (distFromSurface < band) {
         const n = signedEdgeNoise(
-          sx,
-          sy,
-          sz,
+          fox,
+          foy,
+          foz,
           fog.scale,
           tSec,
-          (w.noiseSeed ^ 0x9e3779b9) >>> 0,
+          (fogSeed ^ 0x9e3779b9) >>> 0,
         );
-        const t = 1 - dist / band;
-        const wgt = t * t * (3 - 2 * t); // smoothstep influence
+        const t = 1 - distFromSurface / band;
+        // Gentler than smoothstep so mid-depth still carries clear scallops.
+        const wgt = t * t * (2 - t);
         rhoEff = rho - n * amp * wgt;
       }
     }
 
-    // --- Interior fog mask (geometric core + jagged shell) ---
+    // --- Interior fog mask (geometric core + cloud-fixed fog density) ---
     const prox = clamp01(1 - rhoEff);
     if (prox > 0) {
       const envelope = fall <= 0 ? 1 : Math.pow(prox, fall);
       let densityBlend = 1;
       if (amount > 0 && fog) {
         const density = fogDensity(
-          sx,
-          sy,
-          sz,
+          fox,
+          foy,
+          foz,
           fog.scale,
           fog.contrast,
           tSec,
-          w.noiseSeed,
+          fogSeed,
         );
         densityBlend = 1 + amount * (density - 1);
       }

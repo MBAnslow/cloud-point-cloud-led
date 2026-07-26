@@ -1,26 +1,70 @@
-import type { EllipsoidParams, LightningParams } from "../state";
+import type {
+  BreathParticipant,
+  EllipsoidParams,
+  LightningAnimParams,
+  LightningColorStop,
+  LightningColorTracks,
+  LightningKeyframe,
+  LightningPalette,
+  LightningParams,
+} from "../state";
+import { enabledLightningTintIndices } from "../state";
 import { applyCloudTransform, type CloudTransform } from "../scene/cloudTransform";
 import { hexToVec3 } from "./shade";
+
+export interface BoltBranch {
+  /** Flat [x,y,z,...] world-space branch polyline starting at the fork. */
+  path: Float32Array;
+  /** Relative brightness vs the main bolt, typically ~0.45–0.65. */
+  strength: number;
+  /**
+   * Main-path vertex index where this branch forks. Used so the branch
+   * only ignites once the main tip reaches that junction.
+   */
+  forkVertex: number;
+}
+
+/** In-cloud flash vs cloud-to-ground power strike. */
+export type BoltKind = "cloud" | "strike";
 
 export interface BoltStrike {
   bornMs: number;
   durationMs: number;
+  kind: BoltKind;
   /** Flat [x0,y0,z0, x1,y1,z1, ...] world-space bolt polyline. */
   path: Float32Array;
+  /** Weaker side branches spawned from interior main-path vertices. */
+  branches: BoltBranch[];
   /**
-   * Three RGB stops. The effective bolt color interpolates through
-   * these across the flash: stop0 at u=0, stop1 at u=0.5, stop2 at
-   * u=1. Order is shuffled per strike.
+   * Three RGB stops baked at spawn from a palette track
+   * (main → highlight1 → highlight2). Interpolated across the flash.
    */
   colorStops: [
     [number, number, number],
     [number, number, number],
     [number, number, number],
   ];
-  /** Randomised sub-flash offsets in [0,1] within the flash window. */
-  subOffsets: number[];
-  /** Sampled per-strike intensity (from `intensityRange`). */
+  /** Mean of the three palette colours, baked at spawn for tint blend. */
+  paletteTint: [number, number, number];
+  /** Which palette track this bolt drew from (0–3). */
+  paletteIndex: number;
+  /**
+   * Frozen [0,1] draw mapped through the birth intensityRange each frame
+   * so the strike keeps a stable character as the storm timeline moves.
+   */
+  intensity01: number;
+  /** Intensity range frozen at spawn from the storm timeline sample. */
+  intensityRange: [number, number];
+  /**
+   * Peak intensity at birth (from birth intensityRange). Used for audio.
+   */
   intensity: number;
+  /** Per-strike bolt sample gain baked at spawn from timeline sample. */
+  boltGain: number;
+  /** Thunder delay (ms) baked at spawn from timeline sample. */
+  thunderDelayMs: number;
+  /** Stereo pan (−1…+1) baked at spawn from timeline sample. */
+  pan: number;
 }
 
 function sampleRange(range: [number, number]): number {
@@ -34,24 +78,105 @@ function rand(): number {
   return Math.random();
 }
 
-function shuffledColorStops(
-  colors: [string, string, string],
+function vec3ToHex(v: [number, number, number]): string {
+  const c = (x: number) =>
+    Math.max(0, Math.min(255, Math.round(x * 255)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${c(v[0])}${c(v[1])}${c(v[2])}`;
+}
+
+function lerpHex(a: string, b: string, t: number): string {
+  const A = hexToVec3(a);
+  const B = hexToVec3(b);
+  return vec3ToHex([
+    A[0] + (B[0] - A[0]) * t,
+    A[1] + (B[1] - A[1]) * t,
+    A[2] + (B[2] - A[2]) * t,
+  ]);
+}
+
+const DEFAULT_PALETTE: LightningPalette = ["#cfe7ff", "#a8c8ff", "#fff2c9"];
+
+/**
+ * Interpolate a lightning colour-stop timeline at storm progress `u`∈[0,1].
+ * Non-wrapping: clamps to first/last stop outside the stop range.
+ */
+export function interpolateLightningColorStops(
+  stops: LightningColorStop[],
+  u: number,
+  fallback = "#cfe7ff",
+): string {
+  if (!stops || stops.length === 0) return fallback;
+  if (stops.length === 1) return stops[0].color;
+  const sorted = [...stops].sort((a, b) => a.t - b.t);
+  const uu = u < 0 ? 0 : u > 1 ? 1 : u;
+  if (uu <= sorted[0].t) return sorted[0].color;
+  const last = sorted[sorted.length - 1];
+  if (uu >= last.t) return last.color;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (uu < a.t || uu > b.t) continue;
+    const span = b.t - a.t;
+    const t = span <= 1e-9 ? 0 : (uu - a.t) / span;
+    return lerpHex(a.color, b.color, t);
+  }
+  return last.color;
+}
+
+/** Sample main + highlight colours for the default bolt at `u`. */
+export function sampleLightningColorTracks(
+  tracks: LightningColorTracks,
+  u: number,
+): LightningPalette {
+  return [
+    interpolateLightningColorStops(tracks.main, u, DEFAULT_PALETTE[0]),
+    interpolateLightningColorStops(tracks.highlight1, u, DEFAULT_PALETTE[1]),
+    interpolateLightningColorStops(tracks.highlight2, u, DEFAULT_PALETTE[2]),
+  ];
+}
+
+/** Blend each default channel toward a participant tint colour. */
+export function applyLightningTint(
+  base: LightningPalette,
+  tintHex: string,
+  mix: number,
+): LightningPalette {
+  const m = mix < 0 ? 0 : mix > 1 ? 1 : mix;
+  if (m <= 0) return [base[0], base[1], base[2]];
+  if (m >= 1) return [tintHex, tintHex, tintHex];
+  return [
+    lerpHex(base[0], tintHex, m),
+    lerpHex(base[1], tintHex, m),
+    lerpHex(base[2], tintHex, m),
+  ];
+}
+
+/**
+ * Bake main → hl1 → hl2 into RGB flash stops (order preserved so main
+ * leads the strike and highlights carry mid/end motion).
+ */
+function paletteColorStops(
+  palette: LightningPalette,
 ): [
   [number, number, number],
   [number, number, number],
   [number, number, number],
 ] {
-  const idx = [0, 1, 2];
-  for (let i = idx.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const tmp = idx[i];
-    idx[i] = idx[j];
-    idx[j] = tmp;
-  }
+  return [hexToVec3(palette[0]), hexToVec3(palette[1]), hexToVec3(palette[2])];
+}
+
+function paletteTintRgb(
+  palette: LightningPalette,
+): [number, number, number] {
+  const c0 = hexToVec3(palette[0]);
+  const c1 = hexToVec3(palette[1]);
+  const c2 = hexToVec3(palette[2]);
   return [
-    hexToVec3(colors[idx[0]]),
-    hexToVec3(colors[idx[1]]),
-    hexToVec3(colors[idx[2]]),
+    (c0[0] + c1[0] + c2[0]) / 3,
+    (c0[1] + c1[1] + c2[1]) / 3,
+    (c0[2] + c1[2] + c2[2]) / 3,
   ];
 }
 
@@ -205,6 +330,197 @@ function sampleBoltPath(
 }
 
 /**
+ * Cloud-to-ground bolt: starts near the cloud apex and drives down to
+ * ground below the cloud volume. Built in cloud-local space then
+ * transformed so it tracks tilt/yaw/offset with the mesh.
+ */
+function sampleGroundStrikePath(
+  ellipsoid: EllipsoidParams,
+  transform: CloudTransform,
+  segments: number,
+  jitter: number,
+): Float32Array {
+  const rx = Math.max(1e-3, ellipsoid.rx);
+  const ry = Math.max(1e-3, ellipsoid.ry);
+  const rz = Math.max(1e-3, ellipsoid.rz);
+
+  // Apex: near the top of the ellipsoid, slight lateral scatter.
+  const topX = (rand() * 2 - 1) * rx * 0.35;
+  const topY = ry * (0.82 + rand() * 0.16);
+  const topZ = (rand() * 2 - 1) * rz * 0.35;
+
+  // Ground: well below the cloud underside, offset laterally so the
+  // bolt doesn't always drop straight down the axis.
+  const groundX = topX + (rand() * 2 - 1) * rx * 0.55;
+  const groundY = -ry * (1.35 + rand() * 0.55);
+  const groundZ = topZ + (rand() * 2 - 1) * rz * 0.55;
+
+  const ax = topX;
+  const ay = topY;
+  const az = topZ;
+  const bx = groundX;
+  const by = groundY;
+  const bz = groundZ;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const dz = bz - az;
+  const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+  const nx = dx / len;
+  const ny = dy / len;
+  const nz = dz / len;
+  const helper: [number, number, number] =
+    Math.abs(ny) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  const ux = ny * helper[2] - nz * helper[1];
+  const uy = nz * helper[0] - nx * helper[2];
+  const uz = nx * helper[1] - ny * helper[0];
+  const uLen = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
+  const ux2 = ux / uLen;
+  const uy2 = uy / uLen;
+  const uz2 = uz / uLen;
+  const vx = ny * uz2 - nz * uy2;
+  const vy = nz * ux2 - nx * uz2;
+  const vz = nx * uy2 - ny * ux2;
+
+  const count = Math.max(3, Math.floor(segments) + 1);
+  const path = new Float32Array(count * 3);
+  const lateral = jitter * len * 0.28;
+  const waveAmpU = (rand() * 2 - 1) * jitter * len * 0.45;
+  const waveAmpV = (rand() * 2 - 1) * jitter * len * 0.45;
+  const waveFreqU = 1 + Math.floor(rand() * 3);
+  const waveFreqV = 1 + Math.floor(rand() * 3);
+  const wavePhaseU = rand() * Math.PI * 2;
+  const wavePhaseV = rand() * Math.PI * 2;
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const anchor = Math.sin(t * Math.PI);
+    const w = anchor * lateral;
+    const jitU = (rand() * 2 - 1) * w;
+    const jitV = (rand() * 2 - 1) * w;
+    const waveU =
+      Math.sin(t * Math.PI * waveFreqU + wavePhaseU) * waveAmpU * anchor;
+    const waveV =
+      Math.sin(t * Math.PI * waveFreqV + wavePhaseV) * waveAmpV * anchor;
+    const ru = jitU + waveU;
+    const rv = jitV + waveV;
+    const px = ax + dx * t + ux2 * ru + vx * rv;
+    const py = ay + dy * t + uy2 * ru + vy * rv;
+    const pz = az + dz * t + uz2 * ru + vz * rv;
+    const world = applyCloudTransform([px, py, pz], transform);
+    const idx = i * 3;
+    path[idx] = world[0];
+    path[idx + 1] = world[1];
+    path[idx + 2] = world[2];
+  }
+  return path;
+}
+
+/**
+ * Spawn weaker side branches off interior vertices of a main bolt path.
+ * Each interior vertex forks independently with probability `branchProb`.
+ */
+function sampleBranches(
+  mainPath: Float32Array,
+  branchProb: number,
+  jitter: number,
+): BoltBranch[] {
+  const p = Math.max(0, Math.min(1, branchProb));
+  if (p <= 0) return [];
+  const verts = mainPath.length / 3;
+  if (verts < 3) return [];
+
+  const remainingLenFrom = (startVert: number): number => {
+    let total = 0;
+    for (let i = startVert + 1; i < verts; i++) {
+      const j = i * 3;
+      const dx = mainPath[j] - mainPath[j - 3];
+      const dy = mainPath[j + 1] - mainPath[j - 2];
+      const dz = mainPath[j + 2] - mainPath[j - 1];
+      total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return total;
+  };
+
+  const branches: BoltBranch[] = [];
+  // Skip endpoints so forks sit on "branching segments" of the stroke.
+  for (let vi = 1; vi < verts - 1; vi++) {
+    if (rand() >= p) continue;
+
+    const i3 = vi * 3;
+    const ox = mainPath[i3];
+    const oy = mainPath[i3 + 1];
+    const oz = mainPath[i3 + 2];
+
+    // Local tangent along the main bolt at this vertex.
+    const prev3 = (vi - 1) * 3;
+    const next3 = (vi + 1) * 3;
+    let tx = mainPath[next3] - mainPath[prev3];
+    let ty = mainPath[next3 + 1] - mainPath[prev3 + 1];
+    let tz = mainPath[next3 + 2] - mainPath[prev3 + 2];
+    const tLen = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+    tx /= tLen;
+    ty /= tLen;
+    tz /= tLen;
+
+    // Orthonormal lateral basis perpendicular to the tangent.
+    const helper: [number, number, number] =
+      Math.abs(ty) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    let ux = ty * helper[2] - tz * helper[1];
+    let uy = tz * helper[0] - tx * helper[2];
+    let uz = tx * helper[1] - ty * helper[0];
+    const uLen = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
+    ux /= uLen;
+    uy /= uLen;
+    uz /= uLen;
+    const vx = ty * uz - tz * uy;
+    const vy = tz * ux - tx * uz;
+    const vz = tx * uy - ty * ux;
+
+    // Prefer a mostly lateral direction so the branch peels off the main.
+    const sideU = rand() * 2 - 1;
+    const sideV = rand() * 2 - 1;
+    const sideN = Math.sqrt(sideU * sideU + sideV * sideV) || 1;
+    const latU = sideU / sideN;
+    const latV = sideV / sideN;
+    // Mix a little forward so branches aren't perfectly perpendicular.
+    const forward = 0.25 + rand() * 0.35;
+    let dx = tx * forward + ux * latU * (1 - forward) + vx * latV * (1 - forward);
+    let dy = ty * forward + uy * latU * (1 - forward) + vy * latV * (1 - forward);
+    let dz = tz * forward + uz * latU * (1 - forward) + vz * latV * (1 - forward);
+    const dLen = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+    dx /= dLen;
+    dy /= dLen;
+    dz /= dLen;
+
+    const remain = remainingLenFrom(vi);
+    const branchLen = Math.max(0.05, remain * (0.25 + rand() * 0.2));
+    const segs = 2 + Math.floor(rand() * 3); // 2..4
+    const count = segs + 1;
+    const path = new Float32Array(count * 3);
+    const lateral = jitter * branchLen * 0.4;
+    path[0] = ox;
+    path[1] = oy;
+    path[2] = oz;
+    for (let k = 1; k < count; k++) {
+      const t = k / (count - 1);
+      const anchor = Math.sin(t * Math.PI);
+      const w = anchor * lateral;
+      const jitU = (rand() * 2 - 1) * w;
+      const jitV = (rand() * 2 - 1) * w;
+      path[k * 3] = ox + dx * branchLen * t + ux * jitU + vx * jitV;
+      path[k * 3 + 1] = oy + dy * branchLen * t + uy * jitU + vy * jitV;
+      path[k * 3 + 2] = oz + dz * branchLen * t + uz * jitU + vz * jitV;
+    }
+
+    branches.push({
+      path,
+      strength: 0.45 + rand() * 0.2,
+      forkVertex: vi,
+    });
+  }
+  return branches;
+}
+
+/**
  * Sum of segment lengths of a packed `[x, y, z, x, y, z, ...]` polyline
  * in world units. Returns 0 for a degenerate (0 or 1 vertex) path.
  */
@@ -252,11 +568,6 @@ function pointSegmentDistSq(
 }
 
 /**
- * Flash envelope for a strike. Rises fast to a peak then decays, with a
- * couple of secondary flickers within the window driven by subOffsets.
- * Returns a value in [0, ~1.2] which is clamped by the caller.
- */
-/**
  * Fraction of the bolt polyline that is "lit" at `age` ms into the
  * flash. The tip races from the origin to the destination during the
  * first ~25% of the flash window, then stays fully deployed for the
@@ -268,28 +579,334 @@ export function boltTravelHead(age: number, durationMs: number): number {
   return Math.min(1, age / travelMs);
 }
 
-function envelope(
-  age: number,
-  durationMs: number,
-  subOffsets: number[],
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpPair(
+  a: [number, number],
+  b: [number, number],
+  t: number,
+): [number, number] {
+  const lo = lerp(a[0], b[0], t);
+  const hi = lerp(a[1], b[1], t);
+  return [Math.min(lo, hi), Math.max(lo, hi)];
+}
+
+function cloneAnim(v: LightningAnimParams): LightningAnimParams {
+  return {
+    intensityRange: [v.intensityRange[0], v.intensityRange[1]],
+    strikesPerMinute: v.strikesPerMinute,
+    strikePerMinute: v.strikePerMinute,
+    subFlashes: v.subFlashes,
+    spanScale: v.spanScale,
+    minSpanScale: v.minSpanScale,
+    boltGain: v.boltGain,
+    backgroundGain: v.backgroundGain,
+    thunderDelayMs: v.thunderDelayMs,
+    pan: v.pan,
+    tintMix: typeof v.tintMix === "number" ? v.tintMix : 0.35,
+  };
+}
+
+function lerpAnim(
+  a: LightningAnimParams,
+  b: LightningAnimParams,
+  t: number,
+): LightningAnimParams {
+  const spanScale = lerp(a.spanScale, b.spanScale, t);
+  const minSpanScale = Math.min(
+    spanScale,
+    lerp(a.minSpanScale, b.minSpanScale, t),
+  );
+  const tintA = typeof a.tintMix === "number" ? a.tintMix : 0.35;
+  const tintB = typeof b.tintMix === "number" ? b.tintMix : 0.35;
+  return {
+    intensityRange: lerpPair(a.intensityRange, b.intensityRange, t),
+    strikesPerMinute: lerp(a.strikesPerMinute, b.strikesPerMinute, t),
+    strikePerMinute: lerp(a.strikePerMinute, b.strikePerMinute, t),
+    subFlashes: Math.max(0, Math.min(1, lerp(a.subFlashes, b.subFlashes, t))),
+    spanScale,
+    minSpanScale,
+    boltGain: lerp(a.boltGain, b.boltGain, t),
+    backgroundGain: lerp(a.backgroundGain, b.backgroundGain, t),
+    thunderDelayMs: lerp(a.thunderDelayMs, b.thunderDelayMs, t),
+    pan: lerp(a.pan, b.pan, t),
+    tintMix: Math.max(0, Math.min(1, lerp(tintA, tintB, t))),
+  };
+}
+
+/**
+ * Linearly interpolate animatable lightning snapshots at normalized
+ * active-window progress `u` in [0, 1].
+ */
+export function sampleLightningKeyframe(
+  keyframes: LightningKeyframe[],
+  u: number,
+): LightningAnimParams {
+  if (!keyframes || keyframes.length === 0) {
+    return {
+      intensityRange: [0.9, 1.5],
+      strikesPerMinute: 12,
+      strikePerMinute: 1,
+      subFlashes: 0.4,
+      spanScale: 0.85,
+      minSpanScale: 0.5,
+      boltGain: 0.8,
+      backgroundGain: 0.35,
+      thunderDelayMs: 800,
+      pan: 0,
+      tintMix: 0.35,
+    };
+  }
+  const uu = u < 0 ? 0 : u > 1 ? 1 : u;
+  const sorted = [...keyframes].sort((a, b) => a.t - b.t);
+  if (uu <= sorted[0].t) return cloneAnim(sorted[0].values);
+  const last = sorted[sorted.length - 1];
+  if (uu >= last.t) return cloneAnim(last.values);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (uu < a.t || uu > b.t) continue;
+    const span = b.t - a.t;
+    const t = span <= 1e-9 ? 0 : (uu - a.t) / span;
+    return lerpAnim(a.values, b.values, t);
+  }
+  return cloneAnim(last.values);
+}
+
+export function mapIntensity01(
+  range: [number, number],
+  intensity01: number,
 ): number {
-  if (age < 0 || age > durationMs) return 0;
-  const u = age / durationMs;
-  // Main pulse: fast attack (~10% of window) then exponential decay.
-  const attack = 0.1;
-  const main =
-    u < attack
-      ? u / attack
-      : Math.exp(-4 * (u - attack) / (1 - attack));
-  let sub = 0;
-  for (const off of subOffsets) {
-    const w = 0.12; // width of each sub pulse relative to full window
-    const d = u - off;
-    if (d > -w && d < w) {
-      sub += Math.max(0, 1 - Math.abs(d) / w) * 0.7;
+  const lo = Math.min(range[0], range[1]);
+  const hi = Math.max(range[0], range[1]);
+  const t = intensity01 < 0 ? 0 : intensity01 > 1 ? 1 : intensity01;
+  return lo + (hi - lo) * t;
+}
+
+/**
+ * Scalar channel extractor for the keyframe plot (normalized roughly to
+ * a sensible display range per channel).
+ */
+export type LightningPlotChannel =
+  | "intensity"
+  | "strikesPerMinute"
+  | "strikePerMinute"
+  | "subFlashes"
+  | "span"
+  | "boltGain"
+  | "backgroundGain"
+  | "thunderDelay"
+  | "pan"
+  | "tintMix";
+
+export function samplePlotChannel(
+  keyframes: LightningKeyframe[],
+  u: number,
+  channel: LightningPlotChannel,
+): number {
+  const live = sampleLightningKeyframe(keyframes, u);
+  switch (channel) {
+    case "intensity":
+      return (live.intensityRange[0] + live.intensityRange[1]) * 0.5;
+    case "strikesPerMinute":
+      return live.strikesPerMinute;
+    case "strikePerMinute":
+      return live.strikePerMinute;
+    case "subFlashes":
+      return live.subFlashes;
+    case "span":
+      return (live.minSpanScale + live.spanScale) * 0.5;
+    case "boltGain":
+      return live.boltGain;
+    case "backgroundGain":
+      return live.backgroundGain;
+    case "thunderDelay":
+      return live.thunderDelayMs / 1000;
+    case "pan":
+      // Map −1…+1 → 0…1 for the plot.
+      return (live.pan + 1) * 0.5;
+    case "tintMix":
+      return live.tintMix;
+    default:
+      return 0;
+  }
+}
+
+/** For range channels, returns lo/hi; otherwise null (use scalar sample). */
+export function samplePlotChannelRange(
+  keyframes: LightningKeyframe[],
+  u: number,
+  channel: LightningPlotChannel,
+): { lo: number; hi: number } | null {
+  if (channel !== "intensity" && channel !== "span") return null;
+  const live = sampleLightningKeyframe(keyframes, u);
+  if (channel === "intensity") {
+    const lo = Math.min(live.intensityRange[0], live.intensityRange[1]);
+    const hi = Math.max(live.intensityRange[0], live.intensityRange[1]);
+    return { lo, hi };
+  }
+  const lo = Math.min(live.minSpanScale, live.spanScale);
+  const hi = Math.max(live.minSpanScale, live.spanScale);
+  return { lo, hi };
+}
+
+export function isRangePlotChannel(channel: LightningPlotChannel): boolean {
+  return channel === "intensity" || channel === "span";
+}
+
+/**
+ * Intensity range at storm timeline progress `u` (defaults to peak stop
+ * when `u` omitted — used for opacity normalisation).
+ */
+export function peakIntensityRange(
+  keyframes: LightningKeyframe[],
+  u?: number,
+): [number, number] {
+  if (typeof u === "number") {
+    return sampleLightningKeyframe(keyframes, u).intensityRange;
+  }
+  // Fallback: brightest stop on the curve.
+  if (!keyframes || keyframes.length === 0) return [0.9, 1.5];
+  let best: [number, number] = [
+    keyframes[0].values.intensityRange[0],
+    keyframes[0].values.intensityRange[1],
+  ];
+  let bestMid =
+    (Math.min(best[0], best[1]) + Math.max(best[0], best[1])) * 0.5;
+  for (let i = 1; i < keyframes.length; i++) {
+    const r = keyframes[i].values.intensityRange;
+    const lo = Math.min(r[0], r[1]);
+    const hi = Math.max(r[0], r[1]);
+    const mid = (lo + hi) * 0.5;
+    if (mid > bestMid) {
+      bestMid = mid;
+      best = [lo, hi];
     }
   }
-  return main + sub;
+  return [Math.min(best[0], best[1]), Math.max(best[0], best[1])];
+}
+
+/**
+ * Per-flash brightness shape (independent of storm keyframes): fast
+ * attack then exponential decay over the strike lifetime.
+ */
+function flashBrightness(u: number): number {
+  const uu = u < 0 ? 0 : u > 1 ? 1 : u;
+  const attack = 0.1;
+  return uu < attack
+    ? uu / attack
+    : Math.exp((-4 * (uu - attack)) / (1 - attack));
+}
+
+export function plotChannelMax(channel: LightningPlotChannel): number {
+  switch (channel) {
+    case "intensity":
+      return 3;
+    case "strikesPerMinute":
+    case "strikePerMinute":
+      return 40;
+    case "subFlashes":
+      return 1;
+    case "span":
+      return 1;
+    case "boltGain":
+    case "backgroundGain":
+      return 3;
+    case "thunderDelay":
+      return 2;
+    case "pan":
+      return 1;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Light LEDs near a polyline path. `ageOffsetMs` delays ignition (used so
+ * side branches only start once the main tip reaches their fork).
+ * `strength` scales the RGB write relative to the main bolt.
+ */
+function accumulatePathContribution(
+  positions: Float32Array,
+  n: number,
+  out: Float32Array,
+  path: Float32Array,
+  age: number,
+  durationMs: number,
+  ageOffsetMs: number,
+  segTravel: number,
+  strength: number,
+  cr: number,
+  cg: number,
+  cb: number,
+  invFalloff: number,
+  cutoffSq: number,
+): void {
+  const localAge0 = age - ageOffsetMs;
+  if (localAge0 < 0 || strength <= 0) return;
+  const totalSegs = path.length / 3 - 1;
+  if (totalSegs <= 0) return;
+  const litSegs = Math.min(
+    totalSegs,
+    Math.ceil(localAge0 / Math.max(1e-3, segTravel)),
+  );
+  if (litSegs <= 0) return;
+
+  const segEnv = new Float32Array(litSegs);
+  const attack = 0.06;
+  for (let seg = 0; seg < litSegs; seg++) {
+    const arrival = ageOffsetMs + seg * segTravel;
+    const localAge = age - arrival;
+    const localLife = Math.max(1, durationMs - arrival);
+    const lu = localAge / localLife;
+    if (lu < 0 || lu > 1) {
+      segEnv[seg] = 0;
+      continue;
+    }
+    segEnv[seg] =
+      lu < attack
+        ? lu / attack
+        : Math.exp((-3.5 * (lu - attack)) / (1 - attack));
+  }
+
+  const sr = cr * strength;
+  const sg = cg * strength;
+  const sb = cb * strength;
+
+  for (let i = 0; i < n; i++) {
+    const i3 = i * 3;
+    const px = positions[i3];
+    const py = positions[i3 + 1];
+    const pz = positions[i3 + 2];
+    let acc = 0;
+    for (let seg = 0; seg < litSegs; seg++) {
+      const e = segEnv[seg];
+      if (e <= 1e-3) continue;
+      const a3 = seg * 3;
+      const b3 = a3 + 3;
+      const d2 = pointSegmentDistSq(
+        px,
+        py,
+        pz,
+        path[a3],
+        path[a3 + 1],
+        path[a3 + 2],
+        path[b3],
+        path[b3 + 1],
+        path[b3 + 2],
+      );
+      if (d2 >= cutoffSq) continue;
+      const prox = Math.exp(-Math.sqrt(d2) * invFalloff);
+      acc += e * prox;
+    }
+    if (acc <= 0) continue;
+    const k = acc > 1 ? 1 + Math.log(acc) * 0.35 : acc;
+    out[i3] += sr * k;
+    out[i3 + 1] += sg * k;
+    out[i3 + 2] += sb * k;
+  }
 }
 
 /**
@@ -299,6 +916,10 @@ function envelope(
 export class LightningController {
   private strikes: BoltStrike[] = [];
   private lastUpdateMs = 0;
+  /** Fractional expected cloud-flash accumulator. */
+  private spawnAcc = 0;
+  /** Fractional expected cloud-to-ground strike accumulator. */
+  private spawnAccStrike = 0;
 
   getStrikes(): BoltStrike[] {
     return this.strikes;
@@ -309,11 +930,26 @@ export class LightningController {
     return this.lastUpdateMs;
   }
 
+  /**
+   * Keep the spawn clock current without accruing strikes — call when
+   * lightning is enabled but outside its active hour window (or when
+   * the simulator is paused) so re-entry doesn't catch up a backlog.
+   */
+  pauseClock(nowMs: number): void {
+    this.lastUpdateMs = nowMs;
+    this.spawnAcc = 0;
+    this.spawnAccStrike = 0;
+  }
+
   update(
     nowMs: number,
     params: LightningParams,
     ellipsoid: EllipsoidParams,
     transform: CloudTransform,
+    /** Progress through the active window, [0, 1]. */
+    keyframeU: number,
+    /** Breath participants — enabled slots drive tint track choice. */
+    participants: BreathParticipant[] = [],
   ): void {
     // Prune expired strikes.
     if (this.strikes.length > 0) {
@@ -323,64 +959,151 @@ export class LightningController {
     }
 
     if (this.lastUpdateMs === 0) this.lastUpdateMs = nowMs;
-    // Cap the effective dt so backgrounded tabs / routes without the
-    // simulator mounted don't accumulate a huge Poisson budget that
-    // discharges as a strike burst the moment updates resume. 250 ms
-    // is well over a typical frame but far under any realistic
-    // between-strike interval, so normal spawning is unaffected.
-    const dtMs = Math.min(250, Math.max(0, nowMs - this.lastUpdateMs));
+    const dtMs = Math.max(0, nowMs - this.lastUpdateMs);
     this.lastUpdateMs = nowMs;
 
-    if (!params.enabled) return;
-
-    const rate = Math.max(0, params.strikesPerMinute) / 60000;
-    const expected = rate * dtMs;
-    // Cheap approximation: probability per frame ~ expected (small values).
-    // For higher rates we may spawn multiple per frame.
-    let toSpawn = 0;
-    let remaining = expected;
-    while (remaining > 1) {
-      toSpawn += 1;
-      remaining -= 1;
+    if (!params.enabled) {
+      this.spawnAcc = 0;
+      this.spawnAccStrike = 0;
+      return;
     }
-    if (rand() < remaining) toSpawn += 1;
 
-    for (let i = 0; i < toSpawn; i++) {
-      // Per-strike parameter sampling: each strike freezes a random
-      // draw from every configured range so the strike keeps stable
-      // values through its whole flash envelope.
-      const jitter = Math.max(0, sampleRange(params.boltJitterRange));
-      const intensity = Math.max(0, sampleRange(params.intensityRange));
-      const path = sampleBoltPath(
+    // Storm keyframes track the sky timeline within the active window
+    // (which value of SPM to use). Accrual itself is always real
+    // wall-clock time via performance.now() — not sky/sim minutes.
+    const live = sampleLightningKeyframe(params.keyframes, keyframeU);
+    const cloudSpm = Number.isFinite(live.strikesPerMinute)
+      ? Math.max(0, Math.min(40, live.strikesPerMinute))
+      : Math.max(0, Math.min(40, Number(params.strikesPerMinute) || 0));
+    const groundSpm = Number.isFinite(live.strikePerMinute)
+      ? Math.max(0, Math.min(40, live.strikePerMinute))
+      : Math.max(0, Math.min(40, Number(params.strikePerMinute) || 0));
+
+    const spawnCount = (acc: number, spm: number): { next: number; n: number } => {
+      const ratePerMs = spm / 60_000;
+      let next = Math.min(8, acc + ratePerMs * dtMs);
+      let n = 0;
+      while (next >= 1) {
+        n += 1;
+        next -= 1;
+      }
+      return { next, n };
+    };
+
+    const cloud = spawnCount(this.spawnAcc, cloudSpm);
+    this.spawnAcc = cloud.next;
+    const ground = spawnCount(this.spawnAccStrike, groundSpm);
+    this.spawnAccStrike = ground.next;
+
+    const tintIndices = enabledLightningTintIndices(participants);
+    const segs = Math.max(2, Math.floor(params.boltSegments));
+    for (let i = 0; i < cloud.n; i++) {
+      this.pushStrike(
+        nowMs,
+        params,
+        live,
         ellipsoid,
         transform,
-        Math.max(2, Math.floor(params.boltSegments)),
-        jitter,
-        Math.max(0.05, Math.min(1, params.spanScale)),
-        Math.max(0, Math.min(2, params.minSpanScale ?? 0)),
+        segs,
+        "cloud",
+        participants,
+        tintIndices,
+        keyframeU,
       );
-      // Flash duration is derived from the actual polyline length and a
-      // per-strike sampled travel speed. Longer bolts and slower speeds
-      // → longer flashes. The `* 4` keeps the existing 25% travel /
-      // 75% fade envelope split intact.
-      const speed = Math.max(0.05, sampleRange(params.travelSpeedRange));
-      const pathLen = polylineLength(path);
-      const travelMsRaw = (pathLen / speed) * 1000;
-      const duration = Math.max(30, travelMsRaw * 4);
-      const subs: number[] = [];
-      const subCount = Math.max(0, Math.floor(params.subFlashes));
-      for (let k = 0; k < subCount; k++) {
-        subs.push(0.15 + rand() * 0.7);
-      }
-      this.strikes.push({
-        bornMs: nowMs,
-        durationMs: duration,
-        path,
-        colorStops: shuffledColorStops(params.colors),
-        subOffsets: subs,
-        intensity,
-      });
     }
+    for (let i = 0; i < ground.n; i++) {
+      this.pushStrike(
+        nowMs,
+        params,
+        live,
+        ellipsoid,
+        transform,
+        segs,
+        "strike",
+        participants,
+        tintIndices,
+        keyframeU,
+      );
+    }
+  }
+
+  private pushStrike(
+    nowMs: number,
+    params: LightningParams,
+    live: LightningAnimParams,
+    ellipsoid: EllipsoidParams,
+    transform: CloudTransform,
+    segs: number,
+    kind: BoltKind,
+    participants: BreathParticipant[],
+    tintIndices: number[],
+    keyframeU: number,
+  ): void {
+    const jitter = Math.max(0, sampleRange(params.boltJitterRange));
+    const intensity01 = rand();
+    // Ground strikes hit harder: boost the sampled intensity range.
+    const force = kind === "strike" ? 1.85 : 1;
+    const intensityRange: [number, number] = [
+      live.intensityRange[0] * force,
+      live.intensityRange[1] * force,
+    ];
+    const intensity = Math.max(0, mapIntensity01(intensityRange, intensity01));
+    const spanHi = Math.max(0.05, Math.min(1, live.spanScale));
+    const spanLo = Math.max(0, Math.min(spanHi, live.minSpanScale));
+    const path =
+      kind === "strike"
+        ? sampleGroundStrikePath(ellipsoid, transform, segs + 4, jitter)
+        : sampleBoltPath(ellipsoid, transform, segs, jitter, spanHi, spanLo);
+    // Flash duration is derived from the actual polyline length and a
+    // per-strike sampled travel speed. Longer bolts and slower speeds
+    // → longer flashes. The `* 4` keeps the existing 25% travel /
+    // 75% fade envelope split intact.
+    // Ground strikes travel faster (more "force") but are much longer,
+    // so the flash still reads as a powerful event.
+    const speedBase = Math.max(0.05, sampleRange(params.travelSpeedRange));
+    const speed = kind === "strike" ? speedBase * 2.2 : speedBase;
+    const pathLen = polylineLength(path);
+    const travelMsRaw = (pathLen / speed) * 1000;
+    const duration = Math.max(30, travelMsRaw * 4);
+    const branchProb = Math.max(0, Math.min(1, live.subFlashes));
+    // Ground strikes branch a bit less often — force is in the trunk + flood.
+    const branches = sampleBranches(
+      path,
+      kind === "strike" ? branchProb * 0.55 : branchProb,
+      jitter,
+    );
+    const boltGain =
+      Math.max(0, live.boltGain) * (kind === "strike" ? 1.6 : 1);
+    const base = sampleLightningColorTracks(params.colors, keyframeU);
+    const paletteIndex =
+      tintIndices.length > 0
+        ? tintIndices[Math.floor(rand() * tintIndices.length)]
+        : -1;
+    const tintMix =
+      paletteIndex >= 0
+        ? Math.max(0, Math.min(1, live.tintMix))
+        : 0;
+    const tintHex =
+      paletteIndex >= 0
+        ? (participants[paletteIndex]?.color ?? base[0])
+        : base[0];
+    const palette = applyLightningTint(base, tintHex, tintMix);
+    this.strikes.push({
+      bornMs: nowMs,
+      durationMs: duration,
+      kind,
+      path,
+      branches,
+      colorStops: paletteColorStops(palette),
+      paletteTint: paletteTintRgb(palette),
+      paletteIndex,
+      intensity01,
+      intensityRange,
+      intensity,
+      boltGain,
+      thunderDelayMs: Math.max(0, Math.min(2000, live.thunderDelayMs)),
+      pan: Math.max(-1, Math.min(1, live.pan)),
+    });
   }
 
   /**
@@ -397,16 +1120,6 @@ export class LightningController {
     out.fill(0);
     if (!params.enabled || this.strikes.length === 0) return;
 
-    // Continuous exponential falloff: contribution to an LED at distance
-    // `d` from a lit segment is `exp(-d / falloff)`. Every LED gets a
-    // little bit of light (matches how it diffuses through the cloud)
-    // rather than a hard radius cutoff. We still skip contributions
-    // below ~1/255 so the inner loop stays bounded.
-    const falloff = Math.max(0.02, params.falloffDistance);
-    const invFalloff = 1 / falloff;
-    const cutoff = 5.5 * falloff;
-    const cutoffSq = cutoff * cutoff;
-
     for (const s of this.strikes) {
       const age = nowMs - s.bornMs;
       if (age < 0 || age > s.durationMs) continue;
@@ -414,82 +1127,89 @@ export class LightningController {
       const totalSegs = path.length / 3 - 1;
       if (totalSegs <= 0) continue;
 
+      const u = age / s.durationMs;
+      // Ground strikes use a much larger falloff so the bolt itself
+      // washes through the volume; cloud flashes keep the tight control.
+      const baseFall = Math.max(1e-4, Math.min(0.2, params.falloffDistance));
+      const falloff = s.kind === "strike" ? Math.max(baseFall, 0.55) : baseFall;
+      const invFalloff = 1 / falloff;
+      const cutoff = 5.5 * falloff;
+      const cutoffSq = cutoff * cutoff;
+
       // Progressive travel: the tip races along the polyline during the
       // first ~25% of the flash. Each segment "ignites" as the tip enters
-      // it and then fades independently until the strike expires. This
-      // gives the visual of a spark travelling with a fading trail.
+      // it and then fades independently until the strike expires.
       const travelMs = Math.max(30, s.durationMs * 0.25);
       const segTravel = travelMs / totalSegs;
 
-      // Sub-flashes act as a global brightness pulse on the whole
-      // currently-lit channel (all lit segments brighten together).
-      let subBump = 0;
-      const u = age / s.durationMs;
-      for (const off of s.subOffsets) {
-        const w = 0.12;
-        const d = u - off;
-        if (d > -w && d < w) {
-          subBump += Math.max(0, 1 - Math.abs(d) / w) * 0.7;
-        }
-      }
-      const brightness = 1 + subBump;
-      const strikeGain = Math.max(0, s.intensity) * brightness;
+      const peak =
+        mapIntensity01(s.intensityRange, s.intensity01) * flashBrightness(u);
+      const strikeGain = Math.max(0, peak);
       const rampColor = sampleColorRamp(s.colorStops, u);
-      const cr0 = rampColor[0] * strikeGain;
-      const cg0 = rampColor[1] * strikeGain;
-      const cb0 = rampColor[2] * strikeGain;
+      const tint = s.paletteTint;
+      const cr0 = rampColor[0] * 0.55 + tint[0] * 0.45;
+      const cg0 = rampColor[1] * 0.55 + tint[1] * 0.45;
+      const cb0 = rampColor[2] * 0.55 + tint[2] * 0.45;
+      const cr = cr0 * strikeGain;
+      const cg = cg0 * strikeGain;
+      const cb = cb0 * strikeGain;
 
-      // Precompute per-segment envelope so the inner LED loop only does
-      // distance + multiply-add work.
-      const litSegs =
-        Math.min(totalSegs, Math.ceil(age / Math.max(1e-3, segTravel)));
-      if (litSegs <= 0) continue;
-      const segEnv = new Float32Array(litSegs);
-      const attack = 0.06;
-      for (let seg = 0; seg < litSegs; seg++) {
-        const arrival = seg * segTravel; // tip enters this segment
-        const localAge = age - arrival;
-        const localLife = Math.max(1, s.durationMs - arrival);
-        const lu = localAge / localLife;
-        if (lu < 0 || lu > 1) {
-          segEnv[seg] = 0;
-          continue;
+      // Whole-cloud flood for ground strikes — every LED gets a hard wash
+      // scaled by the envelope so the cloud ignites with the bolt.
+      if (s.kind === "strike") {
+        const flood = Math.max(0, peak) * 0.95;
+        if (flood > 1e-4) {
+          const fr = cr0 * flood;
+          const fg = cg0 * flood;
+          const fb = cb0 * flood;
+          for (let i = 0; i < n; i++) {
+            const i3 = i * 3;
+            out[i3] += fr;
+            out[i3 + 1] += fg;
+            out[i3 + 2] += fb;
+          }
         }
-        segEnv[seg] =
-          lu < attack
-            ? lu / attack
-            : Math.exp(-3.5 * (lu - attack) / (1 - attack));
       }
 
-      for (let i = 0; i < n; i++) {
-        const i3 = i * 3;
-        const px = positions[i3];
-        const py = positions[i3 + 1];
-        const pz = positions[i3 + 2];
-        // Accumulate contributions from every lit segment so overlapping
-        // segments (bends, jitter loops) produce a bright, continuous
-        // channel rather than intermittent gaps.
-        let acc = 0;
-        for (let seg = 0; seg < litSegs; seg++) {
-          const e = segEnv[seg];
-          if (e <= 1e-3) continue;
-          const a3 = seg * 3;
-          const b3 = a3 + 3;
-          const d2 = pointSegmentDistSq(
-            px, py, pz,
-            path[a3], path[a3 + 1], path[a3 + 2],
-            path[b3], path[b3 + 1], path[b3 + 2],
-          );
-          if (d2 >= cutoffSq) continue;
-          const prox = Math.exp(-Math.sqrt(d2) * invFalloff);
-          acc += e * prox;
-        }
-        if (acc <= 0) continue;
-        // Soft clamp so heavy overlap doesn't blow past ~1 core intensity.
-        const k = acc > 1 ? 1 + Math.log(acc) * 0.35 : acc;
-        out[i3] += cr0 * k;
-        out[i3 + 1] += cg0 * k;
-        out[i3 + 2] += cb0 * k;
+      accumulatePathContribution(
+        positions,
+        n,
+        out,
+        path,
+        age,
+        s.durationMs,
+        0,
+        segTravel,
+        s.kind === "strike" ? 1.35 : 1,
+        cr,
+        cg,
+        cb,
+        invFalloff,
+        cutoffSq,
+      );
+
+      for (const branch of s.branches) {
+        const forkDelay = branch.forkVertex * segTravel;
+        if (age < forkDelay) continue;
+        const branchSegs = branch.path.length / 3 - 1;
+        if (branchSegs <= 0) continue;
+        const branchSegTravel = segTravel;
+        accumulatePathContribution(
+          positions,
+          n,
+          out,
+          branch.path,
+          age,
+          s.durationMs,
+          forkDelay,
+          branchSegTravel,
+          branch.strength,
+          cr,
+          cg,
+          cb,
+          invFalloff,
+          cutoffSq,
+        );
       }
     }
   }
@@ -498,19 +1218,35 @@ export class LightningController {
    * Envelope value at `nowMs` for a given strike, used for 3D visualisation
    * opacity so the drawn bolt fades along the same curve as the LEDs.
    */
-  strikeEnvelope(strike: BoltStrike, nowMs: number): number {
+  strikeEnvelope(
+    strike: BoltStrike,
+    nowMs: number,
+  ): number {
     const age = nowMs - strike.bornMs;
-    return envelope(age, strike.durationMs, strike.subOffsets);
+    if (age < 0 || age > strike.durationMs || strike.durationMs <= 0) return 0;
+    const u = age / strike.durationMs;
+    const peak =
+      mapIntensity01(strike.intensityRange, strike.intensity01) *
+      flashBrightness(u);
+    return Math.max(0, peak);
   }
 
   /**
-   * Effective 3-stop-interpolated color for a strike at `nowMs`, matched
-   * to the color used by `contribute` at the same instant.
+   * Effective color for a strike at `nowMs`, matched to contribute.
    */
-  strikeColor(strike: BoltStrike, nowMs: number): [number, number, number] {
+  strikeColor(
+    strike: BoltStrike,
+    nowMs: number,
+  ): [number, number, number] {
     const age = nowMs - strike.bornMs;
     const u = strike.durationMs > 0 ? age / strike.durationMs : 0;
-    return sampleColorRamp(strike.colorStops, u);
+    const rampColor = sampleColorRamp(strike.colorStops, u);
+    const tint = strike.paletteTint;
+    return [
+      rampColor[0] * 0.55 + tint[0] * 0.45,
+      rampColor[1] * 0.55 + tint[1] * 0.45,
+      rampColor[2] * 0.55 + tint[2] * 0.45,
+    ];
   }
 }
 

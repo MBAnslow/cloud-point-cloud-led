@@ -25,10 +25,12 @@ import {
 import {
   breathFilterGate,
   buildCooldownRates,
+  sampleBreathFilterThreshold,
   updateBreathFilterMemory,
 } from "../lighting/breathFilter";
 import {
   breathSampleAt,
+  cloudCenterWorld,
   liveWaveExtents,
   sharedBreathWaveController,
 } from "../lighting/breathWaves";
@@ -38,7 +40,7 @@ import {
   shadeLeds,
   type ShadeLight,
 } from "../lighting/shade";
-import { hourInRange, useSimStore } from "../state";
+import { activeWindowProgress, hourInRange, isBreathActive, useSimStore } from "../state";
 import { computeSkyLighting } from "../lighting/skyCycle";
 import { sharedLightningController } from "../lighting/lightning";
 import { WledStreamClient } from "../wled/client";
@@ -415,8 +417,12 @@ export function Leds() {
 
     // Travelling waves use wall clock (decoupled from breath pause/scrub).
     // Internal oscillator phase still uses the shared breath clock.
+    // Outside the breath active window, treat as disabled (no new waves /
+    // mask) — same pattern as lightning's active hour gate.
     const wallNow = performance.now();
     const nowBreath = tickBreathClock(wallNow, breath.paused);
+    const breathLive = isBreathActive(breath, sky.timeHours);
+    const breathForWaves = breathLive ? breath : { ...breath, enabled: false };
     const cloudXformBreath = {
       tiltRad: cloudTiltRad,
       yawRad: cloudYawRad,
@@ -426,7 +432,7 @@ export function Leds() {
     };
     sharedBreathWaveController.update(
       wallNow,
-      breath,
+      breathForWaves,
       cloudXformBreath,
       nowBreath,
     );
@@ -443,14 +449,14 @@ export function Leds() {
     }
 
     const useBreathMask =
-      breath.enabled &&
+      breathLive &&
       (ledViewMode === "breathIntensity" ||
         (ledStreamPipeline.breathStage && ledViewMode === "breathPlusTimeOfDay"));
 
     // Also sample when the persistent filter needs live mask input even if
     // the current view isn't showing breath (e.g. time-of-day only).
     const sampleBreathForFilter =
-      breath.enabled && breathFilter.enabled && !useBreathMask;
+      breathLive && breathFilter.enabled && !useBreathMask;
 
     if (useBreathMask || sampleBreathForFilter) {
       const falloffExp = Math.max(0, breath.falloffExponent);
@@ -461,6 +467,7 @@ export function Leds() {
         contrast: breath.noiseContrast,
         edgeNoise: breath.edgeNoise,
       };
+      const fogCenter = cloudCenterWorld(cloudXformBreath);
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const sample = breathSampleAt(
@@ -476,6 +483,7 @@ export function Leds() {
           useBreathMask ? breath.rimThickness : 0,
           useBreathMask ? breath.rimArcDegrees : 0,
           fog,
+          fogCenter,
         );
         buffers.breathColorFloats[i3] = sample.mask;
         buffers.breathColorFloats[i3 + 1] = sample.mask;
@@ -514,6 +522,19 @@ export function Leds() {
         breathCooldownKeyRef.current = coolKey;
       }
     }
+    // Threshold rides the breath active-window timeline (same u axis as
+    // breath Start→End). Sample once per frame for memory + compositing.
+    const filterU = activeWindowProgress(
+      sky.timeHours,
+      breath.activeStartHour,
+      breath.activeEndHour,
+    );
+    const liveFilterThreshold = sampleBreathFilterThreshold(
+      breathFilter.keyframes,
+      filterU,
+      breathFilter.threshold,
+    );
+
     if (breathFilter.enabled) {
       const nowMs = performance.now();
       const prevMs = breathFilterClockRef.current.lastMs;
@@ -526,13 +547,13 @@ export function Leds() {
           buffers.breathColorFloats,
           buffers.breathCooldownRates,
           buffers.n,
-          breathFilter.threshold,
+          liveFilterThreshold,
           breathFilter.decayMaxSeconds,
           dtSec,
         );
       } else {
         // Still enforce the floor when breath isn't sampling this frame.
-        const floor = clamp01(breathFilter.threshold);
+        const floor = clamp01(liveFilterThreshold);
         for (let i = 0; i < buffers.n; i++) {
           const v = buffers.breathFilterMemory[i];
           buffers.breathFilterMemory[i] =
@@ -541,66 +562,85 @@ export function Leds() {
       }
     }
 
-    // Lightning: additive contribution independent of view mode. Runs only
-    // when both the effect and the stream pipeline stage are enabled, and
-    // only in views where time-of-day is visible (so Breath view stays a
-    // pure visualization pass).
-    const useLightning =
+    // Strike scheduler runs whenever lightning is enabled and in its
+    // active hour window — independent of view mode / pipeline stage —
+    // so Strikes/min and the 3D bolt viz keep working even when LEDs
+    // aren't taking the lightning contribution this frame.
+    const lightningActive =
       lightning.enabled &&
+      hourInRange(
+        sky.timeHours,
+        lightning.activeStartHour,
+        lightning.activeEndHour,
+      );
+    const useLightning =
+      lightningActive &&
       ledStreamPipeline.lightningStage &&
-      ledViewMode !== "breathIntensity" &&
-      hourInRange(sky.timeHours, lightning.activeStartHour, lightning.activeEndHour);
-    if (useLightning) {
+      ledViewMode !== "breathIntensity";
+
+    if (lightningActive) {
+      // Strike spawn rate is always real wall-clock time (strikes per
+      // real minute), independent of sky play speed and of simFps.
+      // simFps only throttles the LED contribution / strobe look.
       const now = performance.now();
-      // Target sim FPS gates the strike scheduler + LED contribution.
-      // Lower FPS → the bolt state (and therefore illumination) only
-      // refreshes every 1000/fps ms, producing a stroboscopic look
-      // even though the renderer keeps drawing at full rate.
+      const meshTiltRad = (meshTarget.tiltDeg * Math.PI) / 180;
+      const meshYawRad = (meshTarget.yawDeg * Math.PI) / 180;
+      const cloudXform = {
+        tiltRad: cloudTiltRad + meshTiltRad,
+        yawRad: cloudYawRad + meshYawRad,
+        offsetX: cloud.offsetX,
+        offsetY: cloud.offsetY + meshTarget.offsetY,
+        offsetZ: cloud.offsetZ,
+      };
+      const half = meshHalfExtentsRef.current;
+      const boltEllipsoid = half
+        ? {
+            rx: Math.max(1e-3, half.hx * meshTarget.scale * 0.9),
+            ry: Math.max(1e-3, half.hy * meshTarget.scale * 0.9),
+            rz: Math.max(1e-3, half.hz * meshTarget.scale * 0.9),
+          }
+        : ellipsoid;
+      const keyframeU = activeWindowProgress(
+        sky.timeHours,
+        lightning.activeStartHour,
+        lightning.activeEndHour,
+      );
+      lightningCtrl.update(
+        now,
+        lightning,
+        boltEllipsoid,
+        cloudXform,
+        keyframeU,
+        breath.participants,
+      );
+
       const fps = Math.max(1, Math.min(60, Math.round(lightning.simFps || 60)));
       const frameMs = 1000 / fps;
       const lastRender = lightningRenderRef.current;
       if (now - lastRender >= frameMs) {
         lightningRenderRef.current = now;
-        // Compose the mesh's own yaw/tilt/offsetY into the cloud
-        // transform so bolts follow the visible mesh, not just the
-        // cloud-level rotation. Three.js Euler order is XYZ (see
-        // `Ellipsoid.tsx`) so tilts and yaws add directly here.
-        const meshTiltRad = (meshTarget.tiltDeg * Math.PI) / 180;
-        const meshYawRad = (meshTarget.yawDeg * Math.PI) / 180;
-        const cloudXform = {
-          tiltRad: cloudTiltRad + meshTiltRad,
-          yawRad: cloudYawRad + meshYawRad,
-          offsetX: cloud.offsetX,
-          offsetY: cloud.offsetY + meshTarget.offsetY,
-          offsetZ: cloud.offsetZ,
-        };
-        // Derive the bolt spawn volume from the loaded mesh's bounding
-        // box scaled by `meshTarget.scale`. Falls back to the legacy
-        // ellipsoid params only when no mesh is loaded. The 0.9 factor
-        // keeps endpoints comfortably inside the surface so lateral
-        // jitter doesn't push midpoints outside the mesh.
-        const half = meshHalfExtentsRef.current;
-        const boltEllipsoid = half
-          ? {
-              rx: Math.max(1e-3, half.hx * meshTarget.scale * 0.9),
-              ry: Math.max(1e-3, half.hy * meshTarget.scale * 0.9),
-              rz: Math.max(1e-3, half.hz * meshTarget.scale * 0.9),
-            }
-          : ellipsoid;
-        lightningCtrl.update(now, lightning, boltEllipsoid, cloudXform);
-        lightningCtrl.contribute(
-          buffers.positions,
-          buffers.n,
-          buffers.lightningColorFloats,
-          now,
-          lightning,
-        );
+        if (useLightning) {
+          lightningCtrl.contribute(
+            buffers.positions,
+            buffers.n,
+            buffers.lightningColorFloats,
+            now,
+            lightning,
+          );
+        } else {
+          buffers.lightningColorFloats.fill(0);
+        }
       }
       // Between refreshes, keep the previous lightningColorFloats so the
       // last-rendered frame stays visible until the next sim tick.
+      if (!useLightning) {
+        buffers.lightningColorFloats.fill(0);
+      }
     } else {
       buffers.lightningColorFloats.fill(0);
       lightningRenderRef.current = 0;
+      // Don't accrue a strike backlog while disabled / outside hours.
+      lightningCtrl.pauseClock(performance.now());
     }
 
     const rimAmount = clamp01(breath.rimAmount);
@@ -610,7 +650,7 @@ export function Leds() {
       // When the breath filter is on, show filter *memory* (not the live
       // wave mask) so per-LED decay variation is visible in this view.
       const showMemory = breathFilter.enabled;
-      const thresh = clamp01(breathFilter.threshold);
+      const thresh = clamp01(liveFilterThreshold);
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const v = showMemory
@@ -643,7 +683,7 @@ export function Leds() {
     } else {
       const mix = ledStreamPipeline.breathStage ? clamp01(breath.breathVsTimeMix) : 0;
       const useMemFilter = breathFilter.enabled;
-      const thresh = clamp01(breathFilter.threshold);
+      const thresh = clamp01(liveFilterThreshold);
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const tr = buffers.timeColorFloats[i3];

@@ -16,7 +16,7 @@ const HANDLE_WIDTH = 8;
  * inside whichever period is active; the user manually advances with
  * the Prev / Next buttons or by clicking on a segment. Drag the shared
  * edges between periods to move boundaries. Wrap-around periods (like
- * Night 20 → 5) render as two coupled segments.
+ * Night 20 → 0) render as two coupled segments.
  */
 export function DayCyclePanel() {
   const dayCycle = useSimStore((s) => s.dayCycle);
@@ -325,7 +325,7 @@ const panelStyle: React.CSSProperties = {
   position: "fixed",
   top: 56,
   left: 12,
-  right: 300,
+  right: 12,
   zIndex: 15,
   background: "rgba(10, 12, 20, 0.82)",
   backdropFilter: "blur(8px)",

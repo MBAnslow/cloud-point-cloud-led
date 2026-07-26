@@ -197,7 +197,7 @@ export function SkyTimeline() {
         position: "fixed",
         top: 56,
         left: 12,
-        right: 340,
+        right: 12,
         zIndex: 10,
         pointerEvents: "auto",
         background: "rgba(10, 12, 20, 0.72)",
@@ -279,6 +279,7 @@ export function SkyTimeline() {
       <SkyArc nowHour={nowHour} onScrub={setNow} />
 
       <LightningWindowStrip />
+      <BreathWindowStrip />
 
       {/* Three independent channel tracks */}
       <div style={{ marginTop: 2 }}>
@@ -1073,6 +1074,140 @@ function activeBandStyle(leftPct: number, widthPct: number): React.CSSProperties
     borderBottom: "1px dashed rgba(250,204,21,0.35)",
     pointerEvents: "none",
   };
+}
+
+/**
+ * Thin 24h strip for the breath active window (cyan). Drag the markers
+ * to reshape. End = 24 means through end of day (full-day with start = 0).
+ */
+function BreathWindowStrip() {
+  const breath = useSimStore((s) => s.breath);
+  const setBreath = useSimStore((s) => s.setBreath);
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<"start" | "end" | null>(null);
+  const start = Math.max(0, Math.min(24, breath.activeStartHour));
+  const end = Math.max(0, Math.min(24, breath.activeEndHour));
+
+  const clientToHour = (clientX: number): number => {
+    const el = stripRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const x = Math.min(Math.max(0, clientX - rect.left), rect.width);
+    return (x / Math.max(1, rect.width)) * HOURS;
+  };
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!dragRef.current) return;
+      const h = Math.max(0, Math.min(24, clientToHour(e.clientX)));
+      if (dragRef.current === "start") setBreath({ activeStartHour: h });
+      else setBreath({ activeEndHour: h });
+    };
+    const onUp = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [setBreath]);
+
+  const startPct = (start / HOURS) * 100;
+  const endPct = (end / HOURS) * 100;
+  const wraps = end < start;
+  return (
+    <div style={{ marginTop: 4, marginBottom: 2 }}>
+      <div
+        ref={stripRef}
+        style={{
+          position: "relative",
+          height: 18,
+          background: "rgba(0,0,0,0.30)",
+          borderRadius: 4,
+          border: "1px solid rgba(255,255,255,0.08)",
+        }}
+        title="Breath active window (drag markers to reshape)"
+      >
+        {!wraps ? (
+          <div style={breathBandStyle(startPct, endPct - startPct)} />
+        ) : (
+          <>
+            <div style={breathBandStyle(startPct, 100 - startPct)} />
+            <div style={breathBandStyle(0, endPct)} />
+          </>
+        )}
+        <BreathMarker
+          leftPct={startPct}
+          filled
+          onPointerDown={(e) => {
+            dragRef.current = "start";
+            e.preventDefault();
+          }}
+          title={`Breath on @ ${fmtTime(start)}`}
+        />
+        <BreathMarker
+          leftPct={endPct}
+          filled={false}
+          onPointerDown={(e) => {
+            dragRef.current = "end";
+            e.preventDefault();
+          }}
+          title={`Breath off @ ${end >= 24 ? "24:00" : fmtTime(end)}`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function breathBandStyle(leftPct: number, widthPct: number): React.CSSProperties {
+  return {
+    position: "absolute",
+    left: `${leftPct}%`,
+    width: `${widthPct}%`,
+    top: 0,
+    bottom: 0,
+    background: "rgba(119,213,255,0.16)",
+    borderTop: "1px dashed rgba(119,213,255,0.4)",
+    borderBottom: "1px dashed rgba(119,213,255,0.4)",
+    pointerEvents: "none",
+  };
+}
+
+function BreathMarker({
+  leftPct,
+  filled,
+  onPointerDown,
+  title,
+}: {
+  leftPct: number;
+  filled: boolean;
+  onPointerDown: (e: React.PointerEvent) => void;
+  title: string;
+}) {
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      title={title}
+      style={{
+        position: "absolute",
+        left: `calc(${leftPct}% - 7px)`,
+        top: 2,
+        width: 14,
+        height: 14,
+        cursor: "ew-resize",
+        touchAction: "none",
+        zIndex: 2,
+        borderRadius: 14,
+        background: filled ? "rgba(119,213,255,0.95)" : "transparent",
+        border: filled
+          ? "1.5px solid rgba(20,60,90,0.85)"
+          : "1.5px solid rgba(119,213,255,0.95)",
+        boxSizing: "border-box",
+      }}
+    />
+  );
 }
 
 function BoltMarker({

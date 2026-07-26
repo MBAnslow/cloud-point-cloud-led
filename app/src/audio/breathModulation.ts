@@ -4,6 +4,7 @@ import type {
   SamplesParams,
   SimState,
 } from "../state";
+import { isBreathActive } from "../state";
 import { sampleParticipantBreath, tickBreathClock } from "../lighting/breath";
 
 interface ParamRange {
@@ -54,7 +55,12 @@ function apply(base: number, r: ParamRange, amount: number, intensity: number): 
  * participants (matches the LED mask's max combination).
  */
 export function currentBreathDrive(state: SimState, nowMs: number): number {
-  if (!state.breathModEnabled || !state.breath.enabled) return 0;
+  if (
+    !state.breathModEnabled ||
+    !isBreathActive(state.breath, state.sky.timeHours)
+  ) {
+    return 0;
+  }
   const t = tickBreathClock(nowMs, state.breath.paused);
   let best = 0;
   for (const p of state.breath.participants) {

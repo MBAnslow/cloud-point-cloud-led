@@ -5,7 +5,7 @@
  * (noise=1 → instant clear, noise=0 → full decay max).
  */
 
-import type { BreathFilterParams } from "../state";
+import type { BreathFilterKeyframe, BreathFilterParams } from "../state";
 import { fBm3, valueNoise3 } from "./noise3d";
 
 function clamp01(v: number): number {
@@ -156,4 +156,30 @@ export function breathFilterGate(
   threshold: number,
 ): number {
   return Math.max(clamp01(threshold), clamp01(memory));
+}
+
+/**
+ * Linearly interpolate the breath-filter threshold envelope at
+ * normalized breath-window progress `u` in [0, 1].
+ */
+export function sampleBreathFilterThreshold(
+  keyframes: BreathFilterKeyframe[],
+  u: number,
+  fallback = 0,
+): number {
+  if (!keyframes || keyframes.length === 0) return clamp01(fallback);
+  const uu = u < 0 ? 0 : u > 1 ? 1 : u;
+  const sorted = [...keyframes].sort((a, b) => a.t - b.t);
+  if (uu <= sorted[0].t) return clamp01(sorted[0].threshold);
+  const last = sorted[sorted.length - 1];
+  if (uu >= last.t) return clamp01(last.threshold);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (uu < a.t || uu > b.t) continue;
+    const span = b.t - a.t;
+    const t = span <= 1e-9 ? 0 : (uu - a.t) / span;
+    return clamp01(a.threshold + (b.threshold - a.threshold) * t);
+  }
+  return clamp01(last.threshold);
 }

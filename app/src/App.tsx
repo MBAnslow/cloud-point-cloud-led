@@ -1,8 +1,6 @@
 import { Canvas } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import { Link } from "react-router-dom";
-import { Leva } from "leva";
-import { ControlPanel } from "./controls/Panel";
 import { Histogram } from "./components/Histogram";
 import { StreamMatrix } from "./components/StreamMatrix";
 import { BreathOscillator } from "./components/BreathOscillator";
@@ -11,6 +9,9 @@ import { DayCyclePanel } from "./components/DayCyclePanel";
 import { LedViewModePanel } from "./components/LedViewModePanel";
 import { LightningPanel } from "./components/LightningPanel";
 import { MasterFrequencyPanel } from "./components/MasterFrequencyPanel";
+import { TimeOfDayPanel } from "./components/TimeOfDayPanel";
+import { CloudPanel } from "./components/CloudPanel";
+import { PresetsPanel } from "./components/PresetsPanel";
 import { SkyTimeline } from "./components/SkyTimeline";
 import { Ellipsoid } from "./scene/Ellipsoid";
 import { BreathArea } from "./scene/BreathArea";
@@ -25,13 +26,14 @@ export default function App() {
   const setUi = useSimStore((s) => s.setUi);
   return (
     <>
-      <Leva collapsed={false} oneLineLabels />
       <TopBar />
       <Footer
         showMaster={ui.showMaster}
         showBreath={ui.showBreath}
         showLightning={ui.showLightning}
         showBreathFilter={ui.showBreathFilter}
+        showTimeOfDay={ui.showTimeOfDay}
+        showCloud={ui.showCloud}
         showStream={ui.showStream}
         onToggleMaster={() => setUi({ showMaster: !ui.showMaster })}
         onToggleBreath={() => setUi({ showBreath: !ui.showBreath })}
@@ -39,9 +41,11 @@ export default function App() {
         onToggleBreathFilter={() =>
           setUi({ showBreathFilter: !ui.showBreathFilter })
         }
+        onToggleTimeOfDay={() => setUi({ showTimeOfDay: !ui.showTimeOfDay })}
+        onToggleCloud={() => setUi({ showCloud: !ui.showCloud })}
         onToggleStream={() => setUi({ showStream: !ui.showStream })}
       />
-      <ControlPanel />
+      <PresetsPanel />
       <DayCyclePanel />
       <SkyTimeline />
       <LedViewModePanel />
@@ -49,6 +53,8 @@ export default function App() {
       <BreathOscillator visible={ui.showBreath} />
       <LightningPanel visible={ui.showLightning} />
       <BreathFilterPanel visible={ui.showBreathFilter} />
+      <TimeOfDayPanel visible={ui.showTimeOfDay} />
+      <CloudPanel visible={ui.showCloud} />
       <Histogram />
       <StreamMatrix visible={ui.showStream} />
       <Canvas
@@ -95,6 +101,8 @@ function TopBar() {
   const setDayCycle = useSimStore((s) => s.setDayCycle);
   const advancePeriod = useSimStore((s) => s.advancePeriod);
   const previousPeriod = useSimStore((s) => s.previousPeriod);
+  const wled = useSimStore((s) => s.wled);
+  const setWled = useSimStore((s) => s.setWled);
   const active = dayCycle.periods.find((p) => p.id === dayCycle.activePeriodId);
   return (
     <div
@@ -160,6 +168,44 @@ function TopBar() {
           ▶
         </button>
       </div>
+
+      <div style={wledGroupStyle}>
+        <span style={wledLabelStyle}>WLED</span>
+        <button
+          type="button"
+          onClick={() => setWled({ enabled: !wled.enabled })}
+          style={topToggleStyle(wled.enabled)}
+          title="Enable or disable UDP stream to WLED"
+        >
+          {wled.enabled ? "Stream: on" : "Stream: off"}
+        </button>
+        <label style={wledFieldStyle} title="WLED host or IP">
+          Host
+          <input
+            type="text"
+            value={wled.host}
+            onChange={(e) => setWled({ host: e.target.value })}
+            style={wledInputStyle}
+            spellCheck={false}
+          />
+        </label>
+        <label style={wledFieldStyle} title="Stream frames per second">
+          FPS
+          <input
+            type="number"
+            min={1}
+            max={60}
+            step={1}
+            value={wled.fps}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (!Number.isFinite(n)) return;
+              setWled({ fps: Math.min(60, Math.max(1, Math.round(n))) });
+            }}
+            style={wledFpsStyle}
+          />
+        </label>
+      </div>
     </div>
   );
 }
@@ -195,6 +241,52 @@ const topStepStyle: React.CSSProperties = {
   lineHeight: 1.2,
 };
 
+const wledGroupStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  marginLeft: "auto",
+  paddingLeft: 8,
+  borderLeft: "1px solid rgba(255,255,255,0.12)",
+};
+
+const wledLabelStyle: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  letterSpacing: 0.4,
+  opacity: 0.7,
+  textTransform: "uppercase",
+};
+
+const wledFieldStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+  fontSize: 10,
+  opacity: 0.9,
+};
+
+const wledInputStyle: React.CSSProperties = {
+  width: 120,
+  background: "rgba(0,0,0,0.35)",
+  color: "inherit",
+  border: "1px solid rgba(255,255,255,0.18)",
+  borderRadius: 4,
+  padding: "4px 6px",
+  fontSize: 11,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+};
+
+const wledFpsStyle: React.CSSProperties = {
+  width: 44,
+  background: "rgba(0,0,0,0.35)",
+  color: "inherit",
+  border: "1px solid rgba(255,255,255,0.18)",
+  borderRadius: 4,
+  padding: "4px 6px",
+  fontSize: 11,
+};
+
 const footerLinkStyle: React.CSSProperties = {
   color: "rgba(207,214,230,0.95)",
   textDecoration: "none",
@@ -220,22 +312,30 @@ function Footer({
   showBreath,
   showLightning,
   showBreathFilter,
+  showTimeOfDay,
+  showCloud,
   showStream,
   onToggleMaster,
   onToggleBreath,
   onToggleLightning,
   onToggleBreathFilter,
+  onToggleTimeOfDay,
+  onToggleCloud,
   onToggleStream,
 }: {
   showMaster: boolean;
   showBreath: boolean;
   showLightning: boolean;
   showBreathFilter: boolean;
+  showTimeOfDay: boolean;
+  showCloud: boolean;
   showStream: boolean;
   onToggleMaster: () => void;
   onToggleBreath: () => void;
   onToggleLightning: () => void;
   onToggleBreathFilter: () => void;
+  onToggleTimeOfDay: () => void;
+  onToggleCloud: () => void;
   onToggleStream: () => void;
 }) {
   return (
@@ -267,6 +367,13 @@ function Footer({
           {showMaster ? "▾" : "▸"} Master volume
         </button>
         <button
+          onClick={onToggleCloud}
+          style={footerToggleStyle(showCloud)}
+          title="Toggle Cloud panel"
+        >
+          {showCloud ? "▾" : "▸"} Cloud
+        </button>
+        <button
           onClick={onToggleBreath}
           style={footerToggleStyle(showBreath)}
           title="Toggle Breath oscillator panel"
@@ -279,6 +386,13 @@ function Footer({
           title="Toggle Breath filter panel"
         >
           {showBreathFilter ? "▾" : "▸"} Breath filter
+        </button>
+        <button
+          onClick={onToggleTimeOfDay}
+          style={footerToggleStyle(showTimeOfDay)}
+          title="Toggle Time of day visualization panel"
+        >
+          {showTimeOfDay ? "▾" : "▸"} Time of day
         </button>
         <button
           onClick={onToggleLightning}

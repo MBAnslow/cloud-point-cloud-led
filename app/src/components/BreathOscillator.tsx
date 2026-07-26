@@ -8,6 +8,8 @@ import {
 } from "../lighting/breath";
 import {
   MAX_BREATH_PARTICIPANTS,
+  hourInRange,
+  makeBreathFogSeed,
   useSimStore,
   type BreathParticipant,
 } from "../state";
@@ -69,13 +71,13 @@ const PARAM_HELP = {
   falloff:
     "How quickly influence drops from the wave center. Higher means sharper, lower means broader.",
   noiseScale:
-    "Size of fog features inside the breath volume. Higher = finer / smaller blobs.",
+    "Size of fog features in the fixed volume around the cloud (metres). Higher = finer blobs. The travelling spheroid only gates this field.",
   noiseAmount:
-    "How much 3D fog density shapes intensity. 0 = smooth volume only, 1 = fully noisy.",
+    "How much cloud-fixed fog density shapes intensity inside the spheroid. 0 = smooth volume only, 1 = fully noisy.",
   noiseContrast:
-    "Separates dense fog from empty pockets. Higher = sharper cloudy clumps.",
+    "Separates dense fog from empty pockets without forcing on/off. 1 = natural, higher = sharper clumps, lower = softer wash.",
   edgeNoise:
-    "Makes the breath-volume silhouette ragged near the surface only. Does not enlarge or brighten the core. Higher = chunkier scallops.",
+    "Scallops the spheroid using cloud-fixed fog, from the surface deep into the volume. Higher = stronger / chunkier.",
   rimThickness:
     "How thick the colour rim is around the outside of the breath volume (metres).",
   rimAmount:
@@ -89,6 +91,7 @@ const PARAM_HELP = {
 export function BreathOscillator({ visible: mounted = true }: { visible?: boolean } = {}) {
   const breath = useSimStore((s) => s.breath);
   const setBreath = useSimStore((s) => s.setBreath);
+  const skyTimeHours = useSimStore((s) => s.sky.timeHours);
   const [nowMs, setNowMs] = useState(() => performance.now());
   const [wallNowMs, setWallNowMs] = useState(() => performance.now());
   const [visible, setVisible] = useState(true);
@@ -99,6 +102,11 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
   const { pos, handleProps } = useDraggable(panelRef, {
     minTop: SKY_TIMELINE_CLEARANCE,
   });
+  const inActiveWindow = hourInRange(
+    skyTimeHours,
+    breath.activeStartHour,
+    breath.activeEndHour,
+  );
 
   useEffect(() => {
     let raf = 0;
@@ -155,6 +163,7 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
       enabled: true,
       azimuthDeg: (nextIndex * 90) % 360,
       phaseOffset: (nextIndex * 0.17) % 1,
+      fogSeed: makeBreathFogSeed(),
     };
     setBreath({ participants: [...breath.participants, newP] });
   };
@@ -400,6 +409,48 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
               fontSize: 11,
             }}
           >
+            <Section title="Active window (24h)">
+              <SliderField
+                label="start hour"
+                tooltip="Sky hour when breath waves, LED mask, and breath audio modulation switch on."
+                value={breath.activeStartHour}
+                min={0}
+                max={24}
+                step={0.25}
+                onChange={(v) =>
+                  setBreath({ activeStartHour: Math.max(0, Math.min(24, v)) })
+                }
+              />
+              <SliderField
+                label="end hour"
+                tooltip="Sky hour when breath switches off. End 24 with start 0 = all day. Wraps past midnight when end < start."
+                value={breath.activeEndHour}
+                min={0}
+                max={24}
+                step={0.25}
+                onChange={(v) =>
+                  setBreath({ activeEndHour: Math.max(0, Math.min(24, v)) })
+                }
+              />
+              {breath.enabled && !inActiveWindow && (
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "rgba(255,190,120,0.9)",
+                    marginTop: 4,
+                  }}
+                >
+                  Outside active window — breath effects are off until sky
+                  time enters {breath.activeStartHour.toFixed(2)}h →{" "}
+                  {breath.activeEndHour.toFixed(2)}h (or widen Start/End).
+                </div>
+              )}
+              {breath.enabled && inActiveWindow && (
+                <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>
+                  Active now · sky {skyTimeHours.toFixed(2)}h
+                </div>
+              )}
+            </Section>
             <Section title="Breath Timing">
               <SliderField
                 label="inhale"
@@ -694,6 +745,25 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                       {p.phaseOffset.toFixed(2)}
                     </span>
                   </label>
+                  <button
+                    type="button"
+                    title="Reshuffle this participant's cloud-fixed fog field (same scale/amount/contrast; new seed)"
+                    onClick={() =>
+                      updateParticipant(p.id, { fogSeed: makeBreathFogSeed() })
+                    }
+                    style={{
+                      background: "rgba(119,213,255,0.1)",
+                      color: "inherit",
+                      border: "1px solid rgba(119,213,255,0.3)",
+                      borderRadius: 4,
+                      padding: "2px 6px",
+                      cursor: "pointer",
+                      fontSize: 10,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    fog ✶
+                  </button>
                   <span style={{ minWidth: 72, opacity: 0.8 }}>
                     {sampleP.phase} {sampleP.level.toFixed(2)}
                   </span>

@@ -20,11 +20,16 @@ export class LightningAudioEngine {
   private started = false;
   private out: Tone.Gain | null = null;
   private bg: Tone.Player | null = null;
+  private bgPanner: Tone.Panner | null = null;
   private bgSampleId: string | null = null;
   private bgWasEnabled = false;
   private boltBuffers = new Map<string, AudioBuffer>();
   private pendingLoads = new Set<string>();
-  private voices: Array<{ player: Tone.Player; endsAt: number }> = [];
+  private voices: Array<{
+    player: Tone.Player;
+    panner: Tone.Panner;
+    endsAt: number;
+  }> = [];
 
   async start(): Promise<void> {
     if (this.started) return;
@@ -38,13 +43,18 @@ export class LightningAudioEngine {
   }
 
   /**
-   * Update background loop + volumes to match current params. Called
+   * Update background loop + volumes/pan to match current params. Called
    * every frame from `LightningAudioRuntime`.
    */
   update(p: LightningParams, active: boolean): void {
     if (!this.started || !this.out) return;
     const bgWanted = p.enabled && active && !!p.backgroundSample;
-    void this.syncBackground(p.backgroundSample, bgWanted, p.backgroundGain);
+    void this.syncBackground(
+      p.backgroundSample,
+      bgWanted,
+      p.backgroundGain,
+      p.pan ?? 0,
+    );
   }
 
   /**
@@ -54,7 +64,12 @@ export class LightningAudioEngine {
    * lightning intensity range; used to scale the base `boltGain` so
    * louder flashes get louder bolts.
    */
-  triggerBolt(p: LightningParams, strikeIntensity: number): void {
+  triggerBolt(
+    p: LightningParams,
+    strikeIntensity: number,
+    boltGain = p.boltGain,
+    pan = p.pan ?? 0,
+  ): void {
     if (!this.started || !this.out) return;
     if (!p.enabled) return;
     if (p.boltSamples.length === 0) return;
@@ -69,22 +84,26 @@ export class LightningAudioEngine {
     const cents =
       (Math.random() * 2 - 1) * Math.max(0, p.boltPitchJitterCents);
     const rate = Math.pow(2, cents / 1200);
-    const gain = Math.max(0, p.boltGain) * Math.max(0, strikeIntensity);
+    const gain = Math.max(0, boltGain) * Math.max(0, strikeIntensity);
+    const panVal = Math.max(-1, Math.min(1, pan));
     const player = new Tone.Player();
+    const panner = new Tone.Panner(panVal);
     (player as unknown as { buffer: Tone.ToneAudioBuffer }).buffer =
       new Tone.ToneAudioBuffer(buf);
     player.playbackRate = rate;
     player.volume.value = Tone.gainToDb(Math.max(0.0001, gain));
-    player.connect(this.out);
+    player.connect(panner);
+    panner.connect(this.out);
     try {
       player.start();
     } catch (err) {
       console.warn("[lightning] bolt start failed", err);
       player.dispose();
+      panner.dispose();
       return;
     }
     const dur = (buf.duration / Math.max(0.01, rate)) + 0.05;
-    this.voices.push({ player, endsAt: Tone.now() + dur });
+    this.voices.push({ player, panner, endsAt: Tone.now() + dur });
     this.reap();
   }
 
@@ -100,6 +119,7 @@ export class LightningAudioEngine {
       if (v.endsAt <= now) {
         try { v.player.stop(); } catch { /* ignore */ }
         v.player.dispose();
+        v.panner.dispose();
         return false;
       }
       return true;
@@ -110,8 +130,10 @@ export class LightningAudioEngine {
     sample: LightningSample | null,
     wanted: boolean,
     gain: number,
+    pan: number,
   ): Promise<void> {
     if (!this.out) return;
+    const panVal = Math.max(-1, Math.min(1, pan));
     const wantedId = wanted && sample ? sample.id : null;
     // Rewire if the desired sample changed.
     if (wantedId !== this.bgSampleId) {
@@ -120,6 +142,10 @@ export class LightningAudioEngine {
         this.bg.dispose();
         this.bg = null;
       }
+      if (this.bgPanner) {
+        this.bgPanner.dispose();
+        this.bgPanner = null;
+      }
       this.bgSampleId = wantedId;
       this.bgWasEnabled = false;
       if (wantedId && sample) {
@@ -127,20 +153,24 @@ export class LightningAudioEngine {
           const buf = await this.ensureBoltBuffer(sample.id);
           if (!buf || this.bgSampleId !== sample.id) return;
           const player = new Tone.Player();
+          const panner = new Tone.Panner(panVal);
           (player as unknown as { buffer: Tone.ToneAudioBuffer }).buffer =
             new Tone.ToneAudioBuffer(buf);
           player.loop = true;
           player.volume.value = Tone.gainToDb(Math.max(0.0001, gain));
-          player.connect(this.out);
+          player.connect(panner);
+          panner.connect(this.out);
           this.bg = player;
+          this.bgPanner = panner;
         } catch (err) {
           console.warn("[lightning] background load failed", err);
         }
       }
     }
-    // Update volume + play/stop.
+    // Update volume + pan + play/stop.
     if (this.bg) {
       this.bg.volume.rampTo(Tone.gainToDb(Math.max(0.0001, gain)), 0.1);
+      if (this.bgPanner) this.bgPanner.pan.rampTo(panVal, 0.1);
       if (wanted && !this.bgWasEnabled) {
         try { this.bg.start(); this.bgWasEnabled = true; } catch (err) {
           console.warn("[lightning] background start failed", err);

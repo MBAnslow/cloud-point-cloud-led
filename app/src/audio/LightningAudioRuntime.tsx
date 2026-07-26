@@ -1,6 +1,9 @@
 import { useEffect } from "react";
-import { hourInRange, useSimStore } from "../state";
-import { sharedLightningController } from "../lighting/lightning";
+import { activeWindowProgress, hourInRange, useSimStore } from "../state";
+import {
+  sampleLightningKeyframe,
+  sharedLightningController,
+} from "../lighting/lightning";
 import { getLightningAudioEngine } from "./LightningAudioEngine";
 
 /**
@@ -49,7 +52,20 @@ export function LightningAudioRuntime(): null {
         p.activeStartHour,
         p.activeEndHour,
       );
-      engine.update(p, active);
+      const keyframeU = activeWindowProgress(
+        state.sky.timeHours,
+        p.activeStartHour,
+        p.activeEndHour,
+      );
+      const live = sampleLightningKeyframe(p.keyframes, keyframeU);
+      engine.update(
+        {
+          ...p,
+          backgroundGain: live.backgroundGain,
+          pan: live.pan,
+        },
+        active,
+      );
 
       const strikes = sharedLightningController.getStrikes();
       // Skip on the very first tick after start — otherwise pre-existing
@@ -64,16 +80,18 @@ export function LightningAudioRuntime(): null {
       let newMax = lastMaxBorn;
       for (const s of strikes) {
         if (s.bornMs > lastMaxBorn) {
-          const delay = Math.max(0, p.thunderDelayMs ?? 0);
+          const delay = Math.max(0, s.thunderDelayMs ?? p.thunderDelayMs ?? 0);
           const intensity = s.intensity;
+          const boltGain = s.boltGain ?? p.boltGain;
+          const pan = s.pan ?? p.pan ?? 0;
           if (delay <= 0) {
-            engine.triggerBolt(p, intensity);
+            engine.triggerBolt(p, intensity, boltGain, pan);
           } else {
             const timer = setTimeout(() => {
               pendingThunder.delete(timer);
               const cur = useSimStore.getState().lightning;
               if (!cur.enabled) return;
-              engine.triggerBolt(cur, intensity);
+              engine.triggerBolt(cur, intensity, boltGain, pan);
             }, delay);
             pendingThunder.add(timer);
           }
