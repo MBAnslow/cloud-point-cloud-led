@@ -232,10 +232,30 @@ export interface LightningParams {
  * snapshot. `durationSec` is optional (background loop doesn't need
  * it) and populated at upload time when known.
  */
+export type BoltIntensityTag = "low" | "medium" | "high";
+export type BoltLengthTag = "short" | "medium" | "long";
+
+export const BOLT_INTENSITY_TAGS: BoltIntensityTag[] = [
+  "low",
+  "medium",
+  "high",
+];
+export const BOLT_LENGTH_TAGS: BoltLengthTag[] = ["short", "medium", "long"];
+
 export interface LightningSample {
   id: string;
   name: string;
   durationSec?: number;
+  /**
+   * Manual intensity bands this clip suits. Empty = untagged (matches
+   * any intensity as a fallback). Tick one or more in the lightning UI.
+   */
+  intensityTags: BoltIntensityTag[];
+  /**
+   * Manual flash-length bands this clip suits. Empty = untagged
+   * (matches any length as a fallback).
+   */
+  lengthTags: BoltLengthTag[];
 }
 
 /**
@@ -2708,6 +2728,57 @@ function resolveLightningKeyframes(
   }));
 }
 
+function resolveIntensityTags(input: unknown): BoltIntensityTag[] {
+  if (!Array.isArray(input)) return [];
+  const out: BoltIntensityTag[] = [];
+  for (const v of input) {
+    if (v === "low" || v === "medium" || v === "high") {
+      if (!out.includes(v)) out.push(v);
+    }
+  }
+  return out;
+}
+
+function resolveLengthTags(input: unknown): BoltLengthTag[] {
+  if (!Array.isArray(input)) return [];
+  const out: BoltLengthTag[] = [];
+  for (const v of input) {
+    if (v === "short" || v === "medium" || v === "long") {
+      if (!out.includes(v)) out.push(v);
+    }
+  }
+  return out;
+}
+
+export function resolveLightningSample(
+  input: Record<string, unknown>,
+): LightningSample | null {
+  if (typeof input.id !== "string" || !input.id) return null;
+  if (typeof input.name !== "string") return null;
+  const durationSec =
+    typeof input.durationSec === "number" && Number.isFinite(input.durationSec)
+      ? input.durationSec
+      : undefined;
+  return {
+    id: input.id,
+    name: input.name,
+    ...(durationSec !== undefined ? { durationSec } : {}),
+    intensityTags: resolveIntensityTags(input.intensityTags),
+    lengthTags: resolveLengthTags(input.lengthTags),
+  };
+}
+
+function resolveLightningSamples(input: unknown): LightningSample[] {
+  if (!Array.isArray(input)) return [];
+  const out: LightningSample[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const s = resolveLightningSample(raw as Record<string, unknown>);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
 function resolveLightning(input: unknown): LightningParams {
   const d = DEFAULTS.lightning;
   if (!input || typeof input !== "object") return d;
@@ -2852,6 +2923,14 @@ function resolveLightning(input: unknown): LightningParams {
       const v = (saved as Record<string, unknown>).pan;
       if (typeof v !== "number" || !Number.isFinite(v)) return d.pan;
       return Math.max(-1, Math.min(1, v));
+    })(),
+    boltSamples: resolveLightningSamples(
+      (saved as Record<string, unknown>).boltSamples,
+    ),
+    backgroundSample: (() => {
+      const raw = (saved as Record<string, unknown>).backgroundSample;
+      if (!raw || typeof raw !== "object") return null;
+      return resolveLightningSample(raw as Record<string, unknown>);
     })(),
     tintMix: (() => {
       const v = (saved as Record<string, unknown>).tintMix;

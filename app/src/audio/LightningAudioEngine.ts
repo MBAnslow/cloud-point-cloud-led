@@ -1,6 +1,7 @@
 import * as Tone from "tone";
 import type { LightningParams, LightningSample } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
+import { pickBoltSample } from "./boltSampleMatch";
 
 /**
  * Audio engine for the lightning system.
@@ -59,7 +60,8 @@ export class LightningAudioEngine {
 
   /**
    * Trigger a bolt sound. Called once per newly-spawned strike from
-   * the runtime. Chooses a random sample and applies pitch jitter.
+   * the runtime. Chooses a sample matching flash intensity + length
+   * tags when possible, then applies pitch jitter.
    * `strikeIntensity` is the per-strike value sampled from the
    * lightning intensity range; used to scale the base `boltGain` so
    * louder flashes get louder bolts.
@@ -69,12 +71,17 @@ export class LightningAudioEngine {
     strikeIntensity: number,
     boltGain = p.boltGain,
     pan = p.pan ?? 0,
+    match?: { intensity01: number; durationMs: number },
   ): void {
     if (!this.started || !this.out) return;
     if (!p.enabled) return;
     if (p.boltSamples.length === 0) return;
     const sample =
-      p.boltSamples[Math.floor(Math.random() * p.boltSamples.length)];
+      pickBoltSample(
+        p.boltSamples,
+        match?.intensity01 ?? 0.5,
+        match?.durationMs ?? 600,
+      ) ?? p.boltSamples[0];
     if (!sample) return;
     const buf = this.boltBuffers.get(sample.id);
     if (!buf) {

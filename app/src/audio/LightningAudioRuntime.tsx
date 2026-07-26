@@ -84,14 +84,18 @@ export function LightningAudioRuntime(): null {
           const intensity = s.intensity;
           const boltGain = s.boltGain ?? p.boltGain;
           const pan = s.pan ?? p.pan ?? 0;
+          const match = {
+            intensity01: s.intensity01,
+            durationMs: s.durationMs,
+          };
           if (delay <= 0) {
-            engine.triggerBolt(p, intensity, boltGain, pan);
+            engine.triggerBolt(p, intensity, boltGain, pan, match);
           } else {
             const timer = setTimeout(() => {
               pendingThunder.delete(timer);
               const cur = useSimStore.getState().lightning;
               if (!cur.enabled) return;
-              engine.triggerBolt(cur, intensity, boltGain, pan);
+              engine.triggerBolt(cur, intensity, boltGain, pan, match);
             }, delay);
             pendingThunder.add(timer);
           }

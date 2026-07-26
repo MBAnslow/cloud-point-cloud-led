@@ -5,7 +5,11 @@ import {
   activeWindowProgress,
   periodsCrossingActiveWindow,
   cloneColorTracks,
+  BOLT_INTENSITY_TAGS,
+  BOLT_LENGTH_TAGS,
   type BreathParticipant,
+  type BoltIntensityTag,
+  type BoltLengthTag,
   type LightningAnimParams,
   type LightningColorStop,
   type LightningColorTracks,
@@ -169,7 +173,13 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
     <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
       <div
         onPointerDown={handleProps.onPointerDown}
-        style={{ display: "flex", alignItems: "center", gap: 10, cursor: "move" }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          cursor: "move",
+          flexShrink: 0,
+        }}
       >
         <div style={titleStyle}>Lightning</div>
         <label style={inlineLabel}>
@@ -181,7 +191,7 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           enabled
         </label>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+      <div style={panelScrollStyle}>
         <KeyframeEditor
           keyframes={lightning.keyframes}
           selectedId={selected?.id ?? null}
@@ -208,7 +218,7 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           onPlotTintMix={() => setPlotChannel("tintMix")}
           tintMixPlotActive={plotChannel === "tintMix"}
         />
-        <div style={twoColStyle}>
+        <div style={threeColStyle}>
           <div style={colStyle}>
             <RangeRow
               label={`Intensity${KF}`}
@@ -374,6 +384,7 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
               patchAnim={patchAnim}
             />
           </div>
+          <BoltSamplesColumn lightning={lightning} upd={upd} />
         </div>
       </div>
     </div>
@@ -1272,21 +1283,7 @@ function AudioSection({
   upd: (patch: Partial<LightningParams>) => void;
   patchAnim: (patch: Partial<LightningAnimParams>) => void;
 }) {
-  const boltInputRef = useRef<HTMLInputElement | null>(null);
   const bgInputRef = useRef<HTMLInputElement | null>(null);
-
-  const onBoltFiles = async (files: FileList | null) => {
-    if (!files) return;
-    const added: LightningSample[] = [];
-    for (const f of Array.from(files)) {
-      const sample = await ingestFile(f);
-      if (sample) added.push(sample);
-    }
-    if (added.length > 0) {
-      upd({ boltSamples: [...lightning.boltSamples, ...added] });
-    }
-    if (boltInputRef.current) boltInputRef.current.value = "";
-  };
 
   const onBgFile = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -1298,11 +1295,6 @@ function AudioSection({
       upd({ backgroundSample: sample });
     }
     if (bgInputRef.current) bgInputRef.current.value = "";
-  };
-
-  const removeBolt = (id: string) => {
-    void deleteSampleBlob(id);
-    upd({ boltSamples: lightning.boltSamples.filter((s) => s.id !== id) });
   };
 
   const clearBackground = () => {
@@ -1375,79 +1367,6 @@ function AudioSection({
 
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
         <span style={{ fontSize: 11, opacity: 0.85, flex: 1 }}>
-          Bolt sounds ({lightning.boltSamples.length})
-        </span>
-        <button
-          type="button"
-          style={miniBtn}
-          onClick={() => boltInputRef.current?.click()}
-        >
-          + upload
-        </button>
-        <input
-          ref={boltInputRef}
-          type="file"
-          accept="audio/*"
-          multiple
-          style={{ display: "none" }}
-          onChange={(e) => onBoltFiles(e.target.files)}
-        />
-      </div>
-      {lightning.boltSamples.length > 0 && (
-        <ul
-          style={{
-            listStyle: "none",
-            padding: 0,
-            margin: "4px 0 0",
-            maxHeight: 90,
-            overflowY: "auto",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 4,
-          }}
-        >
-          {lightning.boltSamples.map((s) => (
-            <li
-              key={s.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "3px 6px",
-                fontSize: 11,
-                borderBottom: "1px solid rgba(255,255,255,0.05)",
-              }}
-            >
-              <span
-                style={{
-                  flex: 1,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {s.name}
-              </span>
-              {typeof s.durationSec === "number" && (
-                <span
-                  style={{ opacity: 0.55, fontVariantNumeric: "tabular-nums" }}
-                >
-                  {s.durationSec.toFixed(1)}s
-                </span>
-              )}
-              <button
-                type="button"
-                style={miniBtn}
-                onClick={() => removeBolt(s.id)}
-              >
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-        <span style={{ fontSize: 11, opacity: 0.85, flex: 1 }}>
           Background
           {lightning.backgroundSample
             ? `: ${lightning.backgroundSample.name}`
@@ -1477,6 +1396,188 @@ function AudioSection({
   );
 }
 
+function BoltSamplesColumn({
+  lightning,
+  upd,
+}: {
+  lightning: LightningParams;
+  upd: (patch: Partial<LightningParams>) => void;
+}) {
+  const boltInputRef = useRef<HTMLInputElement | null>(null);
+
+  const onBoltFiles = async (files: FileList | null) => {
+    if (!files) return;
+    const added: LightningSample[] = [];
+    for (const f of Array.from(files)) {
+      const sample = await ingestFile(f);
+      if (sample) added.push(sample);
+    }
+    if (added.length > 0) {
+      upd({ boltSamples: [...lightning.boltSamples, ...added] });
+    }
+    if (boltInputRef.current) boltInputRef.current.value = "";
+  };
+
+  const removeBolt = (id: string) => {
+    void deleteSampleBlob(id);
+    upd({ boltSamples: lightning.boltSamples.filter((s) => s.id !== id) });
+  };
+
+  const patchBolt = (id: string, patch: Partial<LightningSample>) => {
+    upd({
+      boltSamples: lightning.boltSamples.map((s) =>
+        s.id === id ? { ...s, ...patch } : s,
+      ),
+    });
+  };
+
+  const toggleIntensity = (id: string, tag: BoltIntensityTag) => {
+    const sample = lightning.boltSamples.find((s) => s.id === id);
+    if (!sample) return;
+    const cur = sample.intensityTags ?? [];
+    const next = cur.includes(tag)
+      ? cur.filter((t) => t !== tag)
+      : [...cur, tag];
+    patchBolt(id, { intensityTags: next });
+  };
+
+  const toggleLength = (id: string, tag: BoltLengthTag) => {
+    const sample = lightning.boltSamples.find((s) => s.id === id);
+    if (!sample) return;
+    const cur = sample.lengthTags ?? [];
+    const next = cur.includes(tag)
+      ? cur.filter((t) => t !== tag)
+      : [...cur, tag];
+    patchBolt(id, { lengthTags: next });
+  };
+
+  return (
+    <div style={boltColStyle}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 10, opacity: 0.7, flex: 1 }}>
+          Bolt sounds ({lightning.boltSamples.length})
+        </span>
+        <button
+          type="button"
+          style={miniBtn}
+          onClick={() => boltInputRef.current?.click()}
+        >
+          + upload
+        </button>
+        <input
+          ref={boltInputRef}
+          type="file"
+          accept="audio/*"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => onBoltFiles(e.target.files)}
+        />
+      </div>
+      <ul
+        style={boltListStyle}
+        title={
+          "Tick intensity (L/M/H) and length (S/M/L) bands each clip suits. " +
+          "Flashes pick a matching sound from strike strength + flash duration. " +
+          "Untagged clips are fallback-only."
+        }
+      >
+        {lightning.boltSamples.length === 0 ? (
+          <li
+            style={{
+              padding: "8px 6px",
+              fontSize: 10,
+              opacity: 0.45,
+            }}
+          >
+            No clips yet
+          </li>
+        ) : (
+          lightning.boltSamples.map((s) => (
+            <li
+              key={s.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "2px 5px",
+                fontSize: 10,
+                borderBottom: "1px solid rgba(255,255,255,0.05)",
+                minHeight: 22,
+              }}
+            >
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={s.name}
+              >
+                {s.name}
+              </span>
+              <span
+                style={tagGroupStyle}
+                title="Intensity: low / medium / high"
+              >
+                {BOLT_INTENSITY_TAGS.map((tag) => (
+                  <TagCheck
+                    key={tag}
+                    label={tag[0]!.toUpperCase()}
+                    title={tag}
+                    checked={(s.intensityTags ?? []).includes(tag)}
+                    onChange={() => toggleIntensity(s.id, tag)}
+                  />
+                ))}
+              </span>
+              <span style={tagGroupStyle} title="Length: short / medium / long">
+                {BOLT_LENGTH_TAGS.map((tag) => (
+                  <TagCheck
+                    key={tag}
+                    label={tag[0]!.toUpperCase()}
+                    title={tag}
+                    checked={(s.lengthTags ?? []).includes(tag)}
+                    onChange={() => toggleLength(s.id, tag)}
+                  />
+                ))}
+              </span>
+              {typeof s.durationSec === "number" && (
+                <span
+                  style={{
+                    opacity: 0.45,
+                    fontVariantNumeric: "tabular-nums",
+                    fontSize: 9,
+                    minWidth: 28,
+                    textAlign: "right",
+                  }}
+                >
+                  {s.durationSec.toFixed(1)}s
+                </span>
+              )}
+              <button
+                type="button"
+                style={{ ...miniBtn, padding: "0 4px", lineHeight: 1.2 }}
+                onClick={() => removeBolt(s.id)}
+                title="Remove"
+              >
+                ×
+              </button>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
+  );
+}
+
 async function ingestFile(file: File): Promise<LightningSample | null> {
   try {
     const id = `ln-${Math.random().toString(36).slice(2, 10)}`;
@@ -1497,7 +1598,13 @@ async function ingestFile(file: File): Promise<LightningSample | null> {
     } catch {
       // Duration is optional.
     }
-    return { id, name: file.name, durationSec };
+    return {
+      id,
+      name: file.name,
+      durationSec,
+      intensityTags: [],
+      lengthTags: [],
+    };
   } catch (err) {
     console.warn("[lightning] file ingest failed", err);
     return null;
@@ -1629,7 +1736,7 @@ const panelStyle: React.CSSProperties = {
   bottom: 60,
   right: 12,
   zIndex: 15,
-  width: 640,
+  width: 920,
   background: "rgba(10, 12, 20, 0.82)",
   backdropFilter: "blur(8px)",
   color: "rgba(207,214,230,0.95)",
@@ -1638,15 +1745,30 @@ const panelStyle: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.12)",
   fontFamily:
     "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-  maxHeight: "calc(100vh - 80px)",
-  overflowY: "auto",
+  // Cap to space above the bottom anchor so growth never pushes the header
+  // off-screen; body scrolls inside instead.
+  maxHeight: "calc(100vh - 72px)",
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
 };
 
-const twoColStyle: React.CSSProperties = {
+const panelScrollStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  marginTop: 6,
+  flex: 1,
+  minHeight: 0,
+  overflowY: "auto",
+  overscrollBehavior: "contain",
+};
+
+const threeColStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1fr 1fr",
+  gridTemplateColumns: "1fr 1fr 1.15fr",
   gap: 12,
-  alignItems: "start",
+  alignItems: "stretch",
 };
 
 const colStyle: React.CSSProperties = {
@@ -1654,6 +1776,32 @@ const colStyle: React.CSSProperties = {
   flexDirection: "column",
   gap: 4,
   minWidth: 0,
+};
+
+const boltColStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  minWidth: 0,
+  // Don't let clip list drive row height — match sibling columns and scroll.
+  height: 0,
+  minHeight: "100%",
+  overflow: "hidden",
+  borderLeft: "1px solid rgba(255,255,255,0.08)",
+  paddingLeft: 10,
+};
+
+const boltListStyle: React.CSSProperties = {
+  listStyle: "none",
+  padding: 0,
+  margin: 0,
+  flex: 1,
+  minHeight: 0,
+  overflowY: "auto",
+  overscrollBehavior: "contain",
+  overflowAnchor: "none",
+  border: "1px solid rgba(255,255,255,0.08)",
+  borderRadius: 4,
 };
 
 const titleStyle: React.CSSProperties = {
@@ -1679,3 +1827,54 @@ const miniBtn: React.CSSProperties = {
   color: "inherit",
   cursor: "pointer",
 };
+
+const tagGroupStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 1,
+  flexShrink: 0,
+  padding: "0 2px",
+  borderLeft: "1px solid rgba(255,255,255,0.08)",
+};
+
+function TagCheck({
+  label,
+  title,
+  checked,
+  onChange,
+}: {
+  label: string;
+  title: string;
+  checked: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <label
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 14,
+        height: 14,
+        fontSize: 9,
+        fontWeight: 600,
+        lineHeight: 1,
+        cursor: "pointer",
+        userSelect: "none",
+        borderRadius: 2,
+        opacity: checked ? 1 : 0.35,
+        background: checked ? "rgba(255,255,255,0.14)" : "transparent",
+        color: "inherit",
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onChange}
+        style={{ position: "absolute", opacity: 0, width: 0, height: 0 }}
+      />
+      {label}
+    </label>
+  );
+}
