@@ -13,6 +13,8 @@ import { getLightningAudioEngine } from "./LightningAudioEngine";
  *   2. updates the background loop based on `enabled + active window`,
  *   3. detects newly-born strikes in `sharedLightningController` by
  *      tracking born-timestamps and fires a bolt sound per new strike.
+ *      Ground strikes (`kind === "strike"`) use `strikeSample`; cloud
+ *      flashes use the tagged `boltSamples` library.
  *
  * We identify new strikes by the max `bornMs` seen so far — cheap and
  * doesn't require patching the LightningController API.
@@ -84,18 +86,26 @@ export function LightningAudioRuntime(): null {
           const intensity = s.intensity;
           const boltGain = s.boltGain ?? p.boltGain;
           const pan = s.pan ?? p.pan ?? 0;
+          const isGroundStrike = s.kind === "strike";
           const match = {
             intensity01: s.intensity01,
             durationMs: s.durationMs,
           };
+          const fire = (cur: typeof p) => {
+            if (isGroundStrike) {
+              engine.triggerStrike(cur, intensity, boltGain, pan);
+            } else {
+              engine.triggerBolt(cur, intensity, boltGain, pan, match);
+            }
+          };
           if (delay <= 0) {
-            engine.triggerBolt(p, intensity, boltGain, pan, match);
+            fire(p);
           } else {
             const timer = setTimeout(() => {
               pendingThunder.delete(timer);
               const cur = useSimStore.getState().lightning;
               if (!cur.enabled) return;
-              engine.triggerBolt(cur, intensity, boltGain, pan, match);
+              fire(cur);
             }, delay);
             pendingThunder.add(timer);
           }

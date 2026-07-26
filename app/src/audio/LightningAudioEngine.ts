@@ -8,10 +8,9 @@ import { pickBoltSample } from "./boltSampleMatch";
  *
  * - A single Tone.Player owns the background ambience and loops for as
  *   long as `enabled && withinActiveWindow`.
- * - Bolt sounds are triggered on demand from a small pool of
- *   Tone.Player voices (one per fired strike, reaped when the buffer
- *   is done playing). Each trigger picks a random uploaded bolt buffer
- *   and applies ±jitter cents to the playback rate for variety.
+ * - Cloud-flash bolts pick from the tagged `boltSamples` library.
+ * - Ground strikes play the single `strikeSample` (if set).
+ * - Each one-shot applies ±jitter cents to the playback rate.
  *
  * Buffers are lazily loaded from the shared IndexedDB blob store
  * (same one used by the Samples panel). Missing buffers are silently
@@ -59,12 +58,9 @@ export class LightningAudioEngine {
   }
 
   /**
-   * Trigger a bolt sound. Called once per newly-spawned strike from
-   * the runtime. Chooses a sample matching flash intensity + length
-   * tags when possible, then applies pitch jitter.
-   * `strikeIntensity` is the per-strike value sampled from the
-   * lightning intensity range; used to scale the base `boltGain` so
-   * louder flashes get louder bolts.
+   * Trigger a cloud-flash bolt sound. Chooses a sample matching flash
+   * intensity + length tags when possible, then applies pitch jitter.
+   * `strikeIntensity` scales the base `boltGain`.
    */
   triggerBolt(
     p: LightningParams,
@@ -83,6 +79,41 @@ export class LightningAudioEngine {
         match?.durationMs ?? 600,
       ) ?? p.boltSamples[0];
     if (!sample) return;
+    this.playOneShot(p, sample, strikeIntensity, boltGain, pan);
+  }
+
+  /**
+   * Trigger the dedicated ground-strike one-shot (`strikeSample`).
+   * No-op when no strike sample is uploaded.
+   */
+  triggerStrike(
+    p: LightningParams,
+    strikeIntensity: number,
+    boltGain = p.boltGain,
+    pan = p.pan ?? 0,
+  ): void {
+    if (!this.started || !this.out) return;
+    if (!p.enabled) return;
+    const sample = p.strikeSample;
+    if (!sample) return;
+    this.playOneShot(p, sample, strikeIntensity, boltGain, pan);
+  }
+
+  /** Preload all referenced buffers so first triggers aren't skipped. */
+  preload(p: LightningParams): void {
+    for (const s of p.boltSamples) void this.ensureBoltBuffer(s.id);
+    if (p.strikeSample) void this.ensureBoltBuffer(p.strikeSample.id);
+    if (p.backgroundSample) void this.ensureBoltBuffer(p.backgroundSample.id);
+  }
+
+  private playOneShot(
+    p: LightningParams,
+    sample: LightningSample,
+    strikeIntensity: number,
+    boltGain: number,
+    pan: number,
+  ): void {
+    if (!this.out) return;
     const buf = this.boltBuffers.get(sample.id);
     if (!buf) {
       void this.ensureBoltBuffer(sample.id);
@@ -104,27 +135,25 @@ export class LightningAudioEngine {
     try {
       player.start();
     } catch (err) {
-      console.warn("[lightning] bolt start failed", err);
+      console.warn("[lightning] one-shot start failed", err);
       player.dispose();
       panner.dispose();
       return;
     }
-    const dur = (buf.duration / Math.max(0.01, rate)) + 0.05;
+    const dur = buf.duration / Math.max(0.01, rate) + 0.05;
     this.voices.push({ player, panner, endsAt: Tone.now() + dur });
     this.reap();
-  }
-
-  /** Preload all referenced buffers so first triggers aren't skipped. */
-  preload(p: LightningParams): void {
-    for (const s of p.boltSamples) void this.ensureBoltBuffer(s.id);
-    if (p.backgroundSample) void this.ensureBoltBuffer(p.backgroundSample.id);
   }
 
   private reap(): void {
     const now = Tone.now();
     this.voices = this.voices.filter((v) => {
       if (v.endsAt <= now) {
-        try { v.player.stop(); } catch { /* ignore */ }
+        try {
+          v.player.stop();
+        } catch {
+          /* ignore */
+        }
         v.player.dispose();
         v.panner.dispose();
         return false;
@@ -145,7 +174,11 @@ export class LightningAudioEngine {
     // Rewire if the desired sample changed.
     if (wantedId !== this.bgSampleId) {
       if (this.bg) {
-        try { this.bg.stop(); } catch { /* ignore */ }
+        try {
+          this.bg.stop();
+        } catch {
+          /* ignore */
+        }
         this.bg.dispose();
         this.bg = null;
       }
@@ -179,11 +212,18 @@ export class LightningAudioEngine {
       this.bg.volume.rampTo(Tone.gainToDb(Math.max(0.0001, gain)), 0.1);
       if (this.bgPanner) this.bgPanner.pan.rampTo(panVal, 0.1);
       if (wanted && !this.bgWasEnabled) {
-        try { this.bg.start(); this.bgWasEnabled = true; } catch (err) {
+        try {
+          this.bg.start();
+          this.bgWasEnabled = true;
+        } catch (err) {
           console.warn("[lightning] background start failed", err);
         }
       } else if (!wanted && this.bgWasEnabled) {
-        try { this.bg.stop(); } catch { /* ignore */ }
+        try {
+          this.bg.stop();
+        } catch {
+          /* ignore */
+        }
         this.bgWasEnabled = false;
       }
     }

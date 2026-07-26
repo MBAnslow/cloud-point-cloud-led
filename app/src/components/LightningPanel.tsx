@@ -1284,6 +1284,7 @@ function AudioSection({
   patchAnim: (patch: Partial<LightningAnimParams>) => void;
 }) {
   const bgInputRef = useRef<HTMLInputElement | null>(null);
+  const strikeInputRef = useRef<HTMLInputElement | null>(null);
 
   const onBgFile = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -1297,11 +1298,30 @@ function AudioSection({
     if (bgInputRef.current) bgInputRef.current.value = "";
   };
 
+  const onStrikeFile = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const sample = await ingestFile(files[0]);
+    if (sample) {
+      if (lightning.strikeSample) {
+        void deleteSampleBlob(lightning.strikeSample.id);
+      }
+      upd({ strikeSample: sample });
+    }
+    if (strikeInputRef.current) strikeInputRef.current.value = "";
+  };
+
   const clearBackground = () => {
     if (lightning.backgroundSample) {
       void deleteSampleBlob(lightning.backgroundSample.id);
     }
     upd({ backgroundSample: null });
+  };
+
+  const clearStrike = () => {
+    if (lightning.strikeSample) {
+      void deleteSampleBlob(lightning.strikeSample.id);
+    }
+    upd({ strikeSample: null });
   };
 
   return (
@@ -1365,7 +1385,38 @@ function AudioSection({
         }
       />
 
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+      <div
+        style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}
+        title="Plays for cloud-to-ground strikes (Strike / min)"
+      >
+        <span style={{ fontSize: 11, opacity: 0.85, flex: 1 }}>
+          Strike sound
+          {lightning.strikeSample
+            ? `: ${lightning.strikeSample.name}`
+            : " (none)"}
+        </span>
+        <button
+          type="button"
+          style={miniBtn}
+          onClick={() => strikeInputRef.current?.click()}
+        >
+          {lightning.strikeSample ? "replace" : "+ upload"}
+        </button>
+        {lightning.strikeSample && (
+          <button type="button" style={miniBtn} onClick={clearStrike}>
+            clear
+          </button>
+        )}
+        <input
+          ref={strikeInputRef}
+          type="file"
+          accept="audio/*"
+          style={{ display: "none" }}
+          onChange={(e) => onStrikeFile(e.target.files)}
+        />
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
         <span style={{ fontSize: 11, opacity: 0.85, flex: 1 }}>
           Background
           {lightning.backgroundSample
@@ -1462,7 +1513,7 @@ function BoltSamplesColumn({
         }}
       >
         <span style={{ fontSize: 10, opacity: 0.7, flex: 1 }}>
-          Bolt sounds ({lightning.boltSamples.length})
+          Cloud bolts ({lightning.boltSamples.length})
         </span>
         <button
           type="button"

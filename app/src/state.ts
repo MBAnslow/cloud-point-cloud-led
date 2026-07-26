@@ -181,8 +181,16 @@ export interface LightningParams {
   activeStartHour: number;
   /** Hour in [0, 24) at which lightning activity switches off. */
   activeEndHour: number;
-  /** Uploaded bolt-sound library. One is chosen at random per strike. */
+  /**
+   * Uploaded cloud-flash sound library. One is chosen (by intensity /
+   * length tags) per in-cloud bolt (`strikesPerMinute` / kind "cloud").
+   */
   boltSamples: LightningSample[];
+  /**
+   * Single one-shot for cloud-to-ground strikes (`strikePerMinute` /
+   * kind "strike"). Null = silent for ground strikes.
+   */
+  strikeSample: LightningSample | null;
   /** Optional looping background ambience (rain, thunder rumble, …). */
   backgroundSample: LightningSample | null;
   /**
@@ -1697,6 +1705,7 @@ const DEFAULTS = {
     activeStartHour: 20,
     activeEndHour: 4,
     boltSamples: [],
+    strikeSample: null,
     backgroundSample: null,
     boltGain: 0.8,
     backgroundGain: 0.35,
@@ -2927,6 +2936,11 @@ function resolveLightning(input: unknown): LightningParams {
     boltSamples: resolveLightningSamples(
       (saved as Record<string, unknown>).boltSamples,
     ),
+    strikeSample: (() => {
+      const raw = (saved as Record<string, unknown>).strikeSample;
+      if (!raw || typeof raw !== "object") return null;
+      return resolveLightningSample(raw as Record<string, unknown>);
+    })(),
     backgroundSample: (() => {
       const raw = (saved as Record<string, unknown>).backgroundSample;
       if (!raw || typeof raw !== "object") return null;
