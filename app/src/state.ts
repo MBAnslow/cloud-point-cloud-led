@@ -850,30 +850,19 @@ export interface PadParams {
 }
 
 /**
- * Uploaded audio-sample metadata. The actual binary blob lives in
- * IndexedDB keyed by `id`; only these lightweight fields go into the
- * localStorage snapshot.
+ * Uploaded audio-sample metadata + per-track playback settings.
+ * The actual binary blob lives in IndexedDB keyed by `id`; only these
+ * lightweight fields go into the localStorage snapshot.
+ *
+ * All placements of this sample on the arrangement share these params.
+ * Re-uploading the same file creates a new library entry (new track)
+ * with its own independent settings.
  */
 export interface Sample {
   id: string;
   name: string;
   /** Duration of the decoded buffer in seconds. */
   durationSec: number;
-}
-
-/**
- * A single placed sample clip on the 24h arrangement timeline. Its
- * on-screen width (and playback span) is derived (not stored):
- *   widthHours = (sample.durationSec / playbackRate) * (24 / cycleSeconds)
- * so changing `sky.cycleSeconds` rescales all clips correctly. While
- * the playhead is inside the span the engine plays at the matching
- * buffer offset; outside the span the voice stops.
- */
-export interface SampleClip {
-  id: string;
-  sampleId: string;
-  /** Span start in decimal hours, [0, 24). */
-  startHour: number;
   /** Linear gain multiplier, [0, 1]. */
   gain: number;
   /** Stereo pan, [-1, 1]. */
@@ -887,25 +876,103 @@ export interface SampleClip {
   /**
    * On each span enter, pick a random detune in [-randomPitchCents,
    * +randomPitchCents] and hold it for the visit. 0 disables.
-   * Applied as a multiplier on the base playback rate.
    */
-  randomPitchCents?: number;
-  /** Per-clip reverb wet mix, [0, 1]. Uses an algorithmic Freeverb. */
-  reverbMix?: number;
-  /** Freeverb roomSize, [0, 1]. Longer = "bigger" tail. */
-  reverbDecay?: number;
+  randomPitchCents: number;
+  /** Per-track reverb wet mix, [0, 1]. */
+  reverbMix: number;
+  /** Freeverb roomSize, [0, 1]. */
+  reverbDecay: number;
   /** Delay time in seconds (0..2). */
-  delayTimeSec?: number;
+  delayTimeSec: number;
   /** Delay feedback amount [0, 0.95). */
-  delayFeedback?: number;
+  delayFeedback: number;
   /** Delay wet mix, [0, 1]. */
-  delayMix?: number;
+  delayMix: number;
   /**
-   * Probability the clip sounds when the playhead enters its span.
-   * Rolled once per visit; fail stays silent until exit/re-enter.
-   * Undefined = 1 (always play).
+   * Probability each placement sounds when the playhead enters its span.
+   * Rolled once per visit. 1 = always play.
    */
-  triggerProbability?: number;
+  triggerProbability: number;
+}
+
+/** Defaults for a newly uploaded library track. */
+export const DEFAULT_SAMPLE_TRACK = {
+  gain: 1,
+  pan: 0,
+  playbackRate: 1,
+  fadeInSec: 0.01,
+  fadeOutSec: 0.05,
+  randomPitchCents: 0,
+  reverbMix: 0,
+  reverbDecay: 0.7,
+  delayTimeSec: 0.25,
+  delayFeedback: 0.3,
+  delayMix: 0,
+  triggerProbability: 1,
+} as const satisfies Omit<Sample, "id" | "name" | "durationSec">;
+
+function resolveSampleTrackFields(
+  raw: Record<string, unknown> | undefined,
+  fallback?: Record<string, unknown>,
+): Omit<Sample, "id" | "name" | "durationSec"> {
+  const g = (key: string, def: number): number => {
+    const v = raw?.[key] ?? fallback?.[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : def;
+  };
+  return {
+    gain: Math.max(0, Math.min(1, g("gain", DEFAULT_SAMPLE_TRACK.gain))),
+    pan: Math.max(-1, Math.min(1, g("pan", DEFAULT_SAMPLE_TRACK.pan))),
+    playbackRate: Math.max(
+      0.05,
+      Math.min(8, g("playbackRate", DEFAULT_SAMPLE_TRACK.playbackRate)),
+    ),
+    fadeInSec: Math.max(0, g("fadeInSec", DEFAULT_SAMPLE_TRACK.fadeInSec)),
+    fadeOutSec: Math.max(0, g("fadeOutSec", DEFAULT_SAMPLE_TRACK.fadeOutSec)),
+    randomPitchCents: Math.max(
+      0,
+      Math.min(1200, g("randomPitchCents", DEFAULT_SAMPLE_TRACK.randomPitchCents)),
+    ),
+    reverbMix: Math.max(
+      0,
+      Math.min(1, g("reverbMix", DEFAULT_SAMPLE_TRACK.reverbMix)),
+    ),
+    reverbDecay: Math.max(
+      0,
+      Math.min(1, g("reverbDecay", DEFAULT_SAMPLE_TRACK.reverbDecay)),
+    ),
+    delayTimeSec: Math.max(
+      0,
+      Math.min(2, g("delayTimeSec", DEFAULT_SAMPLE_TRACK.delayTimeSec)),
+    ),
+    delayFeedback: Math.max(
+      0,
+      Math.min(0.95, g("delayFeedback", DEFAULT_SAMPLE_TRACK.delayFeedback)),
+    ),
+    delayMix: Math.max(
+      0,
+      Math.min(1, g("delayMix", DEFAULT_SAMPLE_TRACK.delayMix)),
+    ),
+    triggerProbability: Math.max(
+      0,
+      Math.min(
+        1,
+        g("triggerProbability", DEFAULT_SAMPLE_TRACK.triggerProbability),
+      ),
+    ),
+  };
+}
+
+/**
+ * A single placed sample clip on the 24h arrangement timeline. Sound
+ * parameters live on the parent `Sample` (track); the clip only stores
+ * where it starts. Width is derived:
+ *   widthHours = (sample.durationSec / sample.playbackRate) * (24 / cycleSeconds)
+ */
+export interface SampleClip {
+  id: string;
+  sampleId: string;
+  /** Span start in decimal hours, [0, 24). */
+  startHour: number;
 }
 
 /**
@@ -1359,6 +1426,7 @@ export interface SimState {
   setSamples: (p: Partial<SamplesParams>) => void;
   addSample: (sample: Sample) => void;
   removeSample: (id: string) => void;
+  updateSample: (id: string, patch: Partial<Sample>) => void;
   addSampleClip: (clip: SampleClip) => void;
   updateSampleClip: (id: string, patch: Partial<SampleClip>) => void;
   removeSampleClip: (id: string) => void;
@@ -2124,32 +2192,57 @@ function resolveSamplesParams(
   saved: (Partial<SamplesParams> & Record<string, unknown>) | undefined,
 ): SamplesParams {
   if (!saved) return DEFAULTS.samples;
+  const rawClips = Array.isArray(saved.clips)
+    ? (saved.clips as unknown as Array<Record<string, unknown>>)
+    : [];
+  // First legacy clip per sampleId supplies track params when the
+  // library entry itself doesn't yet carry them.
+  const legacyBySample = new Map<string, Record<string, unknown>>();
+  for (const c of rawClips) {
+    if (!c || typeof c.sampleId !== "string") continue;
+    if (!legacyBySample.has(c.sampleId)) legacyBySample.set(c.sampleId, c);
+  }
+
   const library: Sample[] = Array.isArray(saved.library)
-    ? (saved.library as Sample[]).filter(
-        (s) => s && typeof s.id === "string" && typeof s.name === "string",
-      )
+    ? (saved.library as unknown as Array<Record<string, unknown>>)
+        .filter(
+          (s) =>
+            s && typeof s.id === "string" && typeof s.name === "string",
+        )
+        .map((s) => {
+          const id = s.id as string;
+          const track = resolveSampleTrackFields(
+            s,
+            legacyBySample.get(id),
+          );
+          return {
+            id,
+            name: s.name as string,
+            durationSec:
+              typeof s.durationSec === "number" && Number.isFinite(s.durationSec)
+                ? Math.max(0, s.durationSec)
+                : 0,
+            ...track,
+          };
+        })
     : DEFAULTS.samples.library;
   const libIds = new Set(library.map((s) => s.id));
-  const clips: SampleClip[] = Array.isArray(saved.clips)
-    ? (saved.clips as SampleClip[])
-        .filter((c) => c && typeof c.id === "string" && libIds.has(c.sampleId))
-        .map((c) => ({
-          id: c.id,
-          sampleId: c.sampleId,
-          startHour: Math.max(0, Math.min(24, c.startHour ?? 0)),
-          gain: Math.max(0, Math.min(1, c.gain ?? 1)),
-          pan: Math.max(-1, Math.min(1, c.pan ?? 0)),
-          playbackRate: Math.max(0.05, Math.min(8, c.playbackRate ?? 1)),
-          fadeInSec: Math.max(0, c.fadeInSec ?? 0),
-          fadeOutSec: Math.max(0, c.fadeOutSec ?? 0),
-          randomPitchCents: Math.max(0, Math.min(1200, c.randomPitchCents ?? 0)),
-          reverbMix: Math.max(0, Math.min(1, c.reverbMix ?? 0)),
-          reverbDecay: Math.max(0, Math.min(1, c.reverbDecay ?? 0.7)),
-          delayTimeSec: Math.max(0, Math.min(2, c.delayTimeSec ?? 0.25)),
-          delayFeedback: Math.max(0, Math.min(0.95, c.delayFeedback ?? 0.3)),
-          delayMix: Math.max(0, Math.min(1, c.delayMix ?? 0)),
-        }))
-    : DEFAULTS.samples.clips;
+  const clips: SampleClip[] = rawClips
+    .filter(
+      (c) =>
+        c &&
+        typeof c.id === "string" &&
+        typeof c.sampleId === "string" &&
+        libIds.has(c.sampleId),
+    )
+    .map((c) => ({
+      id: c.id as string,
+      sampleId: c.sampleId as string,
+      startHour: Math.max(
+        0,
+        Math.min(24, typeof c.startHour === "number" ? c.startHour : 0),
+      ),
+    }));
   return {
     enabled:
       typeof saved.enabled === "boolean"
@@ -3300,6 +3393,15 @@ export const useSimStore = create<SimState>((set) => ({
         library: s.samples.library.filter((x) => x.id !== id),
         // Any clips referencing this sample become orphaned; drop them.
         clips: s.samples.clips.filter((c) => c.sampleId !== id),
+      },
+    })),
+  updateSample: (id, patch) =>
+    set((s) => ({
+      samples: {
+        ...s.samples,
+        library: s.samples.library.map((x) =>
+          x.id === id ? { ...x, ...patch } : x,
+        ),
       },
     })),
   addSampleClip: (clip) =>

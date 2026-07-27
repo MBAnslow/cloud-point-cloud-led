@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { Link } from "react-router-dom";
-import { useSimStore, type DroneLfoShape, type Sample, type SampleClip } from "../state";
+import { useSimStore, type DroneLfoShape, type Sample, type SampleClip, DEFAULT_SAMPLE_TRACK } from "../state";
 import { LFO_SHAPES, LfoScope } from "../drones/SynthSection";
 import { putSampleBlob, deleteSampleBlob } from "./sampleStorage";
 import { invalidateSamplePeaks } from "./samplePeaks";
@@ -107,6 +107,7 @@ export function SamplesPanel() {
   const setSamples = useSimStore((s) => s.setSamples);
   const addSample = useSimStore((s) => s.addSample);
   const removeSample = useSimStore((s) => s.removeSample);
+  const updateSample = useSimStore((s) => s.updateSample);
   const addSampleClip = useSimStore((s) => s.addSampleClip);
   const updateSampleClip = useSimStore((s) => s.updateSampleClip);
   const removeSampleClip = useSimStore((s) => s.removeSampleClip);
@@ -229,6 +230,7 @@ export function SamplesPanel() {
             id,
             name: file.name.replace(/\.[^.]+$/, ""),
             durationSec,
+            ...DEFAULT_SAMPLE_TRACK,
           };
           addSample(meta);
           // Preload into the engine so first placement plays instantly.
@@ -341,17 +343,6 @@ export function SamplesPanel() {
       id: newId("clip"),
       sampleId: dragSampleId,
       startHour: Math.max(0, Math.min(HOURS - 0.05, hour)),
-      gain: 1,
-      pan: 0,
-      playbackRate: 1,
-      fadeInSec: 0.01,
-      fadeOutSec: 0.05,
-      randomPitchCents: 0,
-      reverbMix: 0,
-      reverbDecay: 0.7,
-      delayTimeSec: 0.25,
-      delayFeedback: 0.3,
-      delayMix: 0,
     };
     addSampleClip(clip);
     setSelectedId(clip.id);
@@ -869,13 +860,13 @@ export function SamplesPanel() {
                       const leftPct = (c.startHour / HOURS) * 100;
                       const widthHours = clipWidthHours(
                         sample.durationSec,
-                        c.playbackRate,
+                        sample.playbackRate,
                         sky.cycleSeconds,
                       );
                       const widthPct = (widthHours / HOURS) * 100;
                       const playSec =
                         sample.durationSec /
-                        Math.max(1e-6, c.playbackRate);
+                        Math.max(1e-6, sample.playbackRate);
                       const skyMinutes = widthHours * 60;
                       const isSel = c.id === selectedId;
                       return (
@@ -902,7 +893,7 @@ export function SamplesPanel() {
                             boxSizing: "border-box",
                             overflow: "hidden",
                           }}
-                          title={`${sample.name}  @ ${fmtTime(c.startHour)}  · ${playSec.toFixed(1)}s audio ≈ ${skyMinutes.toFixed(1)} sky-min  · rate ${c.playbackRate.toFixed(2)}× gain ${c.gain.toFixed(2)}`}
+                          title={`${sample.name}  @ ${fmtTime(c.startHour)}  · ${playSec.toFixed(1)}s audio ≈ ${skyMinutes.toFixed(1)} sky-min  · rate ${sample.playbackRate.toFixed(2)}× gain ${sample.gain.toFixed(2)}`}
                         >
                           <SampleWaveform
                             sampleId={sample.id}
@@ -962,7 +953,10 @@ export function SamplesPanel() {
           <SampleClipEditor
             clip={selectedClip}
             sample={sampleById.get(selectedClip.sampleId)}
-            onChange={(patch) => updateSampleClip(selectedClip.id, patch)}
+            onChangeTrack={(patch) =>
+              updateSample(selectedClip.sampleId, patch)
+            }
+            onChangeClip={(patch) => updateSampleClip(selectedClip.id, patch)}
             onDelete={() => {
               removeSampleClip(selectedClip.id);
               setSelectedId(null);

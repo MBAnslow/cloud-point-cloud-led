@@ -94,8 +94,8 @@ function BreathModHeader() {
 const SCOPE_H = 32;
 
 /**
- * Meter of mean live breath-sphere mask across LEDs — should pulse as
- * each wave crosses the cloud.
+ * Meter of mean LED time-of-day reveal (threshold floor + breath
+ * path/linger) — pulses as waves cross and tracks the threshold.
  */
 function BreathFilterDriveMeter({ active }: { active: boolean }) {
   const [drive, setDrive] = useState(0);
@@ -112,7 +112,7 @@ function BreathFilterDriveMeter({ active }: { active: boolean }) {
   const fill = Math.max(0, Math.min(1, drive));
   return (
     <div
-      title="Breath-sphere engagement on cloud LEDs (how many × how strongly; ~1 when fully over the cloud)"
+      title="Mean LED time-of-day reveal (threshold + breath). 1 = all LEDs fully revealed, 0 = none"
       style={{
         position: "relative",
         height: SCOPE_H,
@@ -148,7 +148,7 @@ function BreathFilterDriveMeter({ active }: { active: boolean }) {
           pointerEvents: "none",
         }}
       >
-        wave {fill.toFixed(2)}
+        reveal {fill.toFixed(2)}
       </div>
     </div>
   );
@@ -524,7 +524,7 @@ function BreathModColumn({ modKey }: { modKey: string }) {
         gap: 4,
         minWidth: 118,
       }}
-      title="Cloud breath modulation (applied × mean LED gate)"
+      title="Cloud breath modulation (applied × mean LED time-of-day reveal)"
     >
       <input
         type="range"

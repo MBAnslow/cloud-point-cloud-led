@@ -469,10 +469,6 @@ export function Leds() {
         edgeNoise: breath.edgeNoise,
       };
       const fogCenter = cloudCenterWorld(cloudXformBreath);
-      // Geometric (pre-fog) coverage for audio drive — see setBreathEffectDrive.
-      let solidSum = 0;
-      let solidCount = 0;
-      const SOLID_ACTIVE = 0.04;
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const sample = breathSampleAt(
@@ -493,10 +489,6 @@ export function Leds() {
         buffers.breathColorFloats[i3] = sample.mask;
         buffers.breathColorFloats[i3 + 1] = sample.mask;
         buffers.breathColorFloats[i3 + 2] = sample.mask;
-        if (sample.solid > SOLID_ACTIVE) {
-          solidSum += sample.solid;
-          solidCount++;
-        }
         if (useBreathMask) {
           buffers.breathRimWeights[i] = sample.rim;
           buffers.breathRimColors[i3] = sample.rimR;
@@ -509,21 +501,10 @@ export function Leds() {
           buffers.breathRimColors[i3 + 2] = 0;
         }
       }
-      // Mean geometric fill of LEDs inside the spheroid. Fog is ignored so
-      // a sphere fully over the cloud reads near 1 even when fog speckles
-      // the visible mask. Soft breadth avoids pegging on a single LED.
-      if (solidCount === 0) {
-        setBreathEffectDrive(0);
-      } else {
-        const fill = solidSum / solidCount;
-        const breadth = Math.min(1, solidCount / 40);
-        setBreathEffectDrive(fill * breadth);
-      }
     } else {
       buffers.breathColorFloats.fill(0);
       buffers.breathRimWeights.fill(0);
       buffers.breathRimColors.fill(0);
-      setBreathEffectDrive(0);
     }
 
     // Persistent breath-filter memory (TOD gate). Rebuild cooldown field
@@ -580,6 +561,30 @@ export function Leds() {
             !(v >= 0) || !Number.isFinite(v) ? floor : Math.max(floor, v);
         }
       }
+    }
+
+    // Cloud breath-mod drive = mean per-LED TOD reveal gate (same
+    // inhaleMask compositing uses). Threshold floors constantly; breath
+    // path/linger raises memory temporarily. 1 = all LEDs fully revealed.
+    if (breathLive && buffers.n > 0) {
+      const useMemFilter = breathFilter.enabled;
+      const thresh = clamp01(liveFilterThreshold);
+      let sum = 0;
+      for (let i = 0; i < buffers.n; i++) {
+        const i3 = i * 3;
+        const inhaleMask = useMemFilter
+          ? breathFilterGate(buffers.breathFilterMemory[i], thresh)
+          : clamp01(
+              (buffers.breathColorFloats[i3] +
+                buffers.breathColorFloats[i3 + 1] +
+                buffers.breathColorFloats[i3 + 2]) /
+                3,
+            );
+        sum += inhaleMask;
+      }
+      setBreathEffectDrive(sum / buffers.n);
+    } else {
+      setBreathEffectDrive(0);
     }
 
     // Strike scheduler runs whenever lightning is enabled and in its

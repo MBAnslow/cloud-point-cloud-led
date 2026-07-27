@@ -3,15 +3,42 @@ import type { Sample, SampleClip } from "../state";
 interface Props {
   clip: SampleClip;
   sample: Sample | undefined;
-  onChange: (patch: Partial<SampleClip>) => void;
+  onChangeTrack: (patch: Partial<Sample>) => void;
+  onChangeClip: (patch: Partial<SampleClip>) => void;
   onDelete: () => void;
 }
 
 /**
- * Selected-clip editor: gain, pan, rate, fade in / out. Rendered under
- * the timeline when a clip is selected.
+ * Selected-clip editor. Sound/FX knobs edit the parent library *track*
+ * (shared by every placement of that sample). Only Start is per-clip.
  */
-export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
+export function SampleClipEditor({
+  clip,
+  sample,
+  onChangeTrack,
+  onChangeClip,
+  onDelete,
+}: Props) {
+  if (!sample) {
+    return (
+      <div
+        style={{
+          marginTop: 8,
+          padding: 10,
+          borderRadius: 6,
+          background: "rgba(251,146,60,0.08)",
+          border: "1px solid rgba(251,146,60,0.35)",
+          fontSize: 11,
+        }}
+      >
+        (missing sample)
+        <button onClick={onDelete} style={{ ...btn, marginLeft: 8 }}>
+          Delete
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
@@ -27,20 +54,21 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
       }}
     >
       <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8 }}>
-        <strong>{sample?.name ?? "(missing sample)"}</strong>
+        <strong>{sample.name}</strong>
         <span style={{ opacity: 0.65 }}>
-          {sample ? `${sample.durationSec.toFixed(2)}s` : ""}
-          {sample ? ` · plays ${(sample.durationSec / clip.playbackRate).toFixed(2)}s @ rate ${clip.playbackRate.toFixed(2)}` : ""}
+          {sample.durationSec.toFixed(2)}s
+          {` · plays ${(sample.durationSec / sample.playbackRate).toFixed(2)}s @ rate ${sample.playbackRate.toFixed(2)}`}
+          {" · track settings apply to all placements"}
         </span>
         <label
           style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}
-          title="Odds this clip sounds each time the playhead enters its span"
+          title="Odds each placement on this track sounds when the playhead enters its span"
         >
           <span style={{ opacity: 0.75 }}>Chance</span>
           <select
-            value={clip.triggerProbability ?? 1}
+            value={sample.triggerProbability}
             onChange={(e) =>
-              onChange({ triggerProbability: parseFloat(e.target.value) })
+              onChangeTrack({ triggerProbability: parseFloat(e.target.value) })
             }
             style={{
               background: "rgba(255,255,255,0.06)",
@@ -63,47 +91,47 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
       </div>
       <Slider
         label="Gain"
-        value={clip.gain}
+        value={sample.gain}
         min={0}
         max={1}
         step={0.01}
-        onChange={(v) => onChange({ gain: v })}
+        onChange={(v) => onChangeTrack({ gain: v })}
       />
       <Slider
         label="Pan"
-        value={clip.pan}
+        value={sample.pan}
         min={-1}
         max={1}
         step={0.01}
-        onChange={(v) => onChange({ pan: v })}
+        onChange={(v) => onChangeTrack({ pan: v })}
       />
       <Slider
         label="Rate"
-        value={clip.playbackRate}
+        value={sample.playbackRate}
         min={0.25}
         max={4}
         step={0.01}
         logScale
         unit="×"
-        onChange={(v) => onChange({ playbackRate: v })}
+        onChange={(v) => onChangeTrack({ playbackRate: v })}
       />
       <Slider
         label="Fade in"
-        value={clip.fadeInSec}
+        value={sample.fadeInSec}
         min={0}
         max={2}
         step={0.01}
         unit="s"
-        onChange={(v) => onChange({ fadeInSec: v })}
+        onChange={(v) => onChangeTrack({ fadeInSec: v })}
       />
       <Slider
         label="Fade out"
-        value={clip.fadeOutSec}
+        value={sample.fadeOutSec}
         min={0}
         max={2}
         step={0.01}
         unit="s"
-        onChange={(v) => onChange({ fadeOutSec: v })}
+        onChange={(v) => onChangeTrack({ fadeOutSec: v })}
       />
       <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
         Start
@@ -114,7 +142,7 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
           step={0.05}
           value={+clip.startHour.toFixed(2)}
           onChange={(e) =>
-            onChange({
+            onChangeClip({
               startHour: Math.max(0, Math.min(24, parseFloat(e.target.value) || 0)),
             })
           }
@@ -123,73 +151,69 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
         <span style={{ opacity: 0.6 }}>h</span>
       </label>
 
-      {/*
-        FX row: random pitch, reverb, delay. Each is a small card so
-        params stay grouped visually. Applied per-clip (each active
-        voice gets its own Freeverb + FeedbackDelay).
-      */}
       <div style={fxCard}>
         <div style={fxTitle}>Random pitch</div>
         <Slider
           label="Range"
-          value={clip.randomPitchCents ?? 0}
+          value={sample.randomPitchCents}
           min={0}
           max={1200}
           step={1}
           unit="c"
-          onChange={(v) => onChange({ randomPitchCents: v })}
+          onChange={(v) => onChangeTrack({ randomPitchCents: v })}
         />
         <div style={hint}>
           On each span enter, pitch is offset by a random amount in
-          ±range cents. 1200c = ±1 octave. Held for the whole clip.
+          ±range cents. 1200c = ±1 octave. Shared by every placement on
+          this track.
         </div>
       </div>
       <div style={fxCard}>
         <div style={fxTitle}>Reverb</div>
         <Slider
           label="Mix"
-          value={clip.reverbMix ?? 0}
+          value={sample.reverbMix}
           min={0}
           max={1}
           step={0.01}
-          onChange={(v) => onChange({ reverbMix: v })}
+          onChange={(v) => onChangeTrack({ reverbMix: v })}
         />
         <Slider
           label="Size"
-          value={clip.reverbDecay ?? 0.7}
+          value={sample.reverbDecay}
           min={0}
           max={0.99}
           step={0.01}
-          onChange={(v) => onChange({ reverbDecay: v })}
+          onChange={(v) => onChangeTrack({ reverbDecay: v })}
         />
       </div>
       <div style={fxCard}>
         <div style={fxTitle}>Delay</div>
         <Slider
           label="Time"
-          value={clip.delayTimeSec ?? 0.25}
+          value={sample.delayTimeSec}
           min={0.01}
           max={2}
           step={0.01}
           unit="s"
           logScale
-          onChange={(v) => onChange({ delayTimeSec: v })}
+          onChange={(v) => onChangeTrack({ delayTimeSec: v })}
         />
         <Slider
           label="Feedback"
-          value={clip.delayFeedback ?? 0.3}
+          value={sample.delayFeedback}
           min={0}
           max={0.95}
           step={0.01}
-          onChange={(v) => onChange({ delayFeedback: v })}
+          onChange={(v) => onChangeTrack({ delayFeedback: v })}
         />
         <Slider
           label="Mix"
-          value={clip.delayMix ?? 0}
+          value={sample.delayMix}
           min={0}
           max={1}
           step={0.01}
-          onChange={(v) => onChange({ delayMix: v })}
+          onChange={(v) => onChangeTrack({ delayMix: v })}
         />
       </div>
     </div>

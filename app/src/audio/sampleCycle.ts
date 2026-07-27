@@ -1,4 +1,4 @@
-import type { SampleClip, SamplesParams } from "../state";
+import type { Sample, SampleClip, SamplesParams } from "../state";
 
 const HOURS = 24;
 
@@ -6,8 +6,8 @@ const HOURS = 24;
  * A sample clip is a *span* on the 24h timeline. While the playhead is
  * inside `[startHour, startHour + widthHours)` the engine plays the
  * buffer at the matching offset; outside the span the voice stops.
- * `widthHours` is derived from duration × playbackRate × cycle speed
- * (same formula as the Samples panel drawing).
+ * Sound params come from the parent library `Sample` (track); width
+ * uses that track's playbackRate × cycle speed.
  */
 export interface ActiveClip {
   clipId: string;
@@ -58,8 +58,6 @@ export function clipProgressHours(
   const s = ((startHour % HOURS) + HOURS) % HOURS;
   let d = h - s;
   if (d < 0) d += HOURS;
-  // When the span is longer than a full day, every hour is inside;
-  // progress is the forward distance from start within 24h.
   if (widthHours >= HOURS) return d;
   if (d >= widthHours) return null;
   return d;
@@ -84,8 +82,7 @@ export function clipOffsetSec(
 
 function toActive(
   c: SampleClip,
-  durationSec: number,
-  cycleSeconds: number,
+  sample: Sample,
   offsetSec: number,
   widthHours: number,
 ): ActiveClip {
@@ -93,26 +90,30 @@ function toActive(
     clipId: c.id,
     sampleId: c.sampleId,
     startHour: c.startHour,
-    durationSec,
+    durationSec: sample.durationSec,
     widthHours,
     offsetSec,
-    gain: c.gain,
-    pan: c.pan,
-    playbackRate: c.playbackRate,
-    fadeInSec: c.fadeInSec,
-    fadeOutSec: c.fadeOutSec,
-    randomPitchCents: c.randomPitchCents ?? 0,
-    reverbMix: c.reverbMix ?? 0,
-    reverbDecay: c.reverbDecay ?? 0.7,
-    delayTimeSec: c.delayTimeSec ?? 0.25,
-    delayFeedback: c.delayFeedback ?? 0.3,
-    delayMix: c.delayMix ?? 0,
-    triggerProbability: Math.max(0, Math.min(1, c.triggerProbability ?? 1)),
+    gain: sample.gain,
+    pan: sample.pan,
+    playbackRate: sample.playbackRate,
+    fadeInSec: sample.fadeInSec,
+    fadeOutSec: sample.fadeOutSec,
+    randomPitchCents: sample.randomPitchCents,
+    reverbMix: sample.reverbMix,
+    reverbDecay: sample.reverbDecay,
+    delayTimeSec: sample.delayTimeSec,
+    delayFeedback: sample.delayFeedback,
+    delayMix: sample.delayMix,
+    triggerProbability: Math.max(
+      0,
+      Math.min(1, sample.triggerProbability),
+    ),
   };
 }
 
 /**
  * Every clip whose span covers `hour` at the current day-cycle speed.
+ * Params are taken from the library track (`Sample`), not the clip.
  */
 export function clipsActiveAt(
   hour: number,
@@ -126,18 +127,18 @@ export function clipsActiveAt(
     if (!sample) continue;
     const width = clipWidthHours(
       sample.durationSec,
-      c.playbackRate,
+      sample.playbackRate,
       cycleSeconds,
     );
     const offset = clipOffsetSec(
       hour,
       c.startHour,
-      c.playbackRate,
+      sample.playbackRate,
       cycleSeconds,
       sample.durationSec,
     );
     if (offset == null) continue;
-    out.push(toActive(c, sample.durationSec, cycleSeconds, offset, width));
+    out.push(toActive(c, sample, offset, width));
   }
   return out;
 }

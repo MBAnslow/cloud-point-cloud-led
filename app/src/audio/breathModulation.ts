@@ -51,10 +51,9 @@ function apply(base: number, r: ParamRange, amount: number, intensity: number): 
 }
 
 /**
- * Breath-mod drive = how strongly the travelling sphere is lighting
- * cloud LEDs right now (mean mask of affected bulbs × footprint).
- * Cycles up/down with each pass; ~1 when the sphere fully engages the
- * cloud. 0 when mod/breath inactive.
+ * Breath-mod drive = mean per-LED time-of-day reveal gate (threshold
+ * floor + breath memory/path). 1 when every LED is fully revealed, 0
+ * when none are / mod or breath inactive.
  */
 export function currentBreathDrive(state: SimState, _nowMs?: number): number {
   if (
