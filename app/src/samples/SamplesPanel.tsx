@@ -10,12 +10,15 @@ import { Link } from "react-router-dom";
 import { useSimStore, type DroneLfoShape, type Sample, type SampleClip } from "../state";
 import { LFO_SHAPES, LfoScope } from "../drones/SynthSection";
 import { putSampleBlob, deleteSampleBlob } from "./sampleStorage";
+import { invalidateSamplePeaks } from "./samplePeaks";
+import { SampleWaveform } from "./SampleWaveform";
 import { getSampleEngine } from "../audio/SampleEngine";
 import { SampleClipEditor } from "./SampleClipEditor";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
 
 const HOURS = 24;
-const LANE_HEIGHT = 40;
+/** Taller lanes so waveforms and clip names have room. */
+const LANE_HEIGHT = 72;
 const LIBRARY_WIDTH = 220;
 /** Floor so very short clips stay clickable on the lane. */
 const CLIP_MIN_WIDTH_PX = 8;
@@ -250,6 +253,7 @@ export function SamplesPanel() {
     async (id: string) => {
       if (!confirm("Delete this sample and all its clips?")) return;
       removeSample(id);
+      invalidateSamplePeaks(id);
       await deleteSampleBlob(id).catch(() => undefined);
     },
     [removeSample],
@@ -565,8 +569,8 @@ export function SamplesPanel() {
             <strong style={{ fontSize: 12 }}>Arrangement</strong>
             <span style={{ fontSize: 11, opacity: 0.6 }}>
               drag a sample from the library onto a lane · drag block to move
-              its trigger · Del to remove · drag ruler to scrub · ⌘/Ctrl+wheel
-              to zoom
+              · Del to remove · drag ruler to scrub · ⌘/Ctrl+wheel to zoom ·
+              audio follows the playhead through each clip
             </span>
             <label
               style={{
@@ -663,19 +667,28 @@ export function SamplesPanel() {
                   style={{
                     height: LANE_HEIGHT,
                     display: "flex",
-                    alignItems: "center",
+                    alignItems: "stretch",
                     gap: 6,
-                    padding: "0 6px",
+                    padding: "4px 6px",
                     borderTop: "1px solid rgba(255,255,255,0.06)",
                     cursor: "grab",
                     background:
                       dragSampleId === s.id
                         ? "rgba(251,146,60,0.18)"
                         : "transparent",
+                    boxSizing: "border-box",
                   }}
                   title={`Drag onto a lane · ${s.durationSec.toFixed(2)}s`}
                 >
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 2,
+                    }}
+                  >
                     <div
                       style={{
                         fontSize: 11,
@@ -683,17 +696,38 @@ export function SamplesPanel() {
                         whiteSpace: "nowrap",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
+                        flexShrink: 0,
                       }}
                     >
                       {s.name}
+                      <span style={{ fontSize: 9, opacity: 0.6, fontWeight: 400, marginLeft: 6 }}>
+                        {s.durationSec.toFixed(2)}s
+                      </span>
                     </div>
-                    <div style={{ fontSize: 9, opacity: 0.6 }}>
-                      {s.durationSec.toFixed(2)}s
+                    <div
+                      style={{
+                        flex: 1,
+                        minHeight: 0,
+                        position: "relative",
+                        borderRadius: 3,
+                        background: "rgba(0,0,0,0.35)",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <SampleWaveform
+                        sampleId={s.id}
+                        color="rgba(251,146,60,0.85)"
+                      />
                     </div>
                   </div>
                   <button
                     onClick={() => void deleteSample(s.id)}
-                    style={{ ...btn, padding: "1px 5px", fontSize: 10 }}
+                    style={{
+                      ...btn,
+                      padding: "1px 5px",
+                      fontSize: 10,
+                      alignSelf: "center",
+                    }}
                     title="Delete sample"
                   >
                     ×
@@ -824,9 +858,9 @@ export function SamplesPanel() {
                         pointerEvents: "none",
                       }}
                     />
-                    {/* Clip spans — width = how many sky-hours the audio
-                        covers at the current cycle speed. Left edge is the
-                        trigger (`startHour`). */}
+                    {/* Clip spans — width = sky-hours the audio covers.
+                        Left edge is `startHour`; playhead inside the
+                        span seeks into the buffer. */}
                     {samples.clips.map((c) => {
                       const sample = sampleById.get(c.sampleId);
                       if (!sample) return null;
@@ -851,33 +885,51 @@ export function SamplesPanel() {
                           onPointerDown={(e) => beginClipDrag(e, c.id)}
                           style={{
                             position: "absolute",
-                            top: lane * LANE_HEIGHT + 2,
+                            top: lane * LANE_HEIGHT + 3,
                             left: `${leftPct}%`,
                             width: `${widthPct}%`,
                             minWidth: CLIP_MIN_WIDTH_PX,
-                            height: LANE_HEIGHT - 4,
+                            height: LANE_HEIGHT - 6,
                             background: isSel
                               ? "linear-gradient(180deg,#fb923c,#ea580c)"
-                              : "linear-gradient(180deg,#fb923caa,#ea580caa)",
+                              : "linear-gradient(180deg,#c2410caa,#9a3412aa)",
                             border: `1px solid ${isSel ? "#fff" : "#7c2d12"}`,
                             borderLeft: `3px solid ${
                               isSel ? "#fff" : "#fdba74"
                             }`,
-                            borderRadius: 3,
+                            borderRadius: 4,
                             cursor: "grab",
                             boxSizing: "border-box",
-                            display: "flex",
-                            alignItems: "center",
-                            paddingLeft: 4,
-                            fontSize: 10,
-                            color: "#1a0a05",
-                            fontWeight: 600,
                             overflow: "hidden",
-                            whiteSpace: "nowrap",
                           }}
                           title={`${sample.name}  @ ${fmtTime(c.startHour)}  · ${playSec.toFixed(1)}s audio ≈ ${skyMinutes.toFixed(1)} sky-min  · rate ${c.playbackRate.toFixed(2)}× gain ${c.gain.toFixed(2)}`}
                         >
-                          ▶ {sample.name}
+                          <SampleWaveform
+                            sampleId={sample.id}
+                            color={
+                              isSel
+                                ? "rgba(255,255,255,0.75)"
+                                : "rgba(255,237,213,0.7)"
+                            }
+                          />
+                          <div
+                            style={{
+                              position: "absolute",
+                              left: 4,
+                              top: 3,
+                              right: 4,
+                              fontSize: 10,
+                              color: "#1a0a05",
+                              fontWeight: 700,
+                              textShadow: "0 0 4px rgba(255,255,255,0.55)",
+                              overflow: "hidden",
+                              whiteSpace: "nowrap",
+                              textOverflow: "ellipsis",
+                              pointerEvents: "none",
+                            }}
+                          >
+                            {sample.name}
+                          </div>
                         </div>
                       );
                     })}

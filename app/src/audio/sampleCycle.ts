@@ -1,15 +1,24 @@
 import type { SampleClip, SamplesParams } from "../state";
 
+const HOURS = 24;
+
 /**
- * A sample clip is a *trigger*: when the playhead crosses its
- * `startHour` the clip fires once and plays the entire sample buffer
- * to its natural end (or is torn down when the track is disabled).
- * Runtime is still a trigger at `startHour`; the Samples panel draws
- * width from duration × cycle speed (sky-hours covered while playing).
+ * A sample clip is a *span* on the 24h timeline. While the playhead is
+ * inside `[startHour, startHour + widthHours)` the engine plays the
+ * buffer at the matching offset; outside the span the voice stops.
+ * `widthHours` is derived from duration × playbackRate × cycle speed
+ * (same formula as the Samples panel drawing).
  */
-export interface TriggeredClip {
+export interface ActiveClip {
   clipId: string;
   sampleId: string;
+  startHour: number;
+  /** Decoded buffer length in seconds. */
+  durationSec: number;
+  /** Hours of sky-time the clip covers at the current cycle speed. */
+  widthHours: number;
+  /** Buffer read position for the current playhead, in seconds. */
+  offsetSec: number;
   gain: number;
   pan: number;
   playbackRate: number;
@@ -21,14 +30,72 @@ export interface TriggeredClip {
   delayTimeSec: number;
   delayFeedback: number;
   delayMix: number;
-  /** Roll gate applied at trigger time in the engine; 0..1. */
+  /** Rolled once on span enter in the engine; 0..1. */
   triggerProbability: number;
 }
 
-function toActive(c: SampleClip): TriggeredClip {
+/** Simulated hours covered while the sample plays at cycle speed. */
+export function clipWidthHours(
+  durationSec: number,
+  playbackRate: number,
+  cycleSeconds: number,
+): number {
+  const playSec = durationSec / Math.max(1e-6, playbackRate);
+  return playSec * (HOURS / Math.max(1, cycleSeconds));
+}
+
+/**
+ * Hours elapsed since `startHour` along the forward timeline, or null
+ * if `hour` is outside the clip span (handles midnight wrap).
+ */
+export function clipProgressHours(
+  hour: number,
+  startHour: number,
+  widthHours: number,
+): number | null {
+  if (!(widthHours > 0)) return null;
+  const h = ((hour % HOURS) + HOURS) % HOURS;
+  const s = ((startHour % HOURS) + HOURS) % HOURS;
+  let d = h - s;
+  if (d < 0) d += HOURS;
+  // When the span is longer than a full day, every hour is inside;
+  // progress is the forward distance from start within 24h.
+  if (widthHours >= HOURS) return d;
+  if (d >= widthHours) return null;
+  return d;
+}
+
+/** Buffer offset (seconds) for a playhead position inside the span. */
+export function clipOffsetSec(
+  hour: number,
+  startHour: number,
+  playbackRate: number,
+  cycleSeconds: number,
+  durationSec: number,
+): number | null {
+  const width = clipWidthHours(durationSec, playbackRate, cycleSeconds);
+  const progress = clipProgressHours(hour, startHour, width);
+  if (progress == null) return null;
+  const rate = Math.max(1e-6, playbackRate);
+  const offset =
+    progress * (Math.max(1, cycleSeconds) / HOURS) * rate;
+  return Math.max(0, Math.min(Math.max(0, durationSec - 1e-4), offset));
+}
+
+function toActive(
+  c: SampleClip,
+  durationSec: number,
+  cycleSeconds: number,
+  offsetSec: number,
+  widthHours: number,
+): ActiveClip {
   return {
     clipId: c.id,
     sampleId: c.sampleId,
+    startHour: c.startHour,
+    durationSec,
+    widthHours,
+    offsetSec,
     gain: c.gain,
     pan: c.pan,
     playbackRate: c.playbackRate,
@@ -45,36 +112,32 @@ function toActive(c: SampleClip): TriggeredClip {
 }
 
 /**
- * Trigger threshold in decimal hours. If `hour - prevHour` exceeds
- * this the jump is treated as a scrub or a wrap-around and no clips
- * are fired. Chosen large enough that normal forward advance at fast
- * cycles (e.g. 5s/24h ≈ 4.8 h/s ≈ 0.08h/frame at 60fps) always fits,
- * small enough that a period rewind never looks like a forward step.
+ * Every clip whose span covers `hour` at the current day-cycle speed.
  */
-const MAX_FORWARD_STEP_HOURS = 1.0;
-
-/**
- * Return every clip whose `startHour` falls in the half-open interval
- * `(prevHour, hour]` — i.e. clips the playhead just crossed on this
- * frame. Only fires on normal forward micro-steps; scrubs, resets and
- * period loops (which show up as either a rewind or a large jump) do
- * not fire triggers.
- */
-export function sampleClipsToTrigger(
-  prevHour: number,
+export function clipsActiveAt(
   hour: number,
   params: SamplesParams,
-): TriggeredClip[] {
-  if (prevHour < 0) return []; // first frame; nothing to compare to.
-  const dh = hour - prevHour;
-  if (dh <= 0 || dh > MAX_FORWARD_STEP_HOURS) return [];
+  cycleSeconds: number,
+): ActiveClip[] {
   const byId = new Map(params.library.map((s) => [s.id, s]));
-  const out: TriggeredClip[] = [];
+  const out: ActiveClip[] = [];
   for (const c of params.clips) {
-    if (!byId.has(c.sampleId)) continue;
-    if (c.startHour > prevHour && c.startHour <= hour) {
-      out.push(toActive(c));
-    }
+    const sample = byId.get(c.sampleId);
+    if (!sample) continue;
+    const width = clipWidthHours(
+      sample.durationSec,
+      c.playbackRate,
+      cycleSeconds,
+    );
+    const offset = clipOffsetSec(
+      hour,
+      c.startHour,
+      c.playbackRate,
+      cycleSeconds,
+      sample.durationSec,
+    );
+    if (offset == null) continue;
+    out.push(toActive(c, sample.durationSec, cycleSeconds, offset, width));
   }
   return out;
 }

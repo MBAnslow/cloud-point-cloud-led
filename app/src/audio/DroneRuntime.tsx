@@ -35,9 +35,9 @@ export function DroneRuntime(): null {
       const dtMs = now - last;
       last = now;
       const state = useSimStore.getState();
-      // The clock loops inside the currently-active day period.
-      // Advancing to the next period is a manual action that also
-      // snaps timeHours to that period's startHour.
+      // The clock normally loops inside the active day period.
+      // Scrubbing is free across the full 24h — leaving a period no
+      // longer snaps timeHours back to that period's start.
       const period =
         state.dayCycle.periods.find(
           (p) => p.id === state.dayCycle.activePeriodId,
@@ -53,8 +53,17 @@ export function DroneRuntime(): null {
           state.setSky({ timeHours: next });
         }
       } else if (!periodContainsHour(period, cur)) {
-        // Scrubbed or switched period; snap to start.
-        state.setSky({ timeHours: period.startHour });
+        // Playhead is outside the active period (user scrubbed freely).
+        // Do not snap back — keep the scrubbed position. While auto-
+        // playing, advance across the full 24h day until they re-enter
+        // a period (or switch periods manually).
+        if (state.sky.autoPlay) {
+          const hoursPerMs =
+            24 / (Math.max(1, state.sky.cycleSeconds) * 1000);
+          let next = cur + dtMs * hoursPerMs;
+          next = ((next % 24) + 24) % 24;
+          state.setSky({ timeHours: next });
+        }
       } else if (state.sky.autoPlay) {
         const hoursPerMs =
           24 / (Math.max(1, state.sky.cycleSeconds) * 1000);

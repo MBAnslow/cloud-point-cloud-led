@@ -28,7 +28,12 @@ export function SampleRuntime(): null {
       raf = requestAnimationFrame(tick);
       const state = useSimStore.getState();
       const { samples } = modulatedEngineParams(state, performance.now());
-      engine.update(state.sky.timeHours, state.sky.cycleSeconds, samples);
+      engine.update(
+        state.sky.timeHours,
+        state.sky.cycleSeconds,
+        samples,
+        state.sky.autoPlay,
+      );
     };
     raf = requestAnimationFrame(tick);
 

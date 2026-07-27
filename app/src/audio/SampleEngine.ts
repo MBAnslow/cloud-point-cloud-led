@@ -1,30 +1,40 @@
 import * as Tone from "tone";
-import type { Sample, SamplesParams } from "../state";
+import { useSimStore, type Sample, type SamplesParams } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
-import { sampleClipsToTrigger, type TriggeredClip } from "./sampleCycle";
+import { clipsActiveAt, type ActiveClip } from "./sampleCycle";
 import { applyFilterChain } from "./filterChain";
 
 /**
- * Samples engine — trigger model.
+ * Samples engine — scrubber-synced spans.
  *
- * Each `SampleClip` acts as a fire-and-forget trigger positioned at
- * `startHour`. Whenever the playhead crosses that hour we start a new
- * voice which plays the whole sample buffer from t=0 and then disposes
- * itself. Multiple simultaneous voices for the same clip are allowed
- * (retrigger before natural end). Panel width is visual only — derived
- * from duration and day-cycle speed; playback is still fire-and-forget.
+ * Each `SampleClip` covers a derived sky-time span. While the playhead
+ * is inside that span the engine plays the buffer at the matching
+ * offset; leaving the span stops the voice. One voice per clip.
+ *
+ * Auto-play: start on enter, free-run at clip.playbackRate (matches
+ * span math). Scrub / wrap: seek to offset. Pause: hold silent.
+ * Random detune + master pitch LFO go through PitchShift so they do
+ * not change playback length / timeline lock.
  *
  * Per-voice chain:
- *   Player(buffer) → gain (fade in/out) → panner →
+ *   Player → PitchShift → gain (position fades) → panner →
  *      ┬── dryGain ──►
  *      ├── reverb → reverbWet ──►  → sampleBus → master → destination
  *      └── delay  → delayWet  ──►
  */
 
+/** Hour jump larger than this is treated as a scrub / wrap. */
+const MAX_SMOOTH_STEP_HOURS = 1.0;
+/** Don't bother starting a segment with less buffer than this left. */
+const MIN_REMAINING_BUF_SEC = 0.01;
+/** Skip gain automation unless the target moved by at least this. */
+const GAIN_EPS = 0.01;
+
 interface Voice {
   clipId: string;
   sampleId: string;
   player: Tone.Player;
+  pitchShift: Tone.PitchShift;
   gain: Tone.Gain;
   panner: Tone.Panner;
   dryGain: Tone.Gain;
@@ -32,14 +42,20 @@ interface Voice {
   reverbWet: Tone.Gain;
   delay: Tone.FeedbackDelay;
   delayWet: Tone.Gain;
-  /** Random detune baked in at trigger; combined with the live
-   *  playbackRate so slider edits still respect the initial roll. */
-  randomRateMult: number;
-  /** Real-clock end time (Tone context seconds) after which the voice
-   *  can be reaped. */
-  endsAt: number;
+  /** Random detune in cents, baked at span enter. */
+  randomCents: number;
+  /** Last gain target we ramped toward (for thrash avoidance). */
+  lastGainTarget: number;
+  /** Buffer offset when the current player segment started. */
+  startOffsetSec: number;
+  /** Tone.now() when the current player segment started. */
+  startedAtTone: number;
+  /** True while autoPlay is off and the player is stopped mid-span. */
+  paused: boolean;
   disposed: boolean;
 }
+
+type EnterRoll = "accepted" | "rejected";
 
 export class SampleEngine {
   private started = false;
@@ -47,7 +63,6 @@ export class SampleEngine {
   private masterHp: Tone.Filter | null = null;
   private masterLp: Tone.Filter | null = null;
   private bus: Tone.Gain | null = null;
-  // Master send FX (bus → dry/reverbSend/delaySend → master).
   private masterReverb: Tone.Freeverb | null = null;
   private masterReverbWet: Tone.Gain | null = null;
   private masterDelay: Tone.FeedbackDelay | null = null;
@@ -58,7 +73,6 @@ export class SampleEngine {
   private pitchLfoShape: "sine" | "triangle" | "square" | "sawtooth" = "sine";
   private startTimeMs = 0;
 
-  /** Effective pitch offset (cents) at the current wall-clock instant. */
   private currentPitchCents(): number {
     const t = (performance.now() - this.startTimeMs) / 1000;
     let v = 0;
@@ -82,10 +96,12 @@ export class SampleEngine {
     return this.pitchCents + v * this.pitchLfoDepthCents;
   }
 
-  private voices: Voice[] = [];
+  private voices = new Map<string, Voice>();
   private buffers = new Map<string, Tone.ToneAudioBuffer>();
   private loading = new Map<string, Promise<Tone.ToneAudioBuffer | null>>();
   private prevHour = -1;
+  /** Probability roll held for the current visit to a clip's span. */
+  private enterRolls = new Map<string, EnterRoll>();
 
   async start(): Promise<void> {
     if (this.started) return;
@@ -104,13 +120,10 @@ export class SampleEngine {
       wet: 1,
     });
     this.masterDelayWet = new Tone.Gain(0);
-    // Dry path.
     this.bus.connect(this.master);
-    // Parallel reverb send.
     this.bus.connect(this.masterReverb);
     this.masterReverb.connect(this.masterReverbWet);
     this.masterReverbWet.connect(this.master);
-    // Parallel delay send.
     this.bus.connect(this.masterDelay);
     this.masterDelay.connect(this.masterDelayWet);
     this.masterDelayWet.connect(this.master);
@@ -123,7 +136,6 @@ export class SampleEngine {
   }
 
   private currentRoutingTarget: Tone.InputNode | null | undefined = undefined;
-  /** See DroneEngine.setRouting. */
   setRouting(target: Tone.InputNode | null): void {
     if (!this.started || !this.masterLp) return;
     if (this.currentRoutingTarget === target) return;
@@ -138,14 +150,17 @@ export class SampleEngine {
     void sample;
   }
 
-  update(hour: number, cycleSeconds: number, p: SamplesParams): void {
+  update(
+    hour: number,
+    cycleSeconds: number,
+    p: SamplesParams,
+    autoPlay: boolean,
+  ): void {
     if (!this.started || !this.master || !this.bus) return;
-    void cycleSeconds; // trigger model no longer needs cycle length.
 
     this.master.gain.rampTo(p.enabled ? p.master : 0, 0.05);
     applyFilterChain(this.masterHp, this.masterLp, p.filters);
 
-    // Master send FX + global pitch offset (+ LFO).
     this.pitchCents = p.pitchCents;
     this.pitchLfoRateHz = p.pitchLfoRateHz;
     this.pitchLfoDepthCents = p.pitchLfoDepthCents;
@@ -180,124 +195,208 @@ export class SampleEngine {
     }
 
     if (!p.enabled) {
-      // Tear everything down while disabled.
-      for (const v of this.voices) this.disposeVoice(v);
-      this.voices = [];
+      for (const v of this.voices.values()) this.disposeVoice(v);
+      this.voices.clear();
+      this.enterRolls.clear();
       this.prevHour = hour;
       return;
     }
 
-    // Fire triggers crossed on this frame — with per-clip probability
-    // gating. A failed roll is a silent trigger; the next crossing
-    // rolls afresh.
-    const triggers = sampleClipsToTrigger(this.prevHour, hour, p);
-    for (const t of triggers) {
-      if (t.triggerProbability < 1 && Math.random() >= t.triggerProbability) {
-        continue;
-      }
-      const buf = this.buffers.get(t.sampleId);
-      if (!buf) {
-        // Kick off a load; the trigger is missed (rare — samples are
-        // preloaded on upload). Nothing to schedule.
-        this.loadBuffer(t.sampleId).catch(() => undefined);
-        continue;
-      }
-      this.startVoice(t, buf);
-    }
-
-    // Apply live-editable FX + gain/pan to sounding voices matching
-    // each clip.
+    const active = clipsActiveAt(hour, p, cycleSeconds);
+    const activeById = new Map(active.map((a) => [a.clipId, a]));
     const clipById = new Map(p.clips.map((c) => [c.id, c]));
-    for (const v of this.voices) {
-      const c = clipById.get(v.clipId);
-      if (!c) continue;
-      v.panner.pan.rampTo(c.pan, 0.05);
-      v.gain.gain.rampTo(c.gain, 0.05);
-      const pitchMult = Math.pow(2, this.currentPitchCents() / 1200);
-      const effRate = Math.max(
-        0.05,
-        c.playbackRate * v.randomRateMult * pitchMult,
-      );
-      if (Math.abs(v.player.playbackRate - effRate) > 0.001) {
-        v.player.playbackRate = effRate;
+
+    // Prefetch any sample buffers referenced by placed clips.
+    for (const c of p.clips) {
+      if (!this.buffers.has(c.sampleId) && !this.loading.has(c.sampleId)) {
+        this.loadBuffer(c.sampleId).catch(() => undefined);
       }
-      v.reverbWet.gain.rampTo(Math.max(0, Math.min(1, c.reverbMix ?? 0)), 0.08);
-      v.delayWet.gain.rampTo(Math.max(0, Math.min(1, c.delayMix ?? 0)), 0.08);
-      (v.reverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
-        Math.max(0, Math.min(0.99, c.reverbDecay ?? 0.7)),
-        0.1,
-      );
-      v.delay.delayTime.rampTo(
-        Math.max(0, Math.min(2, c.delayTimeSec ?? 0.25)),
-        0.08,
-      );
-      v.delay.feedback.rampTo(
-        Math.max(0, Math.min(0.95, c.delayFeedback ?? 0.3)),
-        0.08,
-      );
     }
 
-    // Reap voices past their natural end. A tail is left after
-    // `endsAt` for the reverb/delay wash — one second is plenty.
-    const now = Tone.now();
-    const REAP_TAIL_SEC = 1.0;
-    this.voices = this.voices.filter((v) => {
-      if (!v.disposed && now > v.endsAt + REAP_TAIL_SEC) {
-        this.disposeVoice(v);
-        return false;
-      }
-      return true;
-    });
+    const dh = this.prevHour < 0 ? 0 : hour - this.prevHour;
+    // Real discontinuity only — stationary (dh === 0) is NOT a scrub.
+    const scrubJump =
+      this.prevHour >= 0 &&
+      (dh < -1e-6 || dh > MAX_SMOOTH_STEP_HOURS);
+    const hourMoved =
+      this.prevHour >= 0 && Math.abs(hour - this.prevHour) > 1e-6;
 
-    // Also drop voices whose clip was deleted from the arrangement.
-    this.voices = this.voices.filter((v) => {
-      if (!clipById.has(v.clipId)) {
+    // Drop voices whose clips left the span or were deleted.
+    for (const [clipId, v] of [...this.voices.entries()]) {
+      if (!activeById.has(clipId) || !clipById.has(clipId)) {
         this.disposeVoice(v);
-        return false;
+        this.voices.delete(clipId);
+        this.enterRolls.delete(clipId);
       }
-      return true;
-    });
+    }
+
+    for (const clipId of [...this.enterRolls.keys()]) {
+      if (!activeById.has(clipId)) this.enterRolls.delete(clipId);
+    }
+
+    for (const a of active) {
+      let roll = this.enterRolls.get(a.clipId);
+      if (!roll) {
+        roll =
+          a.triggerProbability >= 1 || Math.random() < a.triggerProbability
+            ? "accepted"
+            : "rejected";
+        this.enterRolls.set(a.clipId, roll);
+      }
+      if (roll === "rejected") continue;
+
+      const buf = this.buffers.get(a.sampleId);
+      if (!buf) {
+        this.loadBuffer(a.sampleId).catch(() => undefined);
+        continue;
+      }
+
+      let voice = this.voices.get(a.clipId);
+      if (!voice) {
+        const created = this.createVoice(a, buf);
+        if (!created) continue;
+        voice = created;
+        this.voices.set(a.clipId, voice);
+        if (autoPlay) {
+          this.startSegment(voice, a, buf, a.offsetSec);
+        } else {
+          voice.paused = true;
+          voice.startOffsetSec = a.offsetSec;
+        }
+        this.applyPitch(voice);
+        this.applyPositionGain(voice, a);
+        continue;
+      }
+
+      this.applyLiveParams(voice, a);
+      this.applyPitch(voice);
+
+      if (!autoPlay) {
+        if (hourMoved || scrubJump) {
+          this.startSegment(voice, a, buf, a.offsetSec);
+        } else if (!voice.paused) {
+          this.pauseVoice(voice);
+        }
+        this.applyPositionGain(voice, a);
+        continue;
+      }
+
+      // autoPlay: free-run at timeline rate. Seek only on real scrub/wrap
+      // or if the player stopped early while still inside the span.
+      if (voice.paused || scrubJump) {
+        this.startSegment(voice, a, buf, a.offsetSec);
+      } else if (
+        voice.player.state !== "started" &&
+        a.offsetSec < buf.duration - MIN_REMAINING_BUF_SEC
+      ) {
+        this.startSegment(voice, a, buf, a.offsetSec);
+      } else if (voice.player.state === "started") {
+        const rate = Math.max(0.05, a.playbackRate);
+        if (Math.abs(voice.player.playbackRate - rate) > 0.001) {
+          voice.player.playbackRate = rate;
+        }
+      }
+      this.applyPositionGain(voice, a);
+    }
 
     this.prevHour = hour;
   }
 
-  private startVoice(t: TriggeredClip, buffer: Tone.ToneAudioBuffer): void {
-    if (!this.bus) return;
-    const now = Tone.now();
+  private applyPitch(voice: Voice): void {
+    const cents = voice.randomCents + this.currentPitchCents();
+    const semitones = cents / 100;
+    try {
+      voice.pitchShift.pitch = semitones;
+    } catch {
+      /* ignore */
+    }
+  }
 
-    const randCents =
-      t.randomPitchCents > 0
-        ? (Math.random() * 2 - 1) * t.randomPitchCents
-        : 0;
-    const randomRateMult = Math.pow(2, randCents / 1200);
-    const pitchMult = Math.pow(2, this.currentPitchCents() / 1200);
-    const effectiveRate = Math.max(
-      0.05,
-      t.playbackRate * randomRateMult * pitchMult,
+  private applyLiveParams(voice: Voice, a: ActiveClip): void {
+    voice.panner.pan.rampTo(a.pan, 0.05);
+    voice.reverbWet.gain.rampTo(Math.max(0, Math.min(1, a.reverbMix)), 0.08);
+    voice.delayWet.gain.rampTo(Math.max(0, Math.min(1, a.delayMix)), 0.08);
+    (voice.reverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
+      Math.max(0, Math.min(0.99, a.reverbDecay)),
+      0.1,
     );
+    voice.delay.delayTime.rampTo(
+      Math.max(0, Math.min(2, a.delayTimeSec)),
+      0.08,
+    );
+    voice.delay.feedback.rampTo(
+      Math.max(0, Math.min(0.95, a.delayFeedback)),
+      0.08,
+    );
+  }
+
+  /**
+   * Envelope from buffer position so mid-clip seeks do not re-run a
+   * full fade-in from silence. Only ramps when the target moved.
+   */
+  private applyPositionGain(voice: Voice, a: ActiveClip): void {
+    const offset = a.offsetSec;
+    const dur = Math.max(1e-4, a.durationSec);
+    const fi = Math.max(0, a.fadeInSec);
+    const fo = Math.max(0, a.fadeOutSec);
+    let env = 1;
+    if (fi > 0 && offset < fi) env = Math.min(env, offset / fi);
+    if (fo > 0 && offset > dur - fo) {
+      env = Math.min(env, Math.max(0, (dur - offset) / fo));
+    }
+    const target = a.gain * env;
+    if (Math.abs(target - voice.lastGainTarget) < GAIN_EPS) return;
+    voice.lastGainTarget = target;
+    const now = Tone.now();
+    try {
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+      voice.gain.gain.linearRampToValueAtTime(target, now + 0.02);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private createVoice(
+    a: ActiveClip,
+    buffer: Tone.ToneAudioBuffer,
+  ): Voice | null {
+    if (!this.bus) return null;
+
+    const randomCents =
+      a.randomPitchCents > 0
+        ? (Math.random() * 2 - 1) * a.randomPitchCents
+        : 0;
 
     const player = new Tone.Player({
-      url: buffer,
       autostart: false,
       loop: false,
     });
-    player.playbackRate = effectiveRate;
+    player.buffer = buffer;
+    player.playbackRate = Math.max(0.05, a.playbackRate);
+
+    const pitchShift = new Tone.PitchShift({
+      pitch: 0,
+      windowSize: 0.1,
+      feedback: 0,
+    });
     const gain = new Tone.Gain(0);
-    const panner = new Tone.Panner(t.pan);
+    const panner = new Tone.Panner(a.pan);
     const dryGain = new Tone.Gain(1);
     const reverb = new Tone.Freeverb({
-      roomSize: Math.max(0, Math.min(0.99, t.reverbDecay)),
+      roomSize: Math.max(0, Math.min(0.99, a.reverbDecay)),
       dampening: 3000,
     });
-    const reverbWet = new Tone.Gain(Math.max(0, Math.min(1, t.reverbMix)));
+    const reverbWet = new Tone.Gain(Math.max(0, Math.min(1, a.reverbMix)));
     const delay = new Tone.FeedbackDelay({
-      delayTime: Math.max(0, Math.min(2, t.delayTimeSec)),
-      feedback: Math.max(0, Math.min(0.95, t.delayFeedback)),
+      delayTime: Math.max(0, Math.min(2, a.delayTimeSec)),
+      feedback: Math.max(0, Math.min(0.95, a.delayFeedback)),
       wet: 1,
     });
-    const delayWet = new Tone.Gain(Math.max(0, Math.min(1, t.delayMix)));
+    const delayWet = new Tone.Gain(Math.max(0, Math.min(1, a.delayMix)));
 
-    player.connect(gain);
+    player.connect(pitchShift);
+    pitchShift.connect(gain);
     gain.connect(panner);
     panner.connect(dryGain);
     panner.connect(reverb);
@@ -308,40 +407,11 @@ export class SampleEngine {
     reverbWet.connect(this.bus);
     delayWet.connect(this.bus);
 
-    // Fade in from 0 → target gain over fadeInSec.
-    const fi = Math.max(0.001, t.fadeInSec);
-    const gAudioParam = gain.gain;
-    gAudioParam.setValueAtTime(0, now);
-    gAudioParam.linearRampToValueAtTime(t.gain, now + fi);
-
-    // Duration in real seconds of the played buffer.
-    const durRealSec = buffer.duration / effectiveRate;
-    // Schedule a fade-out just before natural end so we don't cut hard.
-    const fo = Math.max(0.001, t.fadeOutSec);
-    const endAt = now + durRealSec;
-    const fadeStart = Math.max(now + fi, endAt - fo);
-    gAudioParam.setValueAtTime(t.gain, fadeStart);
-    gAudioParam.linearRampToValueAtTime(0, endAt);
-
-    try {
-      player.start(now, 0);
-    } catch (err) {
-      console.warn("[samples] player.start failed", err);
-      player.dispose();
-      gain.dispose();
-      panner.dispose();
-      dryGain.dispose();
-      reverb.dispose();
-      reverbWet.dispose();
-      delay.dispose();
-      delayWet.dispose();
-      return;
-    }
-
-    this.voices.push({
-      clipId: t.clipId,
-      sampleId: t.sampleId,
+    return {
+      clipId: a.clipId,
+      sampleId: a.sampleId,
       player,
+      pitchShift,
       gain,
       panner,
       dryGain,
@@ -349,10 +419,79 @@ export class SampleEngine {
       reverbWet,
       delay,
       delayWet,
-      randomRateMult,
-      endsAt: endAt,
+      randomCents,
+      lastGainTarget: -1,
+      startOffsetSec: a.offsetSec,
+      startedAtTone: Tone.now(),
+      paused: true,
       disposed: false,
-    });
+    };
+  }
+
+  private startSegment(
+    voice: Voice,
+    a: ActiveClip,
+    buffer: Tone.ToneAudioBuffer,
+    offsetSec: number,
+  ): void {
+    const now = Tone.now();
+    const rate = Math.max(0.05, a.playbackRate);
+    const offset = Math.max(
+      0,
+      Math.min(Math.max(0, buffer.duration - 1e-4), offsetSec),
+    );
+    const remainingBuf = Math.max(0, buffer.duration - offset);
+    if (remainingBuf < MIN_REMAINING_BUF_SEC) {
+      try {
+        if (voice.player.state === "started") voice.player.stop(now);
+      } catch {
+        /* not started */
+      }
+      voice.paused = true;
+      voice.startOffsetSec = offset;
+      return;
+    }
+
+    try {
+      if (voice.player.state === "started") {
+        voice.player.stop(now);
+      }
+    } catch {
+      /* not started */
+    }
+
+    if (voice.player.buffer !== buffer) {
+      voice.player.buffer = buffer;
+    }
+    voice.player.playbackRate = rate;
+    const startAt = now + 0.005;
+    try {
+      voice.player.start(startAt, offset, remainingBuf);
+    } catch (err) {
+      console.warn("[samples] player.start failed", err);
+      return;
+    }
+
+    voice.startOffsetSec = offset;
+    voice.startedAtTone = startAt;
+    voice.paused = false;
+    // Force gain apply after seek so we don't stick at 0.
+    voice.lastGainTarget = -1;
+    this.applyPositionGain(voice, a);
+  }
+
+  private pauseVoice(voice: Voice): void {
+    if (voice.paused) return;
+    const now = Tone.now();
+    const elapsed = Math.max(0, now - voice.startedAtTone);
+    voice.startOffsetSec =
+      voice.startOffsetSec + elapsed * voice.player.playbackRate;
+    try {
+      voice.player.stop(now);
+    } catch {
+      /* already stopped */
+    }
+    voice.paused = true;
   }
 
   private disposeVoice(v: Voice): void {
@@ -369,6 +508,7 @@ export class SampleEngine {
     }
     setTimeout(() => {
       v.player.dispose();
+      v.pitchShift.dispose();
       v.gain.dispose();
       v.panner.dispose();
       v.dryGain.dispose();
@@ -395,6 +535,15 @@ export class SampleEngine {
       );
       const tab = new Tone.ToneAudioBuffer(ab);
       this.buffers.set(sampleId, tab);
+      const store = useSimStore.getState();
+      const meta = store.samples.library.find((s) => s.id === sampleId);
+      if (meta && Math.abs(meta.durationSec - ab.duration) > 0.05) {
+        store.setSamples({
+          library: store.samples.library.map((s) =>
+            s.id === sampleId ? { ...s, durationSec: ab.duration } : s,
+          ),
+        });
+      }
       return tab;
     })();
     this.loading.set(sampleId, p);

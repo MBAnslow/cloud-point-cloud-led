@@ -863,14 +863,16 @@ export interface Sample {
 
 /**
  * A single placed sample clip on the 24h arrangement timeline. Its
- * on-screen width is derived (not stored):
+ * on-screen width (and playback span) is derived (not stored):
  *   widthHours = (sample.durationSec / playbackRate) * (24 / cycleSeconds)
- * so changing `sky.cycleSeconds` rescales all clips correctly.
+ * so changing `sky.cycleSeconds` rescales all clips correctly. While
+ * the playhead is inside the span the engine plays at the matching
+ * buffer offset; outside the span the voice stops.
  */
 export interface SampleClip {
   id: string;
   sampleId: string;
-  /** Trigger time in decimal hours, [0, 24). */
+  /** Span start in decimal hours, [0, 24). */
   startHour: number;
   /** Linear gain multiplier, [0, 1]. */
   gain: number;
@@ -878,13 +880,13 @@ export interface SampleClip {
   pan: number;
   /** Playback rate (>0). 1 = normal, 2 = double speed / octave up. */
   playbackRate: number;
-  /** Fade-in duration in seconds. */
+  /** Fade-in duration in seconds (applied near buffer start). */
   fadeInSec: number;
-  /** Fade-out duration in seconds. */
+  /** Fade-out duration in seconds (applied near buffer end). */
   fadeOutSec: number;
   /**
-   * On each trigger, pick a random detune in [-randomPitchCents,
-   * +randomPitchCents] and hold it for the whole playback. 0 disables.
+   * On each span enter, pick a random detune in [-randomPitchCents,
+   * +randomPitchCents] and hold it for the visit. 0 disables.
    * Applied as a multiplier on the base playback rate.
    */
   randomPitchCents?: number;
@@ -899,8 +901,9 @@ export interface SampleClip {
   /** Delay wet mix, [0, 1]. */
   delayMix?: number;
   /**
-   * Probability the clip fires when the playhead crosses `startHour`.
-   * Rolled per crossing. Undefined = 1 (always fire).
+   * Probability the clip sounds when the playhead enters its span.
+   * Rolled once per visit; fail stays silent until exit/re-enter.
+   * Undefined = 1 (always play).
    */
   triggerProbability?: number;
 }

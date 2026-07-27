@@ -34,9 +34,9 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
         </span>
         <label
           style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}
-          title="Odds this clip fires each time the playhead crosses its trigger point"
+          title="Odds this clip sounds each time the playhead enters its span"
         >
-          <span style={{ opacity: 0.75 }}>Trigger</span>
+          <span style={{ opacity: 0.75 }}>Chance</span>
           <select
             value={clip.triggerProbability ?? 1}
             onChange={(e) =>
@@ -140,7 +140,7 @@ export function SampleClipEditor({ clip, sample, onChange, onDelete }: Props) {
           onChange={(v) => onChange({ randomPitchCents: v })}
         />
         <div style={hint}>
-          On each trigger, pitch is offset by a random amount in
+          On each span enter, pitch is offset by a random amount in
           ±range cents. 1200c = ±1 octave. Held for the whole clip.
         </div>
       </div>
