@@ -1,8 +1,8 @@
 /**
  * Per-LED breath-filter memory: follows breath while the wave covers an
- * LED, then clears on a per-LED timer after release. `decayMaxSeconds`
- * is a hard ceiling for the slowest LEDs; spatial noise shortens hold
- * (noise=1 → instant clear, noise=0 → full decay max).
+ * LED, then lingers after release for up to `decayMaxSeconds` (shortened
+ * by spatial cooldown noise). Low-noise LEDs keep their latched reveal
+ * until the hold expires; high-noise LEDs clear sooner.
  */
 
 import type { BreathFilterKeyframe, BreathFilterParams } from "../state";
@@ -17,14 +17,20 @@ function clamp01(v: number): number {
 /** Mask below this = wave has left this LED; release timer starts. */
 const MASK_ACTIVE = 0.04;
 
+/** Absolute ceiling for Decay max (seconds); matches the Breath Filter UI. */
+export const BREATH_FILTER_DECAY_MAX_SEC = 30;
+
 /**
- * Hold after release before hard-clear.
+ * Hold after release before clear.
  * noise=0 → full decayMaxSeconds (linger)
  * noise=1 → 0 (clear on the next frame)
  */
 function holdTimeSec(noise: number, decayMaxSeconds: number): number {
   const n = clamp01(noise);
-  const maxSec = Math.max(0.1, Math.min(5, decayMaxSeconds));
+  const maxSec = Math.max(
+    0.1,
+    Math.min(BREATH_FILTER_DECAY_MAX_SEC, decayMaxSeconds),
+  );
   if (n >= 0.999) return 0;
   // Strong curve: mid noise still clears much faster than linger LEDs.
   return maxSec * Math.pow(1 - n, 2.5);
@@ -99,8 +105,10 @@ export function buildCooldownRates(
 
 /**
  * While mask active: latch up to mask, reset release age.
- * Once released: decay toward threshold; hard-clear at hold time
- * (≤ decayMaxSeconds, shortened by noise).
+ * Once released: keep the latched reveal until `hold` seconds elapse
+ * (≤ Decay max, shortened by noise), then hard-clear. An older
+ * exp(-4/hold) fade wiped most of the reveal in the first quarter of
+ * Decay max even when the slider was high.
  */
 export function updateBreathFilterMemory(
   memory: Float32Array,
@@ -113,7 +121,10 @@ export function updateBreathFilterMemory(
   dtSec: number,
 ): void {
   const floor = clamp01(threshold);
-  const maxSec = Math.max(0.1, Math.min(5, decayMaxSeconds));
+  const maxSec = Math.max(
+    0.1,
+    Math.min(BREATH_FILTER_DECAY_MAX_SEC, decayMaxSeconds),
+  );
   const dt = Math.max(0, Math.min(0.1, dtSec));
 
   for (let i = 0; i < n; i++) {
@@ -136,11 +147,8 @@ export function updateBreathFilterMemory(
       if (hold <= 1e-4 || age >= hold) {
         v = floor;
         age = Math.max(age, hold);
-      } else {
-        const k = 4 / hold;
-        v = floor + (v - floor) * Math.exp(-k * dt);
-        if (v < floor + 0.01) v = floor;
       }
+      // else: keep latched `v` for the full hold window
     } else {
       v = floor;
     }

@@ -1,6 +1,7 @@
 import * as Tone from "tone";
 import { applyFilterChain } from "./filterChain";
 import { meterAbs } from "./meterAbs";
+import { ensureLimitedAux } from "./MasterFxBus";
 import {
   HARMONIC_COUNT,
   HARMONIC_OCTAVE_OFFSETS,
@@ -237,10 +238,21 @@ export class DroneEngine {
     if (!this.started || !this.lp || !this.master || !this.hp) return;
     if (this.currentRoutingTarget === target) return;
     this.lp.disconnect();
-    if (target) this.lp.connect(target);
-    else this.lp.toDestination();
-    if (this.meter) this.lp.connect(this.meter);
-    this.currentRoutingTarget = target;
+    if (target) {
+      this.lp.connect(target);
+      if (this.meter) this.lp.connect(this.meter);
+      this.currentRoutingTarget = target;
+      return;
+    }
+    // Never hit the DAC raw — park on the limited aux until MasterFx
+    // assigns fx/direct routing.
+    this.currentRoutingTarget = null;
+    void ensureLimitedAux().then((aux) => {
+      if (this.currentRoutingTarget !== null || !this.lp) return;
+      this.lp.disconnect();
+      this.lp.connect(aux);
+      if (this.meter) this.lp.connect(this.meter);
+    });
   }
 
   /** Peak level after engine EQ (0..1+). */

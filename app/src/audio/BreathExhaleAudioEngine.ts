@@ -1,6 +1,7 @@
 import * as Tone from "tone";
 import type { BreathParams, LightningSample } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
+import { ensureLimitedAux } from "./MasterFxBus";
 
 /**
  * One-shot exhale audio: plays `breath.exhaleSample` with random
@@ -22,7 +23,9 @@ export class BreathExhaleAudioEngine {
   async start(): Promise<void> {
     if (this.started) return;
     await Tone.start();
-    this.out = new Tone.Gain(1).toDestination();
+    this.out = new Tone.Gain(1);
+    const aux = await ensureLimitedAux();
+    this.out.connect(aux);
     this.started = true;
   }
 

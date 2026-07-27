@@ -3,6 +3,7 @@ import type { PadParams, PadWaveform } from "../state";
 import { activePadVoicesAt } from "./padCycle";
 import { applyFilterChain } from "./filterChain";
 import { meterAbs } from "./meterAbs";
+import { ensureLimitedAux } from "./MasterFxBus";
 
 /**
  * Warm-pad synth engine. Signal chain per voice:
@@ -105,10 +106,19 @@ export class PadEngine {
     if (!this.started || !this.masterLp) return;
     if (this.currentRoutingTarget === target) return;
     this.masterLp.disconnect();
-    if (target) this.masterLp.connect(target);
-    else this.masterLp.toDestination();
-    if (this.meter) this.masterLp.connect(this.meter);
-    this.currentRoutingTarget = target;
+    if (target) {
+      this.masterLp.connect(target);
+      if (this.meter) this.masterLp.connect(this.meter);
+      this.currentRoutingTarget = target;
+      return;
+    }
+    this.currentRoutingTarget = null;
+    void ensureLimitedAux().then((aux) => {
+      if (this.currentRoutingTarget !== null || !this.masterLp) return;
+      this.masterLp.disconnect();
+      this.masterLp.connect(aux);
+      if (this.meter) this.masterLp.connect(this.meter);
+    });
   }
 
   /** Peak level after engine EQ (0..1+). */

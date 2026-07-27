@@ -2,6 +2,7 @@ import * as Tone from "tone";
 import type { LightningParams, LightningSample } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
 import { pickBoltSample } from "./boltSampleMatch";
+import { ensureLimitedAux } from "./MasterFxBus";
 
 /**
  * Audio engine for the lightning system.
@@ -36,7 +37,10 @@ export class LightningAudioEngine {
   async start(): Promise<void> {
     if (this.started) return;
     await Tone.start();
-    this.out = new Tone.Gain(1).toDestination();
+    this.out = new Tone.Gain(1);
+    // Route through the shared brickwall so strikes can't slam the DAC.
+    const aux = await ensureLimitedAux();
+    this.out.connect(aux);
     this.started = true;
   }
 

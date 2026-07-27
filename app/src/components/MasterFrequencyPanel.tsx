@@ -77,7 +77,7 @@ function OutputSection() {
         source="output"
       />
       <div style={{ fontSize: 9, opacity: 0.5, marginTop: 2, paddingLeft: 2 }}>
-        Shared program fader + −1 dB limiter after drone/pad/samples sum
+        Shared fader + compressor/−1 dB limiter (all engines, lightning, breath)
       </div>
     </div>
   );

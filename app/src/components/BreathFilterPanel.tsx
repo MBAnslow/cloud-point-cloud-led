@@ -161,7 +161,7 @@ export function BreathFilterPanel({ visible = true }: { visible?: boolean }) {
           label="Decay max"
           value={breathFilter.decayMaxSeconds}
           min={0.1}
-          max={5}
+          max={30}
           step={0.1}
           onChange={(v) => upd({ decayMaxSeconds: v })}
           formatValue={(v) => `${v.toFixed(1)}s`}

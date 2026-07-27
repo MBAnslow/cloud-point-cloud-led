@@ -331,9 +331,9 @@ export interface BreathFilterParams {
    */
   keyframes: BreathFilterKeyframe[];
   /**
-   * Hard upper bound (seconds): after the breath wave leaves an LED,
-   * its filter effect is mostly gone within this time — even the
-   * slowest (low-noise) LEDs. Higher noise only clears sooner.
+   * After the breath wave leaves an LED, how long (seconds) the slowest
+   * (low-noise) LEDs keep their latched reveal before clearing. Higher
+   * cooldown noise only clears sooner. Range 0.1–30.
    */
   decayMaxSeconds: number;
   /** Spatial frequency of the cooldown noise field. */
@@ -3310,7 +3310,7 @@ function resolveBreathFilter(input: unknown): BreathFilterParams {
     keyframes,
     decayMaxSeconds: Math.max(
       0.1,
-      Math.min(5, num(saved.decayMaxSeconds, d.decayMaxSeconds)),
+      Math.min(30, num(saved.decayMaxSeconds, d.decayMaxSeconds)),
     ),
     cooldownScale: Math.max(
       0.1,
