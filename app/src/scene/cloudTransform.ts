@@ -58,3 +58,17 @@ export function applyCloudTransform(
   const r = offsetXZ(rotateCloud(v, t.tiltRad, t.yawRad), t.offsetX, t.offsetZ);
   return [r[0], r[1] + t.offsetY, r[2]];
 }
+
+/** Undo `applyCloudTransform` (world → cloud-local). */
+export function inverseCloudTransform(
+  v: [number, number, number],
+  t: CloudTransform,
+): [number, number, number] {
+  const unOffset: [number, number, number] = [
+    v[0] - t.offsetX,
+    v[1] - t.offsetY,
+    v[2] - t.offsetZ,
+  ];
+  // Forward is rotateX(rotateY(v)); inverse is rotateY(-yaw, rotateX(-tilt)).
+  return rotateY(rotateX(unOffset, -t.tiltRad), -t.yawRad);
+}

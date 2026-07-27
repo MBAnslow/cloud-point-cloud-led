@@ -2,6 +2,7 @@ import * as Tone from "tone";
 import type { PadParams, PadWaveform } from "../state";
 import { activePadVoicesAt } from "./padCycle";
 import { applyFilterChain } from "./filterChain";
+import { meterAbs } from "./meterAbs";
 
 /**
  * Warm-pad synth engine. Signal chain per voice:
@@ -57,6 +58,7 @@ export class PadEngine {
   private filter: Tone.Filter | null = null;
   private saturation: Tone.Distortion | null = null;
   private bus: Tone.Gain | null = null;
+  private meter: Tone.Meter | null = null;
 
   private voices = new Map<string, PadVoice>();
   /**
@@ -89,6 +91,7 @@ export class PadEngine {
     this.filter.connect(this.saturation);
     this.bus = new Tone.Gain(1);
     this.bus.connect(this.filter);
+    this.meter = new Tone.Meter({ normalRange: true });
     this.started = true;
   }
 
@@ -104,7 +107,14 @@ export class PadEngine {
     this.masterLp.disconnect();
     if (target) this.masterLp.connect(target);
     else this.masterLp.toDestination();
+    if (this.meter) this.masterLp.connect(this.meter);
     this.currentRoutingTarget = target;
+  }
+
+  /** Peak level after engine EQ (0..1+). */
+  getPeakLevel(): number {
+    if (!this.meter) return 0;
+    return meterAbs(this.meter.getValue());
   }
 
   update(hour: number, p: PadParams): void {

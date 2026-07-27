@@ -9,8 +9,17 @@ import type {
   LightningParams,
 } from "../state";
 import { enabledLightningTintIndices } from "../state";
-import { applyCloudTransform, type CloudTransform } from "../scene/cloudTransform";
+import {
+  applyCloudTransform,
+  inverseCloudTransform,
+  type CloudTransform,
+} from "../scene/cloudTransform";
 import { hexToVec3 } from "./shade";
+import {
+  ensureSpriteImage,
+  getCachedSpriteImage,
+  sampleSpriteRgb,
+} from "./spriteImageCache";
 
 export interface BoltBranch {
   /** Flat [x,y,z,...] world-space branch polyline starting at the fork. */
@@ -65,6 +74,21 @@ export interface BoltStrike {
   thunderDelayMs: number;
   /** Stereo pan (−1…+1) baked at spawn from timeline sample. */
   pan: number;
+}
+
+/** Orthographic projection axis through the cloud AABB (sign = view direction). */
+export type SpriteAxis = "x+" | "x-" | "y+" | "y-" | "z+" | "z-";
+
+const SPRITE_AXES: SpriteAxis[] = ["x+", "x-", "y+", "y-", "z+", "z-"];
+
+export interface SpriteFlash {
+  bornMs: number;
+  durationMs: number;
+  sampleId: string;
+  axis: SpriteAxis;
+  gain: number;
+  strobeHz: number;
+  strobeDuty: number;
 }
 
 function sampleRange(range: [number, number]): number {
@@ -598,10 +622,12 @@ function cloneAnim(v: LightningAnimParams): LightningAnimParams {
     intensityRange: [v.intensityRange[0], v.intensityRange[1]],
     strikesPerMinute: v.strikesPerMinute,
     strikePerMinute: v.strikePerMinute,
+    spritesPerMinute: v.spritesPerMinute ?? 0,
     subFlashes: v.subFlashes,
     spanScale: v.spanScale,
     minSpanScale: v.minSpanScale,
     boltGain: v.boltGain,
+    spriteGain: v.spriteGain ?? 1,
     backgroundGain: v.backgroundGain,
     thunderDelayMs: v.thunderDelayMs,
     pan: v.pan,
@@ -621,14 +647,20 @@ function lerpAnim(
   );
   const tintA = typeof a.tintMix === "number" ? a.tintMix : 0.35;
   const tintB = typeof b.tintMix === "number" ? b.tintMix : 0.35;
+  const spritesA = a.spritesPerMinute ?? 0;
+  const spritesB = b.spritesPerMinute ?? 0;
+  const spriteGainA = a.spriteGain ?? 1;
+  const spriteGainB = b.spriteGain ?? 1;
   return {
     intensityRange: lerpPair(a.intensityRange, b.intensityRange, t),
     strikesPerMinute: lerp(a.strikesPerMinute, b.strikesPerMinute, t),
     strikePerMinute: lerp(a.strikePerMinute, b.strikePerMinute, t),
+    spritesPerMinute: lerp(spritesA, spritesB, t),
     subFlashes: Math.max(0, Math.min(1, lerp(a.subFlashes, b.subFlashes, t))),
     spanScale,
     minSpanScale,
     boltGain: lerp(a.boltGain, b.boltGain, t),
+    spriteGain: lerp(spriteGainA, spriteGainB, t),
     backgroundGain: lerp(a.backgroundGain, b.backgroundGain, t),
     thunderDelayMs: lerp(a.thunderDelayMs, b.thunderDelayMs, t),
     pan: lerp(a.pan, b.pan, t),
@@ -649,10 +681,12 @@ export function sampleLightningKeyframe(
       intensityRange: [0.9, 1.5],
       strikesPerMinute: 12,
       strikePerMinute: 1,
+      spritesPerMinute: 1,
       subFlashes: 0.4,
       spanScale: 0.85,
       minSpanScale: 0.5,
       boltGain: 0.8,
+      spriteGain: 1.4,
       backgroundGain: 0.35,
       thunderDelayMs: 800,
       pan: 0,
@@ -693,9 +727,11 @@ export type LightningPlotChannel =
   | "intensity"
   | "strikesPerMinute"
   | "strikePerMinute"
+  | "spritesPerMinute"
   | "subFlashes"
   | "span"
   | "boltGain"
+  | "spriteGain"
   | "backgroundGain"
   | "thunderDelay"
   | "pan"
@@ -714,12 +750,16 @@ export function samplePlotChannel(
       return live.strikesPerMinute;
     case "strikePerMinute":
       return live.strikePerMinute;
+    case "spritesPerMinute":
+      return live.spritesPerMinute;
     case "subFlashes":
       return live.subFlashes;
     case "span":
       return (live.minSpanScale + live.spanScale) * 0.5;
     case "boltGain":
       return live.boltGain;
+    case "spriteGain":
+      return live.spriteGain;
     case "backgroundGain":
       return live.backgroundGain;
     case "thunderDelay":
@@ -806,12 +846,14 @@ export function plotChannelMax(channel: LightningPlotChannel): number {
       return 3;
     case "strikesPerMinute":
     case "strikePerMinute":
+    case "spritesPerMinute":
       return 40;
     case "subFlashes":
       return 1;
     case "span":
       return 1;
     case "boltGain":
+    case "spriteGain":
     case "backgroundGain":
       return 3;
     case "thunderDelay":
@@ -910,19 +952,67 @@ function accumulatePathContribution(
 }
 
 /**
+ * Map a cloud-local point onto [0,1]×[0,1] UV for orthographic projection
+ * along `axis` through the ellipsoid AABB.
+ */
+function spriteUv(
+  local: [number, number, number],
+  axis: SpriteAxis,
+  rx: number,
+  ry: number,
+  rz: number,
+): [number, number] {
+  const nx = (local[0] / Math.max(1e-6, rx) + 1) * 0.5;
+  const ny = (local[1] / Math.max(1e-6, ry) + 1) * 0.5;
+  const nz = (local[2] / Math.max(1e-6, rz) + 1) * 0.5;
+  switch (axis) {
+    case "x+":
+      return [nz, ny];
+    case "x-":
+      return [1 - nz, ny];
+    case "y+":
+      return [nx, 1 - nz];
+    case "y-":
+      return [nx, nz];
+    case "z+":
+      return [nx, ny];
+    case "z-":
+      return [1 - nx, ny];
+  }
+}
+
+function spriteStrobeOn(
+  ageMs: number,
+  hz: number,
+  duty: number,
+): boolean {
+  if (hz <= 0) return true;
+  const phase = (ageMs / 1000) * hz;
+  const frac = phase - Math.floor(phase);
+  return frac < duty;
+}
+
+/**
  * Stateful controller that maintains active strikes and produces a
  * per-LED additive RGB contribution each frame.
  */
 export class LightningController {
   private strikes: BoltStrike[] = [];
+  private sprites: SpriteFlash[] = [];
   private lastUpdateMs = 0;
   /** Fractional expected cloud-flash accumulator. */
   private spawnAcc = 0;
   /** Fractional expected cloud-to-ground strike accumulator. */
   private spawnAccStrike = 0;
+  /** Fractional expected sprite-flash accumulator. */
+  private spawnAccSprite = 0;
 
   getStrikes(): BoltStrike[] {
     return this.strikes;
+  }
+
+  getSprites(): SpriteFlash[] {
+    return this.sprites;
   }
 
   /** Timestamp of the last `update` tick; 0 before the first tick. */
@@ -939,6 +1029,7 @@ export class LightningController {
     this.lastUpdateMs = nowMs;
     this.spawnAcc = 0;
     this.spawnAccStrike = 0;
+    this.spawnAccSprite = 0;
   }
 
   update(
@@ -951,9 +1042,14 @@ export class LightningController {
     /** Breath participants — enabled slots drive tint track choice. */
     participants: BreathParticipant[] = [],
   ): void {
-    // Prune expired strikes.
+    // Prune expired strikes / sprites.
     if (this.strikes.length > 0) {
       this.strikes = this.strikes.filter(
+        (s) => nowMs - s.bornMs <= s.durationMs,
+      );
+    }
+    if (this.sprites.length > 0) {
+      this.sprites = this.sprites.filter(
         (s) => nowMs - s.bornMs <= s.durationMs,
       );
     }
@@ -965,7 +1061,13 @@ export class LightningController {
     if (!params.enabled) {
       this.spawnAcc = 0;
       this.spawnAccStrike = 0;
+      this.spawnAccSprite = 0;
       return;
+    }
+
+    // Warm sprite image cache for uploaded library entries.
+    for (const s of params.spriteSamples ?? []) {
+      void ensureSpriteImage(s.id);
     }
 
     // Storm keyframes track the sky timeline within the active window
@@ -978,6 +1080,9 @@ export class LightningController {
     const groundSpm = Number.isFinite(live.strikePerMinute)
       ? Math.max(0, Math.min(40, live.strikePerMinute))
       : Math.max(0, Math.min(40, Number(params.strikePerMinute) || 0));
+    const spriteSpm = Number.isFinite(live.spritesPerMinute)
+      ? Math.max(0, Math.min(40, live.spritesPerMinute))
+      : Math.max(0, Math.min(40, Number(params.spritesPerMinute) || 0));
 
     const spawnCount = (acc: number, spm: number): { next: number; n: number } => {
       const ratePerMs = spm / 60_000;
@@ -994,6 +1099,11 @@ export class LightningController {
     this.spawnAcc = cloud.next;
     const ground = spawnCount(this.spawnAccStrike, groundSpm);
     this.spawnAccStrike = ground.next;
+    const spriteN =
+      (params.spriteSamples?.length ?? 0) > 0
+        ? spawnCount(this.spawnAccSprite, spriteSpm)
+        : { next: 0, n: 0 };
+    this.spawnAccSprite = spriteN.next;
 
     const tintIndices = enabledLightningTintIndices(participants);
     const segs = Math.max(2, Math.floor(params.boltSegments));
@@ -1025,6 +1135,43 @@ export class LightningController {
         keyframeU,
       );
     }
+    for (let i = 0; i < spriteN.n; i++) {
+      this.pushSprite(nowMs, params, live);
+    }
+  }
+
+  private pushSprite(
+    nowMs: number,
+    params: LightningParams,
+    live: LightningAnimParams,
+  ): void {
+    const library = params.spriteSamples ?? [];
+    if (library.length === 0) return;
+    const pick = library[Math.floor(rand() * library.length)]!;
+    void ensureSpriteImage(pick.id);
+    const axis = SPRITE_AXES[Math.floor(rand() * SPRITE_AXES.length)]!;
+    const durationMs = Math.max(
+      20,
+      Math.min(2000, Number(params.spriteDurationMs) || 180),
+    );
+    const strobeHz = Math.max(
+      1,
+      Math.min(60, Number(params.spriteStrobeHz) || 18),
+    );
+    const strobeDuty = Math.max(
+      0.05,
+      Math.min(0.95, Number(params.spriteStrobeDuty) || 0.45),
+    );
+    const gain = Math.max(0, live.spriteGain ?? params.spriteGain ?? 1);
+    this.sprites.push({
+      bornMs: nowMs,
+      durationMs,
+      sampleId: pick.id,
+      axis,
+      gain,
+      strobeHz,
+      strobeDuty,
+    });
   }
 
   private pushStrike(
@@ -1116,100 +1263,145 @@ export class LightningController {
     out: Float32Array,
     nowMs: number,
     params: LightningParams,
+    ellipsoid: EllipsoidParams,
+    transform: CloudTransform,
   ): void {
     out.fill(0);
-    if (!params.enabled || this.strikes.length === 0) return;
+    if (!params.enabled) return;
+    const hasBolts = this.strikes.length > 0;
+    const hasSprites = this.sprites.length > 0;
+    if (!hasBolts && !hasSprites) return;
 
-    for (const s of this.strikes) {
-      const age = nowMs - s.bornMs;
-      if (age < 0 || age > s.durationMs) continue;
-      const path = s.path;
-      const totalSegs = path.length / 3 - 1;
-      if (totalSegs <= 0) continue;
+    if (hasBolts) {
+      for (const s of this.strikes) {
+        const age = nowMs - s.bornMs;
+        if (age < 0 || age > s.durationMs) continue;
+        const path = s.path;
+        const totalSegs = path.length / 3 - 1;
+        if (totalSegs <= 0) continue;
 
-      const u = age / s.durationMs;
-      // Ground strikes use a much larger falloff so the bolt itself
-      // washes through the volume; cloud flashes keep the tight control.
-      const baseFall = Math.max(1e-4, Math.min(0.2, params.falloffDistance));
-      const falloff = s.kind === "strike" ? Math.max(baseFall, 0.55) : baseFall;
-      const invFalloff = 1 / falloff;
-      const cutoff = 5.5 * falloff;
-      const cutoffSq = cutoff * cutoff;
+        const u = age / s.durationMs;
+        // Ground strikes use a much larger falloff so the bolt itself
+        // washes through the volume; cloud flashes keep the tight control.
+        const baseFall = Math.max(1e-4, Math.min(0.2, params.falloffDistance));
+        const falloff = s.kind === "strike" ? Math.max(baseFall, 0.55) : baseFall;
+        const invFalloff = 1 / falloff;
+        const cutoff = 5.5 * falloff;
+        const cutoffSq = cutoff * cutoff;
 
-      // Progressive travel: the tip races along the polyline during the
-      // first ~25% of the flash. Each segment "ignites" as the tip enters
-      // it and then fades independently until the strike expires.
-      const travelMs = Math.max(30, s.durationMs * 0.25);
-      const segTravel = travelMs / totalSegs;
+        // Progressive travel: the tip races along the polyline during the
+        // first ~25% of the flash. Each segment "ignites" as the tip enters
+        // it and then fades independently until the strike expires.
+        const travelMs = Math.max(30, s.durationMs * 0.25);
+        const segTravel = travelMs / totalSegs;
 
-      const peak =
-        mapIntensity01(s.intensityRange, s.intensity01) * flashBrightness(u);
-      const strikeGain = Math.max(0, peak);
-      const rampColor = sampleColorRamp(s.colorStops, u);
-      const tint = s.paletteTint;
-      const cr0 = rampColor[0] * 0.55 + tint[0] * 0.45;
-      const cg0 = rampColor[1] * 0.55 + tint[1] * 0.45;
-      const cb0 = rampColor[2] * 0.55 + tint[2] * 0.45;
-      const cr = cr0 * strikeGain;
-      const cg = cg0 * strikeGain;
-      const cb = cb0 * strikeGain;
+        const peak =
+          mapIntensity01(s.intensityRange, s.intensity01) * flashBrightness(u);
+        const strikeGain = Math.max(0, peak);
+        const rampColor = sampleColorRamp(s.colorStops, u);
+        const tint = s.paletteTint;
+        const cr0 = rampColor[0] * 0.55 + tint[0] * 0.45;
+        const cg0 = rampColor[1] * 0.55 + tint[1] * 0.45;
+        const cb0 = rampColor[2] * 0.55 + tint[2] * 0.45;
+        const cr = cr0 * strikeGain;
+        const cg = cg0 * strikeGain;
+        const cb = cb0 * strikeGain;
 
-      // Whole-cloud flood for ground strikes — every LED gets a hard wash
-      // scaled by the envelope so the cloud ignites with the bolt.
-      if (s.kind === "strike") {
-        const flood = Math.max(0, peak) * 0.95;
-        if (flood > 1e-4) {
-          const fr = cr0 * flood;
-          const fg = cg0 * flood;
-          const fb = cb0 * flood;
-          for (let i = 0; i < n; i++) {
-            const i3 = i * 3;
-            out[i3] += fr;
-            out[i3 + 1] += fg;
-            out[i3 + 2] += fb;
+        // Whole-cloud flood for ground strikes — every LED gets a hard wash
+        // scaled by the envelope so the cloud ignites with the bolt.
+        if (s.kind === "strike") {
+          const flood = Math.max(0, peak) * 0.95;
+          if (flood > 1e-4) {
+            const fr = cr0 * flood;
+            const fg = cg0 * flood;
+            const fb = cb0 * flood;
+            for (let i = 0; i < n; i++) {
+              const i3 = i * 3;
+              out[i3] += fr;
+              out[i3 + 1] += fg;
+              out[i3 + 2] += fb;
+            }
           }
         }
-      }
 
-      accumulatePathContribution(
-        positions,
-        n,
-        out,
-        path,
-        age,
-        s.durationMs,
-        0,
-        segTravel,
-        s.kind === "strike" ? 1.35 : 1,
-        cr,
-        cg,
-        cb,
-        invFalloff,
-        cutoffSq,
-      );
-
-      for (const branch of s.branches) {
-        const forkDelay = branch.forkVertex * segTravel;
-        if (age < forkDelay) continue;
-        const branchSegs = branch.path.length / 3 - 1;
-        if (branchSegs <= 0) continue;
-        const branchSegTravel = segTravel;
         accumulatePathContribution(
           positions,
           n,
           out,
-          branch.path,
+          path,
           age,
           s.durationMs,
-          forkDelay,
-          branchSegTravel,
-          branch.strength,
+          0,
+          segTravel,
+          s.kind === "strike" ? 1.35 : 1,
           cr,
           cg,
           cb,
           invFalloff,
           cutoffSq,
         );
+
+        for (const branch of s.branches) {
+          const forkDelay = branch.forkVertex * segTravel;
+          if (age < forkDelay) continue;
+          const branchSegs = branch.path.length / 3 - 1;
+          if (branchSegs <= 0) continue;
+          const branchSegTravel = segTravel;
+          accumulatePathContribution(
+            positions,
+            n,
+            out,
+            branch.path,
+            age,
+            s.durationMs,
+            forkDelay,
+            branchSegTravel,
+            branch.strength,
+            cr,
+            cg,
+            cb,
+            invFalloff,
+            cutoffSq,
+          );
+        }
+      }
+    }
+
+    if (hasSprites) {
+      const rx = Math.max(1e-6, ellipsoid.rx);
+      const ry = Math.max(1e-6, ellipsoid.ry);
+      const rz = Math.max(1e-6, ellipsoid.rz);
+      for (const sp of this.sprites) {
+        const age = nowMs - sp.bornMs;
+        if (age < 0 || age > sp.durationMs) continue;
+        if (!spriteStrobeOn(age, sp.strobeHz, sp.strobeDuty)) continue;
+        const img = getCachedSpriteImage(sp.sampleId);
+        if (!img) {
+          void ensureSpriteImage(sp.sampleId);
+          continue;
+        }
+        const uLife = age / sp.durationMs;
+        const env = flashBrightness(uLife) * sp.gain;
+        if (env <= 1e-4) continue;
+        for (let i = 0; i < n; i++) {
+          const i3 = i * 3;
+          const world: [number, number, number] = [
+            positions[i3]!,
+            positions[i3 + 1]!,
+            positions[i3 + 2]!,
+          ];
+          const local = inverseCloudTransform(world, transform);
+          const [uu, vv] = spriteUv(local, sp.axis, rx, ry, rz);
+          const rgb = sampleSpriteRgb(
+            img,
+            Math.max(0, Math.min(1, uu)),
+            Math.max(0, Math.min(1, vv)),
+          );
+          if (!rgb) continue;
+          out[i3] += rgb[0] * env;
+          out[i3 + 1] += rgb[1] * env;
+          out[i3 + 2] += rgb[2] * env;
+        }
       }
     }
   }

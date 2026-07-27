@@ -1,23 +1,31 @@
-import type { Sample, SampleClip, SamplesParams } from "../state";
+import {
+  sampleTrimRange,
+  type Sample,
+  type SampleClip,
+  type SamplesParams,
+} from "../state";
 
 const HOURS = 24;
 
 /**
  * A sample clip is a *span* on the 24h timeline. While the playhead is
  * inside `[startHour, startHour + widthHours)` the engine plays the
- * buffer at the matching offset; outside the span the voice stops.
- * Sound params come from the parent library `Sample` (track); width
- * uses that track's playbackRate × cycle speed.
+ * trimmed buffer region at the matching offset; outside the span the
+ * voice stops. Sound params come from the parent library `Sample`
+ * (track); width uses that track's playable duration × playbackRate
+ * × cycle speed.
  */
 export interface ActiveClip {
   clipId: string;
   sampleId: string;
   startHour: number;
-  /** Decoded buffer length in seconds. */
+  /** Playable (trimmed) length in seconds. */
   durationSec: number;
+  /** Absolute buffer offset where the trim region begins. */
+  bufferStartSec: number;
   /** Hours of sky-time the clip covers at the current cycle speed. */
   widthHours: number;
-  /** Buffer read position for the current playhead, in seconds. */
+  /** Read position within the trimmed region, in seconds. */
   offsetSec: number;
   gain: number;
   pan: number;
@@ -63,7 +71,7 @@ export function clipProgressHours(
   return d;
 }
 
-/** Buffer offset (seconds) for a playhead position inside the span. */
+/** Offset within the trimmed play region for a playhead inside the span. */
 export function clipOffsetSec(
   hour: number,
   startHour: number,
@@ -85,12 +93,15 @@ function toActive(
   sample: Sample,
   offsetSec: number,
   widthHours: number,
+  playSec: number,
+  bufferStartSec: number,
 ): ActiveClip {
   return {
     clipId: c.id,
     sampleId: c.sampleId,
     startHour: c.startHour,
-    durationSec: sample.durationSec,
+    durationSec: playSec,
+    bufferStartSec,
     widthHours,
     offsetSec,
     gain: sample.gain,
@@ -125,8 +136,9 @@ export function clipsActiveAt(
   for (const c of params.clips) {
     const sample = byId.get(c.sampleId);
     if (!sample) continue;
+    const { start, playSec } = sampleTrimRange(sample);
     const width = clipWidthHours(
-      sample.durationSec,
+      playSec,
       sample.playbackRate,
       cycleSeconds,
     );
@@ -135,10 +147,10 @@ export function clipsActiveAt(
       c.startHour,
       sample.playbackRate,
       cycleSeconds,
-      sample.durationSec,
+      playSec,
     );
     if (offset == null) continue;
-    out.push(toActive(c, sample, offset, width));
+    out.push(toActive(c, sample, offset, width, playSec, start));
   }
   return out;
 }

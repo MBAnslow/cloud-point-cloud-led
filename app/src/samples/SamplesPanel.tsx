@@ -7,7 +7,15 @@ import {
   useState,
 } from "react";
 import { Link } from "react-router-dom";
-import { useSimStore, type DroneLfoShape, type Sample, type SampleClip, DEFAULT_SAMPLE_TRACK } from "../state";
+import {
+  useSimStore,
+  type DroneLfoShape,
+  type Sample,
+  type SampleClip,
+  DEFAULT_SAMPLE_TRACK,
+  samplePlayDurationSec,
+  sampleTrimRange,
+} from "../state";
 import { LFO_SHAPES, LfoScope } from "../drones/SynthSection";
 import { putSampleBlob, deleteSampleBlob } from "./sampleStorage";
 import { invalidateSamplePeaks } from "./samplePeaks";
@@ -231,6 +239,7 @@ export function SamplesPanel() {
             name: file.name.replace(/\.[^.]+$/, ""),
             durationSec,
             ...DEFAULT_SAMPLE_TRACK,
+            trimEndSec: durationSec,
           };
           addSample(meta);
           // Preload into the engine so first placement plays instantly.
@@ -669,7 +678,7 @@ export function SamplesPanel() {
                         : "transparent",
                     boxSizing: "border-box",
                   }}
-                  title={`Drag onto a lane · ${s.durationSec.toFixed(2)}s`}
+                  title={`Drag onto a lane · ${samplePlayDurationSec(s).toFixed(2)}s play / ${s.durationSec.toFixed(2)}s file`}
                 >
                   <div
                     style={{
@@ -692,7 +701,7 @@ export function SamplesPanel() {
                     >
                       {s.name}
                       <span style={{ fontSize: 9, opacity: 0.6, fontWeight: 400, marginLeft: 6 }}>
-                        {s.durationSec.toFixed(2)}s
+                        {samplePlayDurationSec(s).toFixed(2)}s
                       </span>
                     </div>
                     <div
@@ -708,6 +717,16 @@ export function SamplesPanel() {
                       <SampleWaveform
                         sampleId={s.id}
                         color="rgba(251,146,60,0.85)"
+                        trimStartFrac={
+                          s.durationSec > 0
+                            ? sampleTrimRange(s).start / s.durationSec
+                            : 0
+                        }
+                        trimEndFrac={
+                          s.durationSec > 0
+                            ? sampleTrimRange(s).end / s.durationSec
+                            : 1
+                        }
                       />
                     </div>
                   </div>
@@ -858,15 +877,15 @@ export function SamplesPanel() {
                       const lane = laneIndexBySampleId.get(c.sampleId);
                       if (lane === undefined) return null;
                       const leftPct = (c.startHour / HOURS) * 100;
+                      const playDur = samplePlayDurationSec(sample);
                       const widthHours = clipWidthHours(
-                        sample.durationSec,
+                        playDur,
                         sample.playbackRate,
                         sky.cycleSeconds,
                       );
                       const widthPct = (widthHours / HOURS) * 100;
                       const playSec =
-                        sample.durationSec /
-                        Math.max(1e-6, sample.playbackRate);
+                        playDur / Math.max(1e-6, sample.playbackRate);
                       const skyMinutes = widthHours * 60;
                       const isSel = c.id === selectedId;
                       return (
@@ -902,6 +921,19 @@ export function SamplesPanel() {
                                 ? "rgba(255,255,255,0.75)"
                                 : "rgba(255,237,213,0.7)"
                             }
+                            trimStartFrac={
+                              sample.durationSec > 0
+                                ? sampleTrimRange(sample).start /
+                                  sample.durationSec
+                                : 0
+                            }
+                            trimEndFrac={
+                              sample.durationSec > 0
+                                ? sampleTrimRange(sample).end /
+                                  sample.durationSec
+                                : 1
+                            }
+                            trimMode="crop"
                           />
                           <div
                             style={{

@@ -1,4 +1,14 @@
-import type { Sample, SampleClip } from "../state";
+import { useState } from "react";
+import {
+  samplePlayDurationSec,
+  sampleTrimRange,
+  type Sample,
+  type SampleClip,
+} from "../state";
+import { RangeSlider } from "../components/RangeSlider";
+import { SampleWaveform } from "./SampleWaveform";
+import { bakeSampleTrim } from "./bakeSampleTrim";
+import { getSampleEngine } from "../audio/SampleEngine";
 
 interface Props {
   clip: SampleClip;
@@ -19,6 +29,8 @@ export function SampleClipEditor({
   onChangeClip,
   onDelete,
 }: Props) {
+  const [baking, setBaking] = useState(false);
+
   if (!sample) {
     return (
       <div
@@ -39,6 +51,41 @@ export function SampleClipEditor({
     );
   }
 
+  const trim = sampleTrimRange(sample);
+  const playSec = samplePlayDurationSec(sample);
+  const isTrimmed =
+    trim.start > 0.001 || trim.end < sample.durationSec - 0.001;
+
+  const setTrim = (start: number, end: number) => {
+    onChangeTrack({ trimStartSec: start, trimEndSec: end });
+  };
+
+  const onBake = async () => {
+    if (!isTrimmed || baking) return;
+    if (
+      !confirm(
+        `Permanently shorten “${sample.name}” to ${playSec.toFixed(2)}s? This rewrites the stored audio.`,
+      )
+    ) {
+      return;
+    }
+    setBaking(true);
+    try {
+      const newDur = await bakeSampleTrim(sample.id, trim.start, trim.end);
+      getSampleEngine().invalidateBuffer(sample.id);
+      onChangeTrack({
+        durationSec: newDur,
+        trimStartSec: 0,
+        trimEndSec: newDur,
+      });
+    } catch (err) {
+      console.warn("[samples] bake trim failed", err);
+      alert("Could not bake trim — see console for details.");
+    } finally {
+      setBaking(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -56,8 +103,9 @@ export function SampleClipEditor({
       <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8 }}>
         <strong>{sample.name}</strong>
         <span style={{ opacity: 0.65 }}>
-          {sample.durationSec.toFixed(2)}s
-          {` · plays ${(sample.durationSec / sample.playbackRate).toFixed(2)}s @ rate ${sample.playbackRate.toFixed(2)}`}
+          {playSec.toFixed(2)}s play
+          {isTrimmed ? ` / ${sample.durationSec.toFixed(2)}s file` : ""}
+          {` · ${(playSec / sample.playbackRate).toFixed(2)}s @ rate ${sample.playbackRate.toFixed(2)}`}
           {" · track settings apply to all placements"}
         </span>
         <label
@@ -89,6 +137,86 @@ export function SampleClipEditor({
           Delete
         </button>
       </div>
+
+      <div style={trimCard}>
+        <div style={fxTitle}>Trim</div>
+        <div
+          style={{
+            position: "relative",
+            height: 44,
+            borderRadius: 4,
+            background: "rgba(0,0,0,0.35)",
+            overflow: "hidden",
+            marginBottom: 8,
+          }}
+        >
+          <SampleWaveform
+            sampleId={sample.id}
+            color="rgba(251,146,60,0.9)"
+            trimStartFrac={
+              sample.durationSec > 0 ? trim.start / sample.durationSec : 0
+            }
+            trimEndFrac={
+              sample.durationSec > 0 ? trim.end / sample.durationSec : 1
+            }
+          />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 36, opacity: 0.75 }}>Region</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <RangeSlider
+              min={0}
+              max={Math.max(0.01, sample.durationSec)}
+              step={0.01}
+              value={[trim.start, trim.end]}
+              onChange={([lo, hi]) => setTrim(lo, hi)}
+              color="#fb923c"
+            />
+          </div>
+          <span
+            style={{
+              width: 110,
+              textAlign: "right",
+              fontVariantNumeric: "tabular-nums",
+              opacity: 0.85,
+            }}
+          >
+            {trim.start.toFixed(2)}–{trim.end.toFixed(2)}s
+          </span>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginTop: 6,
+            flexWrap: "wrap",
+          }}
+        >
+          <button
+            type="button"
+            style={btn}
+            disabled={!isTrimmed}
+            onClick={() => setTrim(0, sample.durationSec)}
+          >
+            Reset
+          </button>
+          <button
+            type="button"
+            style={btn}
+            disabled={!isTrimmed || baking}
+            onClick={() => void onBake()}
+            title="Rewrite the stored file to the trimmed region"
+          >
+            {baking ? "Baking…" : "Bake to file"}
+          </button>
+          <span style={hint}>
+            Trim shortens arrangement clips and playback. Bake makes it
+            permanent in IndexedDB.
+          </span>
+        </div>
+      </div>
+
       <Slider
         label="Gain"
         value={sample.gain}
@@ -229,6 +357,11 @@ const fxCard: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   gap: 4,
+};
+
+const trimCard: React.CSSProperties = {
+  ...fxCard,
+  gridColumn: "1 / -1",
 };
 
 const fxTitle: React.CSSProperties = {

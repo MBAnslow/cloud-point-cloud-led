@@ -16,11 +16,13 @@ import {
   type LightningKeyframe,
   type LightningParams,
   type LightningSample,
+  type LightningSpriteSample,
   type DayPeriod,
 } from "../state";
 import { useDraggable } from "./useDraggable";
 import { RangeSlider } from "./RangeSlider";
 import { putSampleBlob, deleteSampleBlob } from "../samples/sampleStorage";
+import { invalidateSpriteImage } from "../lighting/spriteImageCache";
 import {
   applyLightningTint,
   isRangePlotChannel,
@@ -80,10 +82,13 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
       selected?.values.strikesPerMinute ?? lightning.strikesPerMinute,
     strikePerMinute:
       selected?.values.strikePerMinute ?? lightning.strikePerMinute,
+    spritesPerMinute:
+      selected?.values.spritesPerMinute ?? lightning.spritesPerMinute,
     subFlashes: selected?.values.subFlashes ?? lightning.subFlashes,
     spanScale: selected?.values.spanScale ?? lightning.spanScale,
     minSpanScale: selected?.values.minSpanScale ?? lightning.minSpanScale,
     boltGain: selected?.values.boltGain ?? lightning.boltGain,
+    spriteGain: selected?.values.spriteGain ?? lightning.spriteGain,
     backgroundGain: selected?.values.backgroundGain ?? lightning.backgroundGain,
     thunderDelayMs: selected?.values.thunderDelayMs ?? lightning.thunderDelayMs,
     pan: selected?.values.pan ?? lightning.pan,
@@ -137,10 +142,12 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
       intensityRange: nextValues.intensityRange,
       strikesPerMinute: nextValues.strikesPerMinute,
       strikePerMinute: nextValues.strikePerMinute,
+      spritesPerMinute: nextValues.spritesPerMinute,
       subFlashes: nextValues.subFlashes,
       spanScale: nextValues.spanScale,
       minSpanScale: nextValues.minSpanScale,
       boltGain: nextValues.boltGain,
+      spriteGain: nextValues.spriteGain,
       backgroundGain: nextValues.backgroundGain,
       thunderDelayMs: nextValues.thunderDelayMs,
       pan: nextValues.pan,
@@ -155,19 +162,23 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
         ? "cloud/min"
         : plotChannel === "strikePerMinute"
           ? "strike/min"
-          : plotChannel === "subFlashes"
-            ? "branch prob"
-            : plotChannel === "span"
-              ? "span"
-              : plotChannel === "boltGain"
-                ? "bolt gain"
-                : plotChannel === "backgroundGain"
-                  ? "bg gain"
-                  : plotChannel === "thunderDelay"
-                    ? "thunder delay"
-                    : plotChannel === "tintMix"
-                      ? "tint mix"
-                      : "pan";
+          : plotChannel === "spritesPerMinute"
+            ? "sprites/min"
+            : plotChannel === "subFlashes"
+              ? "branch prob"
+              : plotChannel === "span"
+                ? "span"
+                : plotChannel === "boltGain"
+                  ? "bolt gain"
+                  : plotChannel === "spriteGain"
+                    ? "sprite gain"
+                    : plotChannel === "backgroundGain"
+                      ? "bg gain"
+                      : plotChannel === "thunderDelay"
+                        ? "thunder delay"
+                        : plotChannel === "tintMix"
+                          ? "tint mix"
+                          : "pan";
 
   return (
     <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
@@ -255,6 +266,67 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
                 patchAnim({ strikePerMinute: Math.max(0, Math.min(40, v)) })
               }
               formatValue={(v) => `${v.toFixed(1)}/min`}
+            />
+            <SliderRow
+              label={`Sprites / min${KF}`}
+              labelActive={plotChannel === "spritesPerMinute"}
+              onLabelClick={() => setPlotChannel("spritesPerMinute")}
+              value={anim.spritesPerMinute}
+              min={0}
+              max={40}
+              step={0.1}
+              onChange={(v) =>
+                patchAnim({ spritesPerMinute: Math.max(0, Math.min(40, v)) })
+              }
+              formatValue={(v) => `${v.toFixed(1)}/min`}
+            />
+            <SliderRow
+              label={`Sprite gain${KF}`}
+              labelActive={plotChannel === "spriteGain"}
+              onLabelClick={() => setPlotChannel("spriteGain")}
+              value={anim.spriteGain}
+              min={0}
+              max={3}
+              step={0.05}
+              onChange={(v) =>
+                patchAnim({ spriteGain: Math.max(0, Math.min(3, v)) })
+              }
+              formatValue={(v) => v.toFixed(2)}
+            />
+            <SliderRow
+              label="Sprite duration"
+              value={lightning.spriteDurationMs}
+              min={40}
+              max={800}
+              step={10}
+              onChange={(v) =>
+                upd({ spriteDurationMs: Math.max(20, Math.min(2000, v)) })
+              }
+              formatValue={(v) => `${v.toFixed(0)} ms`}
+            />
+            <SliderRow
+              label="Sprite strobe"
+              value={lightning.spriteStrobeHz}
+              min={1}
+              max={40}
+              step={1}
+              onChange={(v) =>
+                upd({ spriteStrobeHz: Math.max(1, Math.min(60, v)) })
+              }
+              formatValue={(v) => `${v.toFixed(0)} Hz`}
+            />
+            <SliderRow
+              label="Strobe duty"
+              value={lightning.spriteStrobeDuty}
+              min={0.05}
+              max={0.95}
+              step={0.05}
+              onChange={(v) =>
+                upd({
+                  spriteStrobeDuty: Math.max(0.05, Math.min(0.95, v)),
+                })
+              }
+              formatValue={(v) => `${(v * 100).toFixed(0)}%`}
             />
             {lightning.enabled && !inActiveWindow && (
               <div
@@ -384,7 +456,22 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
               patchAnim={patchAnim}
             />
           </div>
-          <BoltSamplesColumn lightning={lightning} upd={upd} />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+              minWidth: 0,
+              height: 0,
+              minHeight: "100%",
+              overflow: "hidden",
+              borderLeft: "1px solid rgba(255,255,255,0.08)",
+              paddingLeft: 10,
+            }}
+          >
+            <BoltSamplesColumn lightning={lightning} upd={upd} />
+            <SpriteSamplesColumn lightning={lightning} upd={upd} />
+          </div>
         </div>
       </div>
     </div>
@@ -396,10 +483,12 @@ function cloneAnim(v: LightningAnimParams): LightningAnimParams {
     intensityRange: [v.intensityRange[0], v.intensityRange[1]],
     strikesPerMinute: v.strikesPerMinute,
     strikePerMinute: v.strikePerMinute,
+    spritesPerMinute: v.spritesPerMinute,
     subFlashes: v.subFlashes,
     spanScale: v.spanScale,
     minSpanScale: v.minSpanScale,
     boltGain: v.boltGain,
+    spriteGain: v.spriteGain,
     backgroundGain: v.backgroundGain,
     thunderDelayMs: v.thunderDelayMs,
     pan: v.pan,
@@ -1503,7 +1592,16 @@ function BoltSamplesColumn({
   };
 
   return (
-    <div style={boltColStyle}>
+    <div
+      style={{
+        ...boltColStyle,
+        borderLeft: "none",
+        paddingLeft: 0,
+        height: "auto",
+        minHeight: 0,
+        flex: 1,
+      }}
+    >
       <div
         style={{
           display: "flex",
@@ -1629,6 +1727,143 @@ function BoltSamplesColumn({
   );
 }
 
+function SpriteSamplesColumn({
+  lightning,
+  upd,
+}: {
+  lightning: LightningParams;
+  upd: (patch: Partial<LightningParams>) => void;
+}) {
+  const spriteInputRef = useRef<HTMLInputElement | null>(null);
+  const samples = lightning.spriteSamples ?? [];
+
+  const onSpriteFiles = async (files: FileList | null) => {
+    if (!files) return;
+    const added: LightningSpriteSample[] = [];
+    for (const f of Array.from(files)) {
+      const sample = await ingestSpriteFile(f);
+      if (sample) added.push(sample);
+    }
+    if (added.length > 0) {
+      upd({ spriteSamples: [...samples, ...added] });
+    }
+    if (spriteInputRef.current) spriteInputRef.current.value = "";
+  };
+
+  const removeSprite = (id: string) => {
+    invalidateSpriteImage(id);
+    void deleteSampleBlob(id);
+    upd({ spriteSamples: samples.filter((s) => s.id !== id) });
+  };
+
+  return (
+    <div
+      style={{
+        ...boltColStyle,
+        borderLeft: "none",
+        paddingLeft: 0,
+        height: "auto",
+        minHeight: 0,
+        flex: 1,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 10, opacity: 0.7, flex: 1 }}>
+          Sprites ({samples.length})
+        </span>
+        <button
+          type="button"
+          style={miniBtn}
+          onClick={() => spriteInputRef.current?.click()}
+        >
+          + upload
+        </button>
+        <input
+          ref={spriteInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => onSpriteFiles(e.target.files)}
+        />
+      </div>
+      <div style={{ fontSize: 9, opacity: 0.5, marginBottom: 2 }}>
+        Each trigger picks a random image and projects it ±X/Y/Z through the
+        cloud with a short strobe.
+      </div>
+      <ul style={boltListStyle}>
+        {samples.length === 0 ? (
+          <li
+            style={{
+              padding: "8px 6px",
+              fontSize: 10,
+              opacity: 0.45,
+            }}
+          >
+            No images yet
+          </li>
+        ) : (
+          samples.map((s) => (
+            <li
+              key={s.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "2px 5px",
+                fontSize: 10,
+                borderBottom: "1px solid rgba(255,255,255,0.05)",
+                minHeight: 22,
+              }}
+            >
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={s.name}
+              >
+                {s.name}
+              </span>
+              {typeof s.width === "number" && typeof s.height === "number" && (
+                <span
+                  style={{
+                    opacity: 0.45,
+                    fontVariantNumeric: "tabular-nums",
+                    fontSize: 9,
+                    minWidth: 48,
+                    textAlign: "right",
+                  }}
+                >
+                  {s.width}×{s.height}
+                </span>
+              )}
+              <button
+                type="button"
+                style={{ ...miniBtn, padding: "0 4px", lineHeight: 1.2 }}
+                onClick={() => removeSprite(s.id)}
+                title="Remove"
+              >
+                ×
+              </button>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
+  );
+}
+
 async function ingestFile(file: File): Promise<LightningSample | null> {
   try {
     const id = `ln-${Math.random().toString(36).slice(2, 10)}`;
@@ -1658,6 +1893,40 @@ async function ingestFile(file: File): Promise<LightningSample | null> {
     };
   } catch (err) {
     console.warn("[lightning] file ingest failed", err);
+    return null;
+  }
+}
+
+async function ingestSpriteFile(
+  file: File,
+): Promise<LightningSpriteSample | null> {
+  try {
+    if (!file.type.startsWith("image/")) {
+      console.warn("[lightning] sprite rejected (not an image)", file.name);
+      return null;
+    }
+    const id = `ls-${Math.random().toString(36).slice(2, 10)}`;
+    const arr = await file.arrayBuffer();
+    const blob = new Blob([arr], { type: file.type || "image/*" });
+    await putSampleBlob(id, blob);
+    let width: number | undefined;
+    let height: number | undefined;
+    try {
+      const bitmap = await createImageBitmap(blob);
+      width = bitmap.width;
+      height = bitmap.height;
+      bitmap.close();
+    } catch {
+      // Dimensions optional.
+    }
+    return {
+      id,
+      name: file.name,
+      ...(width !== undefined ? { width } : {}),
+      ...(height !== undefined ? { height } : {}),
+    };
+  } catch (err) {
+    console.warn("[lightning] sprite ingest failed", err);
     return null;
   }
 }

@@ -93,13 +93,16 @@ export function invalidateSamplePeaks(sampleId: string): void {
   inflight.delete(sampleId);
 }
 
-/** Draw min/max peaks into a canvas, stretched to its pixel size. */
+/** Draw min/max peaks into a canvas, stretched to its pixel size.
+ *  Optional `fromFrac`/`toFrac` (0..1) crop which peak buckets are drawn. */
 export function drawWaveform(
   ctx: CanvasRenderingContext2D,
   peaks: WaveformPeaks,
   width: number,
   height: number,
   color: string,
+  fromFrac = 0,
+  toFrac = 1,
 ): void {
   const w = Math.max(1, Math.floor(width));
   const h = Math.max(1, Math.floor(height));
@@ -108,6 +111,12 @@ export function drawWaveform(
   const mid = h / 2;
   const n = peaks.mins.length;
   if (n === 0) return;
+
+  const a = Math.max(0, Math.min(1, fromFrac));
+  const b = Math.max(a + 1e-6, Math.min(1, toFrac));
+  const i0 = Math.floor(a * n);
+  const i1 = Math.max(i0 + 1, Math.ceil(b * n));
+  const count = i1 - i0;
 
   // Soft midline
   ctx.strokeStyle = "rgba(0,0,0,0.18)";
@@ -119,7 +128,7 @@ export function drawWaveform(
 
   ctx.fillStyle = color;
   for (let x = 0; x < w; x++) {
-    const i = Math.min(n - 1, Math.floor((x / w) * n));
+    const i = i0 + Math.min(count - 1, Math.floor((x / w) * count));
     const mn = peaks.mins[i]!;
     const mx = peaks.maxs[i]!;
     const y0 = mid - mx * mid;

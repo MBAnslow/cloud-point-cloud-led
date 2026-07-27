@@ -3,9 +3,13 @@ import {
   useSimStore,
   type FilterChain,
   type FilterParams,
-  type MasterFxParams,
 } from "../state";
 import { getBreathEffectDrive } from "../lighting/breathEffectDrive";
+import { currentBreathDrive } from "../audio/breathModulation";
+import { getDroneEngine } from "../audio/DroneEngine";
+import { getPadEngine } from "../audio/PadEngine";
+import { getSampleEngine } from "../audio/SampleEngine";
+import { getMasterFxBus } from "../audio/MasterFxBus";
 import { useDraggable } from "./useDraggable";
 
 const PLOT_W = 360;
@@ -14,6 +18,9 @@ const F_MIN = 20;
 const F_MAX = 20000;
 const DB_MIN = -30;
 const DB_MAX = 12;
+/** Peak ≥ this (linear) lights the meter red (−1 dBFS ≈ 0.89). */
+const PEAK_CLIP = 0.89;
+const PEAK_HOLD_MS = 400;
 
 /**
  * Compact, always-visible master frequency panel. Owns the shared
@@ -38,11 +45,172 @@ export function MasterFrequencyPanel({ visible = true }: { visible?: boolean }) 
       >
         <div style={titleStyle}>Master volume controls</div>
       </div>
+      <OutputSection />
       <BreathModHeader />
       <DroneSubmenu />
       <PadSubmenu />
       <SamplesSubmenu />
     </div>
+  );
+}
+
+function OutputSection() {
+  const outputGain = useSimStore((s) => s.masterFx.outputGain ?? 1);
+  const setMasterFx = useSimStore((s) => s.setMasterFx);
+  return (
+    <div
+      style={{
+        marginTop: 6,
+        padding: "6px 6px 4px",
+        borderRadius: 4,
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.1)",
+      }}
+    >
+      <VolumeWithMeter
+        label="Output"
+        min={0}
+        max={1.5}
+        step={0.01}
+        value={outputGain}
+        onChange={(v) => setMasterFx({ outputGain: v })}
+        source="output"
+      />
+      <div style={{ fontSize: 9, opacity: 0.5, marginTop: 2, paddingLeft: 2 }}>
+        Shared program fader + −1 dB limiter after drone/pad/samples sum
+      </div>
+    </div>
+  );
+}
+
+function peakToDb(peak: number): string {
+  if (peak < 1e-4) return "−∞";
+  const db = 20 * Math.log10(peak);
+  return `${db >= 0 ? "+" : ""}${db.toFixed(1)}`;
+}
+
+/**
+ * Live peak bar with ~400 ms hold so short spikes stay readable.
+ * `source` picks which engine/bus meter to poll.
+ */
+function PeakMeter({
+  source,
+}: {
+  source: "drone" | "pad" | "samples" | "output";
+}) {
+  const [display, setDisplay] = useState(0);
+  const holdRef = useRef({ peak: 0, until: 0 });
+
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      let raw = 0;
+      try {
+        if (source === "drone") raw = getDroneEngine().getPeakLevel();
+        else if (source === "pad") raw = getPadEngine().getPeakLevel();
+        else if (source === "samples") raw = getSampleEngine().getPeakLevel();
+        else raw = getMasterFxBus().getPeakLevel();
+      } catch {
+        raw = 0;
+      }
+      const now = performance.now();
+      const hold = holdRef.current;
+      if (raw >= hold.peak) {
+        hold.peak = raw;
+        hold.until = now + PEAK_HOLD_MS;
+      } else if (now > hold.until) {
+        // Slow release toward live level.
+        hold.peak = hold.peak * 0.85 + raw * 0.15;
+        if (hold.peak < 0.001) hold.peak = raw;
+      }
+      setDisplay(hold.peak);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [source]);
+
+  const fill = Math.max(0, Math.min(1.2, display));
+  const hot = fill >= PEAK_CLIP;
+  return (
+    <div
+      title={`Peak ${peakToDb(display)} dBFS`}
+      style={{
+        position: "relative",
+        width: 52,
+        height: 14,
+        flexShrink: 0,
+        background: "rgba(0,0,0,0.4)",
+        borderRadius: 2,
+        border: "1px solid rgba(255,255,255,0.12)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: `${Math.min(100, (fill / 1) * 100)}%`,
+          background: hot
+            ? "rgba(248,113,113,0.85)"
+            : "rgba(74,222,128,0.7)",
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 8,
+          fontVariantNumeric: "tabular-nums",
+          opacity: 0.9,
+          pointerEvents: "none",
+          textShadow: "0 0 2px #000",
+        }}
+      >
+        {peakToDb(display)}
+      </div>
+    </div>
+  );
+}
+
+function VolumeWithMeter({
+  label,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+  formatValue,
+  modKey,
+  source,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (v: number) => void;
+  formatValue?: (v: number) => string;
+  modKey?: string;
+  source: "drone" | "pad" | "samples" | "output";
+}) {
+  return (
+    <SliderRow
+      label={label}
+      min={min}
+      max={max}
+      step={step}
+      value={value}
+      onChange={onChange}
+      formatValue={formatValue}
+      modKey={modKey}
+      meterSource={source}
+    />
   );
 }
 
@@ -210,7 +378,7 @@ function DroneSubmenu() {
   const setDrone = useSimStore((s) => s.setDrone);
   return (
     <Submenu label="Drone">
-      <SliderRow
+      <VolumeWithMeter
         label="Volume"
         min={0}
         max={1}
@@ -218,6 +386,7 @@ function DroneSubmenu() {
         value={masterGain}
         onChange={(v) => setDrone({ masterGain: v })}
         modKey="drone.masterGain"
+        source="drone"
       />
       <SliderRow
         label="Saturation"
@@ -263,7 +432,7 @@ function PadSubmenu() {
   const setPad = useSimStore((s) => s.setPad);
   return (
     <Submenu label="Pad">
-      <SliderRow
+      <VolumeWithMeter
         label="Volume"
         min={0}
         max={1}
@@ -271,6 +440,7 @@ function PadSubmenu() {
         value={master}
         onChange={(v) => setPad({ master: v })}
         modKey="pad.master"
+        source="pad"
       />
       <SliderRow
         label="Saturation"
@@ -296,7 +466,7 @@ function SamplesSubmenu() {
   const setSamples = useSimStore((s) => s.setSamples);
   return (
     <Submenu label="Samples">
-      <SliderRow
+      <VolumeWithMeter
         label="Volume"
         min={0}
         max={3}
@@ -304,6 +474,7 @@ function SamplesSubmenu() {
         value={master}
         onChange={(v) => setSamples({ master: v })}
         modKey="samples.master"
+        source="samples"
       />
       <EngineFilterSection
         keyPrefix="samples"
@@ -358,6 +529,7 @@ function SliderRow({
   onChange,
   formatValue,
   modKey,
+  meterSource,
 }: {
   label: string;
   min: number;
@@ -368,12 +540,16 @@ function SliderRow({
   formatValue?: (v: number) => string;
   /** Enables the breath-modulation column and picks a stable storage key. */
   modKey?: string;
+  /** When set, show a live peak meter before the slider. */
+  meterSource?: "drone" | "pad" | "samples" | "output";
 }) {
   const modAmount = useSimStore((s) => (modKey ? s.breathMod[modKey] ?? 0 : 0));
   const extreme = modKey ? computeExtreme(value, min, max, modAmount, false) : null;
+  const live = useLiveModValue(value, min, max, modAmount, false, modKey);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
       <span style={{ width: 72, opacity: 0.85 }}>{label}</span>
+      {meterSource && <PeakMeter source={meterSource} />}
       <RangeWithBaseTick
         min={min}
         max={max}
@@ -381,6 +557,7 @@ function SliderRow({
         value={value}
         base={value}
         extreme={extreme}
+        live={live}
         onChange={onChange}
       />
       <span style={{ width: 48, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
@@ -392,9 +569,10 @@ function SliderRow({
 }
 
 /**
- * Range input with a small tick beneath the thumb at the "base" value.
- * `base` is the reference the audio engine will treat as neutral once
- * breath modulation is wired in — for now `base === value`.
+ * Range input with ticks under the track:
+ *   yellow — stored base (thumb when not dragging via mod)
+ *   blue   — value at full cloud breath effect (mod amount × drive=1)
+ *   green  — live playing value (mod amount × current drive)
  */
 function RangeWithBaseTick({
   min,
@@ -403,6 +581,7 @@ function RangeWithBaseTick({
   value,
   base,
   extreme,
+  live,
   onChange,
   logScale,
 }: {
@@ -413,6 +592,8 @@ function RangeWithBaseTick({
   base: number;
   /** Where the parameter lands at full cloud effect (drive = 1). */
   extreme?: number | null;
+  /** Live engine value at the current breath-mod drive. */
+  live?: number | null;
   onChange: (v: number) => void;
   logScale?: boolean;
 }) {
@@ -431,6 +612,10 @@ function RangeWithBaseTick({
   const extremePct =
     extreme != null && Number.isFinite(extreme) && Math.abs(extreme - base) > 1e-6
       ? Math.max(0, Math.min(100, toPct(extreme)))
+      : null;
+  const livePct =
+    live != null && Number.isFinite(live) && Math.abs(live - base) > 1e-6
+      ? Math.max(0, Math.min(100, toPct(live)))
       : null;
   return (
     <div style={{ flex: 1, position: "relative" }}>
@@ -463,6 +648,23 @@ function RangeWithBaseTick({
           title="Value at full cloud breath effect (current mod amount)"
         />
       )}
+      {livePct != null && (
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: `calc(${livePct}% - 1px)`,
+            bottom: -2,
+            width: 2,
+            height: 8,
+            background: "rgba(74,222,128,0.95)",
+            pointerEvents: "none",
+            borderRadius: 1,
+            zIndex: 1,
+          }}
+          title="Live playing value (breath-modded)"
+        />
+      )}
       <div
         aria-hidden
         style={{
@@ -475,7 +677,7 @@ function RangeWithBaseTick({
           pointerEvents: "none",
           borderRadius: 1,
         }}
-        title="Default value"
+        title="Stored base value"
       />
     </div>
   );
@@ -494,15 +696,67 @@ function computeExtreme(
   amount: number,
   logScale: boolean,
 ): number {
-  if (amount === 0) return base;
+  return computeModulated(base, min, max, amount, 1, logScale);
+}
+
+/** Same mapping as breathModulation.apply, with explicit drive intensity. */
+function computeModulated(
+  base: number,
+  min: number,
+  max: number,
+  amount: number,
+  drive: number,
+  logScale: boolean,
+): number {
+  if (amount === 0 || drive <= 0) return base;
   if (logScale) {
     const lo = Math.log(Math.max(1e-6, min));
     const hi = Math.log(Math.max(1e-6, max));
     const bLog = Math.log(Math.max(1e-6, base));
-    const next = bLog + amount * (hi - lo);
+    const next = bLog + drive * amount * (hi - lo);
     return Math.exp(Math.max(lo, Math.min(hi, next)));
   }
-  return Math.max(min, Math.min(max, base + amount * (max - min)));
+  return Math.max(
+    min,
+    Math.min(max, base + drive * amount * (max - min)),
+  );
+}
+
+/**
+ * RAF-polled live value for a breath-modulated slider. Returns null when
+ * mod is inactive / amount is 0 so the green tick can hide.
+ */
+function useLiveModValue(
+  base: number,
+  min: number,
+  max: number,
+  amount: number,
+  logScale: boolean,
+  modKey: string | undefined,
+): number | null {
+  const [live, setLive] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!modKey || amount === 0) {
+      setLive(null);
+      return;
+    }
+    let raf = 0;
+    const tick = () => {
+      const state = useSimStore.getState();
+      const drive = currentBreathDrive(state);
+      if (drive <= 0) {
+        setLive(null);
+      } else {
+        setLive(computeModulated(base, min, max, amount, drive, logScale));
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [base, min, max, amount, logScale, modKey]);
+
+  return live;
 }
 
 /**
@@ -604,6 +858,7 @@ function FilterRow({
   const filterExtreme = modKey
     ? computeExtreme(hz, F_MIN, F_MAX, modAmount, true)
     : null;
+  const live = useLiveModValue(hz, F_MIN, F_MAX, modAmount, true, modKey);
   return (
     <div
       style={{
@@ -634,6 +889,7 @@ function FilterRow({
           value={hz}
           base={hz}
           extreme={filterExtreme}
+          live={live}
           onChange={onHz}
           logScale
         />

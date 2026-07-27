@@ -1,5 +1,6 @@
 import * as Tone from "tone";
 import { applyFilterChain } from "./filterChain";
+import { meterAbs } from "./meterAbs";
 import {
   HARMONIC_COUNT,
   HARMONIC_OCTAVE_OFFSETS,
@@ -136,6 +137,7 @@ export class DroneEngine {
   private tremoloGain: Tone.Gain | null = null;
   private tremoloLfo: Tone.LFO | null = null;
   private bus: Tone.Gain | null = null;
+  private meter: Tone.Meter | null = null;
 
   private voices = new Map<string, Voice>();
   private previewVoice: Voice | null = null;
@@ -220,6 +222,7 @@ export class DroneEngine {
       type: "sine",
     }).start();
     this.tremoloLfo.connect(this.tremoloGain.gain);
+    this.meter = new Tone.Meter({ normalRange: true });
     this.started = true;
   }
 
@@ -227,6 +230,7 @@ export class DroneEngine {
    * Repatch the master output. Pass a node to route into, or `null` to
    * revert to a raw destination connection. Safe to call every frame —
    * we track the current target and no-op when it doesn't change.
+   * Meter is reconnected after disconnect so peaks still update.
    */
   private currentRoutingTarget: Tone.InputNode | null | undefined = undefined;
   setRouting(target: Tone.InputNode | null): void {
@@ -235,7 +239,14 @@ export class DroneEngine {
     this.lp.disconnect();
     if (target) this.lp.connect(target);
     else this.lp.toDestination();
+    if (this.meter) this.lp.connect(this.meter);
     this.currentRoutingTarget = target;
+  }
+
+  /** Peak level after engine EQ (0..1+). */
+  getPeakLevel(): number {
+    if (!this.meter) return 0;
+    return meterAbs(this.meter.getValue());
   }
 
   isStarted(): boolean {

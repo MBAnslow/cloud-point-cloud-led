@@ -89,6 +89,11 @@ export interface LightningAnimParams {
    */
   strikePerMinute: number;
   /**
+   * Transient image “sprites” projected through the cloud per real minute.
+   * Each trigger picks a random uploaded image and a random ±X/Y/Z axis.
+   */
+  spritesPerMinute: number;
+  /**
    * Per-segment branch probability in [0, 1]. At each interior main-bolt
    * vertex, a weaker side branch spawns with this chance (1 = every segment).
    */
@@ -98,6 +103,8 @@ export interface LightningAnimParams {
   /** Min bolt length as a fraction of mean cloud radius. */
   minSpanScale: number;
   boltGain: number;
+  /** Additive gain for projected sprite image flashes. */
+  spriteGain: number;
   backgroundGain: number;
   thunderDelayMs: number;
   /** Stereo pan for bolt/background audio, −1 = left … +1 = right. */
@@ -145,6 +152,11 @@ export interface LightningParams {
    * Separate from in-cloud flashes.
    */
   strikePerMinute: number;
+  /**
+   * Average projected sprite flashes per real minute. Also keyframed.
+   * Requires at least one uploaded `spriteSamples` image.
+   */
+  spritesPerMinute: number;
   /**
    * Characteristic distance (m) over which an LED's contribution from a
    * lit segment drops by 1/e. Continuous exponential falloff — every
@@ -194,11 +206,27 @@ export interface LightningParams {
   /** Optional looping background ambience (rain, thunder rumble, …). */
   backgroundSample: LightningSample | null;
   /**
+   * Uploaded sprite image library. Each sprite trigger picks one at
+   * random and projects it through the cloud along a random ±X/Y/Z axis.
+   */
+  spriteSamples: LightningSpriteSample[];
+  /**
+   * How long a sprite flash lasts (ms), including on/off strobe pulses.
+   * Global (not keyframed).
+   */
+  spriteDurationMs: number;
+  /** Strobe flash rate in Hz while a sprite is active. */
+  spriteStrobeHz: number;
+  /** Fraction of each strobe period the image is “on”, [0.05, 0.95]. */
+  spriteStrobeDuty: number;
+  /**
    * Base playback gain for bolt sounds. The actual per-trigger gain
    * is scaled by the strike's sampled intensity so louder flashes get
    * louder bolts and gentler flashes fade toward this floor.
    */
   boltGain: number;
+  /** Additive LED gain for projected sprites. Also keyframed. */
+  spriteGain: number;
   /** Playback gain for the background loop, [0, 1]. */
   backgroundGain: number;
   /**
@@ -249,6 +277,14 @@ export const BOLT_INTENSITY_TAGS: BoltIntensityTag[] = [
   "high",
 ];
 export const BOLT_LENGTH_TAGS: BoltLengthTag[] = ["short", "medium", "long"];
+
+/** Metadata for a storm sprite image (blob in IndexedDB by `id`). */
+export interface LightningSpriteSample {
+  id: string;
+  name: string;
+  width?: number;
+  height?: number;
+}
 
 export interface LightningSample {
   id: string;
@@ -861,8 +897,15 @@ export interface PadParams {
 export interface Sample {
   id: string;
   name: string;
-  /** Duration of the decoded buffer in seconds. */
+  /** Duration of the decoded buffer in seconds (full file). */
   durationSec: number;
+  /**
+   * Inclusive play region start within the buffer, seconds.
+   * Clips use `[trimStartSec, trimEndSec)` as the audible length.
+   */
+  trimStartSec: number;
+  /** Exclusive play region end within the buffer, seconds. */
+  trimEndSec: number;
   /** Linear gain multiplier, [0, 1]. */
   gain: number;
   /** Stereo pan, [-1, 1]. */
@@ -895,8 +938,9 @@ export interface Sample {
   triggerProbability: number;
 }
 
-/** Defaults for a newly uploaded library track. */
+/** Defaults for a newly uploaded library track (trim end set at upload). */
 export const DEFAULT_SAMPLE_TRACK = {
+  trimStartSec: 0,
   gain: 1,
   pan: 0,
   playbackRate: 1,
@@ -909,17 +953,51 @@ export const DEFAULT_SAMPLE_TRACK = {
   delayFeedback: 0.3,
   delayMix: 0,
   triggerProbability: 1,
-} as const satisfies Omit<Sample, "id" | "name" | "durationSec">;
+} as const satisfies Omit<Sample, "id" | "name" | "durationSec" | "trimEndSec">;
+
+/** Clamped trim window and playable length for a library sample. */
+export function sampleTrimRange(sample: Sample): {
+  start: number;
+  end: number;
+  playSec: number;
+} {
+  const dur = Math.max(0, sample.durationSec);
+  const start = Math.max(
+    0,
+    Math.min(dur, Number.isFinite(sample.trimStartSec) ? sample.trimStartSec : 0),
+  );
+  const endRaw = Number.isFinite(sample.trimEndSec)
+    ? sample.trimEndSec
+    : dur;
+  const end = Math.max(start, Math.min(dur, endRaw));
+  return { start, end, playSec: Math.max(0, end - start) };
+}
+
+export function samplePlayDurationSec(sample: Sample): number {
+  return sampleTrimRange(sample).playSec;
+}
 
 function resolveSampleTrackFields(
   raw: Record<string, unknown> | undefined,
   fallback?: Record<string, unknown>,
+  durationSec = 0,
 ): Omit<Sample, "id" | "name" | "durationSec"> {
   const g = (key: string, def: number): number => {
     const v = raw?.[key] ?? fallback?.[key];
     return typeof v === "number" && Number.isFinite(v) ? v : def;
   };
+  const dur = Math.max(0, durationSec);
+  const trimStartSec = Math.max(
+    0,
+    Math.min(dur, g("trimStartSec", DEFAULT_SAMPLE_TRACK.trimStartSec)),
+  );
+  const trimEndSec = Math.max(
+    trimStartSec,
+    Math.min(dur, g("trimEndSec", dur)),
+  );
   return {
+    trimStartSec,
+    trimEndSec,
     gain: Math.max(0, Math.min(1, g("gain", DEFAULT_SAMPLE_TRACK.gain))),
     pan: Math.max(-1, Math.min(1, g("pan", DEFAULT_SAMPLE_TRACK.pan))),
     playbackRate: Math.max(
@@ -966,7 +1044,7 @@ function resolveSampleTrackFields(
  * A single placed sample clip on the 24h arrangement timeline. Sound
  * parameters live on the parent `Sample` (track); the clip only stores
  * where it starts. Width is derived:
- *   widthHours = (sample.durationSec / sample.playbackRate) * (24 / cycleSeconds)
+ *   widthHours = (samplePlayDurationSec(sample) / sample.playbackRate) * (24 / cycleSeconds)
  */
 export interface SampleClip {
   id: string;
@@ -1060,6 +1138,8 @@ export interface MasterFxParams {
   applyToPad: boolean;
   /** Route samples through the shared EQ chain. */
   applyToSamples: boolean;
+  /** Program output gain after the three engines sum, [0, 1.5]. */
+  outputGain: number;
 }
 
 /** Length of a period in decimal hours, handling wrap-around. */
@@ -1731,10 +1811,12 @@ const DEFAULTS = {
           intensityRange: [0.5, 0.9],
           strikesPerMinute: 2,
           strikePerMinute: 0.3,
+          spritesPerMinute: 0.5,
           subFlashes: 0.25,
           spanScale: 0.7,
           minSpanScale: 0.4,
           boltGain: 0.6,
+          spriteGain: 1.2,
           backgroundGain: 0.25,
           thunderDelayMs: 800,
           pan: 0,
@@ -1748,10 +1830,12 @@ const DEFAULTS = {
           intensityRange: [0.9, 1.5],
           strikesPerMinute: 8,
           strikePerMinute: 1,
+          spritesPerMinute: 2,
           subFlashes: 0.4,
           spanScale: 0.85,
           minSpanScale: 0.5,
           boltGain: 0.8,
+          spriteGain: 1.6,
           backgroundGain: 0.35,
           thunderDelayMs: 800,
           pan: 0,
@@ -1765,10 +1849,12 @@ const DEFAULTS = {
           intensityRange: [0.5, 0.9],
           strikesPerMinute: 2,
           strikePerMinute: 0.3,
+          spritesPerMinute: 0.5,
           subFlashes: 0.25,
           spanScale: 0.7,
           minSpanScale: 0.4,
           boltGain: 0.6,
+          spriteGain: 1.2,
           backgroundGain: 0.25,
           thunderDelayMs: 800,
           pan: 0,
@@ -1778,6 +1864,7 @@ const DEFAULTS = {
     ],
     strikesPerMinute: 2,
     strikePerMinute: 0.5,
+    spritesPerMinute: 1,
     falloffDistance: 0.1,
     boltSegments: 10,
     boltJitterRange: [0.25, 0.55],
@@ -1790,7 +1877,12 @@ const DEFAULTS = {
     boltSamples: [],
     strikeSample: null,
     backgroundSample: null,
+    spriteSamples: [],
+    spriteDurationMs: 180,
+    spriteStrobeHz: 18,
+    spriteStrobeDuty: 0.45,
     boltGain: 0.8,
+    spriteGain: 1.4,
     backgroundGain: 0.35,
     boltPitchJitterCents: 200,
     thunderDelayMs: 800,
@@ -1870,7 +1962,7 @@ const DEFAULTS = {
   } as PadParams,
   samples: {
     enabled: false,
-    master: 1.2,
+    master: 0.7,
     pitchCents: 0,
     pitchLfoRateHz: 1,
     pitchLfoDepthCents: 0,
@@ -1911,6 +2003,7 @@ const DEFAULTS = {
     applyToDrone: true,
     applyToPad: true,
     applyToSamples: true,
+    outputGain: 1,
   } as MasterFxParams,
   breathMod: {} as Record<string, number>,
   breathModEnabled: false,
@@ -2211,17 +2304,19 @@ function resolveSamplesParams(
         )
         .map((s) => {
           const id = s.id as string;
+          const durationSec =
+            typeof s.durationSec === "number" && Number.isFinite(s.durationSec)
+              ? Math.max(0, s.durationSec)
+              : 0;
           const track = resolveSampleTrackFields(
             s,
             legacyBySample.get(id),
+            durationSec,
           );
           return {
             id,
             name: s.name as string,
-            durationSec:
-              typeof s.durationSec === "number" && Number.isFinite(s.durationSec)
-                ? Math.max(0, s.durationSec)
-                : 0,
+            durationSec,
             ...track,
           };
         })
@@ -2545,6 +2640,10 @@ function resolveMasterFx(
       applyToDrone: pickBool(saved.applyToDrone, d.applyToDrone),
       applyToPad: pickBool(saved.applyToPad, d.applyToPad),
       applyToSamples: pickBool(saved.applyToSamples, d.applyToSamples),
+      outputGain: Math.max(
+        0,
+        Math.min(1.5, pickNum(saved.outputGain, d.outputGain)),
+      ),
     };
   }
   if (legacyDrone) {
@@ -2558,6 +2657,7 @@ function resolveMasterFx(
       applyToDrone: d.applyToDrone,
       applyToPad: d.applyToPad,
       applyToSamples: d.applyToSamples,
+      outputGain: d.outputGain,
     };
   }
   return d;
@@ -2696,10 +2796,12 @@ function cloneAnimParams(src: LightningAnimParams): LightningAnimParams {
     intensityRange: [src.intensityRange[0], src.intensityRange[1]],
     strikesPerMinute: src.strikesPerMinute,
     strikePerMinute: src.strikePerMinute,
+    spritesPerMinute: src.spritesPerMinute,
     subFlashes: src.subFlashes,
     spanScale: src.spanScale,
     minSpanScale: src.minSpanScale,
     boltGain: src.boltGain,
+    spriteGain: src.spriteGain,
     backgroundGain: src.backgroundGain,
     thunderDelayMs: src.thunderDelayMs,
     pan: src.pan,
@@ -2721,10 +2823,12 @@ function animParamsFromRoot(p: {
   intensityRange: [number, number];
   strikesPerMinute: number;
   strikePerMinute: number;
+  spritesPerMinute: number;
   subFlashes: number;
   spanScale: number;
   minSpanScale: number;
   boltGain: number;
+  spriteGain: number;
   backgroundGain: number;
   thunderDelayMs: number;
   pan: number;
@@ -2776,10 +2880,15 @@ function resolveAnimParams(
       0,
       Math.min(40, num(rec.strikePerMinute, fallback.strikePerMinute)),
     ),
+    spritesPerMinute: Math.max(
+      0,
+      Math.min(40, num(rec.spritesPerMinute, fallback.spritesPerMinute)),
+    ),
     subFlashes: migrateSubFlashes(num(rec.subFlashes, fallback.subFlashes)),
     spanScale,
     minSpanScale,
     boltGain: Math.max(0, Math.min(3, num(rec.boltGain, fallback.boltGain))),
+    spriteGain: Math.max(0, Math.min(3, num(rec.spriteGain, fallback.spriteGain))),
     backgroundGain: Math.max(
       0,
       Math.min(3, num(rec.backgroundGain, fallback.backgroundGain)),
@@ -2906,6 +3015,38 @@ function resolveLightningSamples(input: unknown): LightningSample[] {
   return out;
 }
 
+export function resolveLightningSpriteSample(
+  input: Record<string, unknown>,
+): LightningSpriteSample | null {
+  if (typeof input.id !== "string" || !input.id) return null;
+  if (typeof input.name !== "string") return null;
+  const width =
+    typeof input.width === "number" && Number.isFinite(input.width)
+      ? Math.max(1, Math.floor(input.width))
+      : undefined;
+  const height =
+    typeof input.height === "number" && Number.isFinite(input.height)
+      ? Math.max(1, Math.floor(input.height))
+      : undefined;
+  return {
+    id: input.id,
+    name: input.name,
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
+  };
+}
+
+function resolveLightningSpriteSamples(input: unknown): LightningSpriteSample[] {
+  if (!Array.isArray(input)) return [];
+  const out: LightningSpriteSample[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const s = resolveLightningSpriteSample(raw as Record<string, unknown>);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
 function resolveLightning(input: unknown): LightningParams {
   const d = DEFAULTS.lightning;
   if (!input || typeof input !== "object") return d;
@@ -2957,6 +3098,13 @@ function resolveLightning(input: unknown): LightningParams {
           : d.strikePerMinute;
       return Math.max(0, Math.min(40, v));
     })(),
+    spritesPerMinute: (() => {
+      const v =
+        typeof saved.spritesPerMinute === "number"
+          ? saved.spritesPerMinute
+          : d.spritesPerMinute;
+      return Math.max(0, Math.min(40, v));
+    })(),
     keyframes: (() => {
       const intensityRange = asPairFromScalar(
         "intensityRange",
@@ -2978,6 +3126,10 @@ function resolveLightning(input: unknown): LightningParams {
           typeof saved.strikePerMinute === "number"
             ? saved.strikePerMinute
             : d.strikePerMinute,
+        spritesPerMinute:
+          typeof saved.spritesPerMinute === "number"
+            ? saved.spritesPerMinute
+            : d.spritesPerMinute,
         subFlashes: migrateSubFlashes(
           typeof saved.subFlashes === "number" ? saved.subFlashes : d.subFlashes,
         ),
@@ -2988,6 +3140,8 @@ function resolveLightning(input: unknown): LightningParams {
             ? saved.minSpanScale
             : d.minSpanScale,
         boltGain: typeof saved.boltGain === "number" ? saved.boltGain : d.boltGain,
+        spriteGain:
+          typeof saved.spriteGain === "number" ? saved.spriteGain : d.spriteGain,
         backgroundGain:
           typeof saved.backgroundGain === "number"
             ? saved.backgroundGain
@@ -3063,6 +3217,29 @@ function resolveLightning(input: unknown): LightningParams {
       const raw = (saved as Record<string, unknown>).backgroundSample;
       if (!raw || typeof raw !== "object") return null;
       return resolveLightningSample(raw as Record<string, unknown>);
+    })(),
+    spriteSamples: resolveLightningSpriteSamples(
+      (saved as Record<string, unknown>).spriteSamples,
+    ),
+    spriteDurationMs: (() => {
+      const v = (saved as Record<string, unknown>).spriteDurationMs;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteDurationMs;
+      return Math.max(20, Math.min(2000, v));
+    })(),
+    spriteStrobeHz: (() => {
+      const v = (saved as Record<string, unknown>).spriteStrobeHz;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteStrobeHz;
+      return Math.max(1, Math.min(60, v));
+    })(),
+    spriteStrobeDuty: (() => {
+      const v = (saved as Record<string, unknown>).spriteStrobeDuty;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteStrobeDuty;
+      return Math.max(0.05, Math.min(0.95, v));
+    })(),
+    spriteGain: (() => {
+      const v = (saved as Record<string, unknown>).spriteGain;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteGain;
+      return Math.max(0, Math.min(3, v));
     })(),
     boltPitchJitterCents: (() => {
       const v = (saved as Record<string, unknown>).boltPitchJitterCents;
@@ -3399,9 +3576,20 @@ export const useSimStore = create<SimState>((set) => ({
     set((s) => ({
       samples: {
         ...s.samples,
-        library: s.samples.library.map((x) =>
-          x.id === id ? { ...x, ...patch } : x,
-        ),
+        library: s.samples.library.map((x) => {
+          if (x.id !== id) return x;
+          const next = { ...x, ...patch };
+          const dur = Math.max(0, next.durationSec);
+          const start = Math.max(
+            0,
+            Math.min(dur, next.trimStartSec ?? 0),
+          );
+          const end = Math.max(
+            start,
+            Math.min(dur, next.trimEndSec ?? dur),
+          );
+          return { ...next, trimStartSec: start, trimEndSec: end };
+        }),
       },
     })),
   addSampleClip: (clip) =>

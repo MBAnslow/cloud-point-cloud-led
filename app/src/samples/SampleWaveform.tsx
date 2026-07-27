@@ -12,10 +12,19 @@ import {
 export function SampleWaveform({
   sampleId,
   color = "rgba(255,255,255,0.55)",
+  trimStartFrac = 0,
+  trimEndFrac = 1,
+  /** "overlay" dims outsides; "crop" draws only the trimmed region. */
+  trimMode = "overlay",
   style,
 }: {
   sampleId: string;
   color?: string;
+  /** 0..1 region start within the full file waveform. */
+  trimStartFrac?: number;
+  /** 0..1 region end within the full file waveform. */
+  trimEndFrac?: number;
+  trimMode?: "overlay" | "crop";
   style?: React.CSSProperties;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -59,8 +68,27 @@ export function SampleWaveform({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const a = Math.max(0, Math.min(1, trimStartFrac));
+    const b = Math.max(a, Math.min(1, trimEndFrac));
+    if (trimMode === "crop") {
+      drawWaveform(ctx, peaks, size.w, size.h, color, a, b);
+      return;
+    }
     drawWaveform(ctx, peaks, size.w, size.h, color);
-  }, [peaks, size, color]);
+    if (a > 0.001 || b < 0.999) {
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      if (a > 0) ctx.fillRect(0, 0, a * size.w, size.h);
+      if (b < 1) ctx.fillRect(b * size.w, 0, (1 - b) * size.w, size.h);
+      ctx.strokeStyle = "rgba(251,146,60,0.9)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(a * size.w + 0.5, 0);
+      ctx.lineTo(a * size.w + 0.5, size.h);
+      ctx.moveTo(b * size.w - 0.5, 0);
+      ctx.lineTo(b * size.w - 0.5, size.h);
+      ctx.stroke();
+    }
+  }, [peaks, size, color, trimStartFrac, trimEndFrac, trimMode]);
 
   return (
     <div

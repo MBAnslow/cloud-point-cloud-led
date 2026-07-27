@@ -651,6 +651,8 @@ export function Leds() {
             buffers.lightningColorFloats,
             now,
             lightning,
+            boltEllipsoid,
+            cloudXform,
           );
         } else {
           buffers.lightningColorFloats.fill(0);
