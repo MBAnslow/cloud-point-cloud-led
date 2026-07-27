@@ -5,7 +5,7 @@ import type {
   SimState,
 } from "../state";
 import { isBreathActive } from "../state";
-import { sampleParticipantBreath, tickBreathClock } from "../lighting/breath";
+import { getBreathEffectDrive } from "../lighting/breathEffectDrive";
 
 interface ParamRange {
   min: number;
@@ -51,24 +51,19 @@ function apply(base: number, r: ParamRange, amount: number, intensity: number): 
 }
 
 /**
- * Aggregate breath drive = max exhaleIntensity across enabled
- * participants (matches the LED mask's max combination).
+ * Breath-mod drive = how strongly the travelling sphere is lighting
+ * cloud LEDs right now (mean mask of affected bulbs × footprint).
+ * Cycles up/down with each pass; ~1 when the sphere fully engages the
+ * cloud. 0 when mod/breath inactive.
  */
-export function currentBreathDrive(state: SimState, nowMs: number): number {
+export function currentBreathDrive(state: SimState, _nowMs?: number): number {
   if (
     !state.breathModEnabled ||
     !isBreathActive(state.breath, state.sky.timeHours)
   ) {
     return 0;
   }
-  const t = tickBreathClock(nowMs, state.breath.paused);
-  let best = 0;
-  for (const p of state.breath.participants) {
-    if (!p.enabled) continue;
-    const ex = sampleParticipantBreath(p, state.breath, t).exhaleIntensity;
-    if (ex > best) best = ex;
-  }
-  return best;
+  return getBreathEffectDrive();
 }
 
 /**

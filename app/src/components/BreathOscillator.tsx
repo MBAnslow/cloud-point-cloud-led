@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   breathLevelAt,
   sampleBreathAt,
@@ -12,8 +12,10 @@ import {
   makeBreathFogSeed,
   useSimStore,
   type BreathParticipant,
+  type LightningSample,
 } from "../state";
 import { useDraggable } from "./useDraggable";
+import { putSampleBlob, deleteSampleBlob } from "../samples/sampleStorage";
 import {
   clearOscBreathHistory,
   getOscBreathBinary,
@@ -487,6 +489,28 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                 max={8}
                 step={0.1}
                 onChange={(v) => setBreath({ holdTroughSeconds: v })}
+              />
+            </Section>
+
+            <Section title="Exhale sound">
+              <ExhaleSoundRow breath={breath} setBreath={setBreath} />
+              <SliderField
+                label="exhale gain"
+                tooltip="Playback gain for the breath-out one-shot."
+                value={breath.exhaleGain}
+                min={0}
+                max={3}
+                step={0.01}
+                onChange={(v) => setBreath({ exhaleGain: v })}
+              />
+              <SliderField
+                label="pitch ±¢"
+                tooltip="Random PitchShift per breath-out, same idea as lightning bolt pitch jitter."
+                value={breath.exhalePitchJitterCents}
+                min={0}
+                max={1200}
+                step={5}
+                onChange={(v) => setBreath({ exhalePitchJitterCents: v })}
               />
             </Section>
 
@@ -1245,6 +1269,121 @@ function SliderField({
     </label>
   );
 }
+
+function ExhaleSoundRow({
+  breath,
+  setBreath,
+}: {
+  breath: { exhaleSample: LightningSample | null };
+  setBreath: (patch: {
+    exhaleSample?: LightningSample | null;
+  }) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const onFile = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const sample = await ingestExhaleFile(files[0]);
+    if (sample) {
+      if (breath.exhaleSample) {
+        void deleteSampleBlob(breath.exhaleSample.id);
+      }
+      setBreath({ exhaleSample: sample });
+    }
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const clear = () => {
+    if (breath.exhaleSample) {
+      void deleteSampleBlob(breath.exhaleSample.id);
+    }
+    setBreath({ exhaleSample: null });
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        background: "rgba(255,255,255,0.04)",
+        borderRadius: 6,
+        padding: "6px 8px",
+        fontSize: 11,
+      }}
+      title="Plays once at each breath-out (wave spawn), with random pitch jitter"
+    >
+      <span style={{ flex: 1, opacity: 0.85, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {breath.exhaleSample
+          ? breath.exhaleSample.name
+          : "No clip (upload a breath-out sound)"}
+      </span>
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        style={miniAudioBtn}
+      >
+        {breath.exhaleSample ? "replace" : "+ upload"}
+      </button>
+      {breath.exhaleSample && (
+        <button type="button" onClick={clear} style={miniAudioBtn}>
+          clear
+        </button>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="audio/*"
+        style={{ display: "none" }}
+        onChange={(e) => void onFile(e.target.files)}
+      />
+    </div>
+  );
+}
+
+async function ingestExhaleFile(file: File): Promise<LightningSample | null> {
+  try {
+    const id = `br-ex-${Math.random().toString(36).slice(2, 10)}`;
+    const arr = await file.arrayBuffer();
+    await putSampleBlob(id, new Blob([arr], { type: file.type || "audio/*" }));
+    let durationSec: number | undefined;
+    try {
+      const AC =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (AC) {
+        const ctx = new AC();
+        const buf = await ctx.decodeAudioData(arr.slice(0));
+        durationSec = buf.duration;
+        void ctx.close();
+      }
+    } catch {
+      // optional
+    }
+    return {
+      id,
+      name: file.name,
+      durationSec,
+      intensityTags: [],
+      lengthTags: [],
+    };
+  } catch (err) {
+    console.warn("[breath] exhale sample ingest failed", err);
+    return null;
+  }
+}
+
+const miniAudioBtn: CSSProperties = {
+  fontSize: 10,
+  padding: "2px 6px",
+  borderRadius: 4,
+  border: "1px solid rgba(255,255,255,0.15)",
+  background: "rgba(255,255,255,0.06)",
+  color: "inherit",
+  cursor: "pointer",
+  flexShrink: 0,
+};
 
 function Section({
   title,

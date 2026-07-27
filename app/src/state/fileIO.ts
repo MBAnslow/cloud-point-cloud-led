@@ -229,6 +229,7 @@ export interface MissingAssets {
   lightningBolts: { id: string; name: string }[];
   lightningStrike: { id: string; name: string } | null;
   lightningBackground: { id: string; name: string } | null;
+  breathExhale: { id: string; name: string } | null;
   mesh: { id: string; name: string } | null;
 }
 
@@ -328,6 +329,7 @@ async function auditBinaryAssets(state: SimState): Promise<MissingAssets> {
     lightningBolts: [],
     lightningStrike: null,
     lightningBackground: null,
+    breathExhale: null,
     mesh: null,
   };
   for (const s of state.samples.library) {
@@ -348,6 +350,11 @@ async function auditBinaryAssets(state: SimState): Promise<MissingAssets> {
     const blob = await getSampleBlob(bg.id).catch(() => null);
     if (!blob) missing.lightningBackground = { id: bg.id, name: bg.name };
   }
+  const exhale = state.breath.exhaleSample;
+  if (exhale) {
+    const blob = await getSampleBlob(exhale.id).catch(() => null);
+    if (!blob) missing.breathExhale = { id: exhale.id, name: exhale.name };
+  }
   if (state.mesh.id) {
     const blob = await getMeshBlob(state.mesh.id).catch(() => null);
     if (!blob) missing.mesh = { id: state.mesh.id, name: state.mesh.name };
@@ -363,6 +370,7 @@ export function summariseMissing(m: MissingAssets): string | null {
     parts.push(`${m.lightningBolts.length} lightning bolt sound(s)`);
   if (m.lightningStrike) parts.push("lightning strike sound");
   if (m.lightningBackground) parts.push("lightning background sound");
+  if (m.breathExhale) parts.push("breath exhale sound");
   if (m.mesh) parts.push(`mesh "${m.mesh.name}"`);
   if (parts.length === 0) return null;
   return `Config loaded, but the following are not on this machine and need re-uploading: ${parts.join(", ")}.`;

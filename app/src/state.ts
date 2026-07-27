@@ -1285,6 +1285,15 @@ export interface BreathParams {
    * Same wrap rules as lightning's active window.
    */
   activeEndHour: number;
+  /**
+   * One-shot played at each breath-out (wave spawn), with random
+   * PitchShift in ±{@link exhalePitchJitterCents}. Null = silent.
+   */
+  exhaleSample: LightningSample | null;
+  /** Playback gain for the exhale one-shot. */
+  exhaleGain: number;
+  /** Random pitch jitter (±cents) applied per exhale trigger. */
+  exhalePitchJitterCents: number;
   /** Up to {@link MAX_BREATH_PARTICIPANTS} people on the horizon. */
   participants: BreathParticipant[];
 }
@@ -1625,6 +1634,9 @@ const DEFAULTS = {
     // Full day by default — narrow via Breath panel / sky timeline strip.
     activeStartHour: 0,
     activeEndHour: 24,
+    exhaleSample: null,
+    exhaleGain: 0.7,
+    exhalePitchJitterCents: 200,
     participants: [
       {
         id: "participant-0",
@@ -2328,6 +2340,16 @@ function resolveBreath(input: unknown): BreathParams {
       0,
       Math.min(24, num(saved.activeEndHour, d.activeEndHour)),
     ),
+    exhaleSample: (() => {
+      const raw = saved.exhaleSample;
+      if (!raw || typeof raw !== "object") return null;
+      return resolveLightningSample(raw as Record<string, unknown>);
+    })(),
+    exhaleGain: Math.max(0, Math.min(3, num(saved.exhaleGain, d.exhaleGain))),
+    exhalePitchJitterCents: Math.max(
+      0,
+      Math.min(1200, num(saved.exhalePitchJitterCents, d.exhalePitchJitterCents)),
+    ),
     participants,
   };
 }
@@ -2945,6 +2967,13 @@ function resolveLightning(input: unknown): LightningParams {
       const raw = (saved as Record<string, unknown>).backgroundSample;
       if (!raw || typeof raw !== "object") return null;
       return resolveLightningSample(raw as Record<string, unknown>);
+    })(),
+    boltPitchJitterCents: (() => {
+      const v = (saved as Record<string, unknown>).boltPitchJitterCents;
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        return d.boltPitchJitterCents;
+      }
+      return Math.max(0, Math.min(1200, v));
     })(),
     tintMix: (() => {
       const v = (saved as Record<string, unknown>).tintMix;

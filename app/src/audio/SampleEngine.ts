@@ -11,8 +11,8 @@ import { applyFilterChain } from "./filterChain";
  * `startHour`. Whenever the playhead crosses that hour we start a new
  * voice which plays the whole sample buffer from t=0 and then disposes
  * itself. Multiple simultaneous voices for the same clip are allowed
- * (retrigger before natural end); the timeline does not depict a
- * clip's audio length.
+ * (retrigger before natural end). Panel width is visual only — derived
+ * from duration and day-cycle speed; playback is still fire-and-forget.
  *
  * Per-voice chain:
  *   Player(buffer) → gain (fade in/out) → panner →

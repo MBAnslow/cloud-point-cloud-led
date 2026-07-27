@@ -31,8 +31,14 @@ export interface BreathWave {
 }
 
 export interface BreathLedSample {
-  /** Interior fog mask [0,1]. */
+  /** Interior fog mask [0,1] (geometry × fog density). */
   mask: number;
+  /**
+   * Geometric fill only (strength × radial envelope, no fog). 1 at the
+   * spheroid center, 0 outside. Used for cloud-breath audio drive so
+   * coverage isn't crushed by fog speckles.
+   */
+  solid: number;
   /** Rim shell weight [0,1] (before rimAmount). */
   rim: number;
   /** Participant colour for the winning rim wave. */
@@ -394,7 +400,14 @@ export function breathSampleAt(
   cloudCenter: [number, number, number] = [0, 0, 0],
 ): BreathLedSample {
   const waves = controller.getWaves();
-  const empty: BreathLedSample = { mask: 0, rim: 0, rimR: 0, rimG: 0, rimB: 0 };
+  const empty: BreathLedSample = {
+    mask: 0,
+    solid: 0,
+    rim: 0,
+    rimR: 0,
+    rimG: 0,
+    rimB: 0,
+  };
   if (waves.length === 0) return empty;
   const rw = Math.max(0, width);
   const rh = Math.max(0, height);
@@ -412,6 +425,7 @@ export function breathSampleAt(
   const foy = py - cloudCenter[1];
   const foz = pz - cloudCenter[2];
   let bestMask = 0;
+  let bestSolid = 0;
   let bestRim = 0;
   let rimR = 0;
   let rimG = 0;
@@ -471,6 +485,8 @@ export function breathSampleAt(
     const prox = clamp01(1 - rhoEff);
     if (prox > 0) {
       const envelope = fall <= 0 ? 1 : Math.pow(prox, fall);
+      const solid = strength * envelope;
+      if (solid > bestSolid) bestSolid = solid;
       let densityBlend = 1;
       if (amount > 0 && fog) {
         const density = fogDensity(
@@ -484,7 +500,7 @@ export function breathSampleAt(
         );
         densityBlend = 1 + amount * (density - 1);
       }
-      const mask = strength * envelope * densityBlend;
+      const mask = solid * densityBlend;
       if (mask > bestMask) bestMask = mask;
     }
 
@@ -517,6 +533,7 @@ export function breathSampleAt(
   }
   return {
     mask: clamp01(bestMask),
+    solid: clamp01(bestSolid),
     rim: clamp01(bestRim),
     rimR,
     rimG,

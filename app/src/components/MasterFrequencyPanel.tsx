@@ -5,7 +5,7 @@ import {
   type FilterParams,
   type MasterFxParams,
 } from "../state";
-import { sampleBreathAt, tickBreathClock } from "../lighting/breath";
+import { getBreathEffectDrive } from "../lighting/breathEffectDrive";
 import { useDraggable } from "./useDraggable";
 
 const PLOT_W = 360;
@@ -47,11 +47,8 @@ export function MasterFrequencyPanel({ visible = true }: { visible?: boolean }) 
 }
 
 /**
- * Live breath waveform + enable toggle. When the checkbox is on, the
- * `breathMod` percentages next to each slider start driving the running
- * engines (see `modulatedEngineParams`). The scope always animates so
- * the user can see the current breath phase whether modulation is
- * engaged or not.
+ * Live cloud-effect drive meter + enable toggle. When the checkbox is
+ * on, `breathMod` follows the mean live breath-sphere coverage on LEDs.
  */
 function BreathModHeader() {
   const enabled = useSimStore((s) => s.breathModEnabled);
@@ -78,96 +75,82 @@ function BreathModHeader() {
           cursor: "pointer",
           userSelect: "none",
         }}
-        title="Route the mod columns into the running engines"
+        title="Drive engines from live breath-sphere coverage on the cloud"
       >
         <input
           type="checkbox"
           checked={enabled}
           onChange={(e) => setEnabled(e.target.checked)}
         />
-        Breath modulation
+        Cloud breath mod
       </label>
       <div style={{ flex: 1 }}>
-        <BreathScope active={enabled} />
+        <BreathFilterDriveMeter active={enabled} />
       </div>
     </div>
   );
 }
 
-const SCOPE_W = 220;
 const SCOPE_H = 32;
 
 /**
- * Renders one full breath cycle as a static waveform with a playhead
- * that tracks the current lung fullness. `active` just brightens the
- * curve; the scope keeps ticking either way so the user can preview
- * the breath cycle before enabling modulation.
+ * Meter of mean live breath-sphere mask across LEDs — should pulse as
+ * each wave crosses the cloud.
  */
-function BreathScope({ active }: { active: boolean }) {
-  const breath = useSimStore((s) => s.breath);
-  const [level, setLevel] = useState(() => sampleBreathAt(breath, performance.now()).level);
-  const [nowMs, setNowMs] = useState(() => performance.now());
+function BreathFilterDriveMeter({ active }: { active: boolean }) {
+  const [drive, setDrive] = useState(0);
   useEffect(() => {
     let raf = 0;
     const tick = () => {
-      const t = tickBreathClock(performance.now(), useSimStore.getState().breath.paused);
-      const s = sampleBreathAt(breath, t);
-      setLevel(s.level);
-      setNowMs(t);
+      setDrive(getBreathEffectDrive());
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [breath]);
+  }, []);
 
-  const cycleMs =
-    Math.max(0, breath.inhaleSeconds + breath.holdPeakSeconds +
-      breath.exhaleSeconds + breath.holdTroughSeconds) * 1000;
-  const path = useMemo(() => {
-    const N = 96;
-    let d = "";
-    for (let i = 0; i <= N; i++) {
-      const t = (i / N) * Math.max(1, cycleMs);
-      const s = sampleBreathAt(breath, t);
-      const y = SCOPE_H - 2 - s.level * (SCOPE_H - 4);
-      const x = (i / N) * SCOPE_W;
-      d += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(2) + " ";
-    }
-    return d;
-  }, [breath, cycleMs]);
-
-  const headX = cycleMs > 0
-    ? (((nowMs % cycleMs) + cycleMs) % cycleMs) / cycleMs * SCOPE_W
-    : 0;
-  const headY = SCOPE_H - 2 - level * (SCOPE_H - 4);
+  const fill = Math.max(0, Math.min(1, drive));
   return (
-    <svg
-      width="100%"
-      height={SCOPE_H}
-      viewBox={`0 0 ${SCOPE_W} ${SCOPE_H}`}
-      preserveAspectRatio="none"
+    <div
+      title="Breath-sphere engagement on cloud LEDs (how many × how strongly; ~1 when fully over the cloud)"
       style={{
-        display: "block",
+        position: "relative",
+        height: SCOPE_H,
         background: "rgba(0,0,0,0.35)",
         borderRadius: 3,
         border: "1px solid rgba(255,255,255,0.08)",
+        overflow: "hidden",
       }}
     >
-      <path
-        d={path}
-        fill="none"
-        stroke={active ? "#82c9ff" : "rgba(130,201,255,0.4)"}
-        strokeWidth={1.4}
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: `${fill * 100}%`,
+          background: active
+            ? "rgba(130,201,255,0.55)"
+            : "rgba(130,201,255,0.22)",
+          transition: "width 60ms linear",
+        }}
       />
-      <line
-        x1={headX}
-        x2={headX}
-        y1={0}
-        y2={SCOPE_H}
-        stroke="rgba(255,225,77,0.75)"
-      />
-      <circle cx={headX} cy={headY} r={2.5} fill="#ffe14d" />
-    </svg>
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
+          opacity: active ? 0.9 : 0.55,
+          pointerEvents: "none",
+        }}
+      >
+        wave {fill.toFixed(2)}
+      </div>
+    </div>
   );
 }
 
@@ -428,7 +411,7 @@ function RangeWithBaseTick({
   step: number;
   value: number;
   base: number;
-  /** Where the parameter lands at full exhale under the current mod amount. */
+  /** Where the parameter lands at full cloud effect (drive = 1). */
   extreme?: number | null;
   onChange: (v: number) => void;
   logScale?: boolean;
@@ -477,7 +460,7 @@ function RangeWithBaseTick({
             pointerEvents: "none",
             borderRadius: 1,
           }}
-          title="Value at full exhale (current mod amount)"
+          title="Value at full cloud breath effect (current mod amount)"
         />
       )}
       <div
@@ -499,10 +482,10 @@ function RangeWithBaseTick({
 }
 
 /**
- * Compute where a parameter lands at full exhale for the current mod
- * amount, matching `modulatedEngineParams`. `amount` is signed in
- * [-1, 1]; log-scale sliders interpolate in log space so the extreme
- * marker matches the visual midpoint the slider draws.
+ * Compute where a parameter lands at full cloud breath effect (drive =
+ * 1) for the current mod amount, matching `modulatedEngineParams`.
+ * `amount` is signed in [-1, 1]; log-scale sliders interpolate in log
+ * space so the extreme marker matches the visual midpoint the slider draws.
  */
 function computeExtreme(
   base: number,
@@ -523,10 +506,10 @@ function computeExtreme(
 }
 
 /**
- * Bipolar breath-modulation cell. Value is a signed fraction in
- * [-1, +1]; positive drives the parameter up on exhale, negative
- * drives it down. Magnitude is the fraction of the slider range
- * applied at full exhale. Alt-click resets to 0.
+ * Bipolar cloud-breath modulation cell. Value is a signed fraction in
+ * [-1, +1]; positive drives the parameter up as more of the cloud has
+ * breath applied. Magnitude is the fraction of the slider range applied
+ * at full cloud effect. Alt-click resets to 0.
  */
 function BreathModColumn({ modKey }: { modKey: string }) {
   const value = useSimStore((s) => s.breathMod[modKey] ?? 0);
@@ -541,7 +524,7 @@ function BreathModColumn({ modKey }: { modKey: string }) {
         gap: 4,
         minWidth: 118,
       }}
-      title="Breath modulation (not yet audible)"
+      title="Cloud breath modulation (applied × mean LED gate)"
     >
       <input
         type="range"

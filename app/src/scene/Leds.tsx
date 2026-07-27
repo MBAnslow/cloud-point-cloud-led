@@ -28,6 +28,7 @@ import {
   sampleBreathFilterThreshold,
   updateBreathFilterMemory,
 } from "../lighting/breathFilter";
+import { setBreathEffectDrive } from "../lighting/breathEffectDrive";
 import {
   breathSampleAt,
   cloudCenterWorld,
@@ -453,12 +454,12 @@ export function Leds() {
       (ledViewMode === "breathIntensity" ||
         (ledStreamPipeline.breathStage && ledViewMode === "breathPlusTimeOfDay"));
 
-    // Also sample when the persistent filter needs live mask input even if
-    // the current view isn't showing breath (e.g. time-of-day only).
-    const sampleBreathForFilter =
-      breathLive && breathFilter.enabled && !useBreathMask;
+    // Always sample the live wave mask while breath is active so filter
+    // memory and the cloud-effect audio drive keep updating even when the
+    // current LED view isn't showing breath (e.g. time-of-day only).
+    const sampleBreathMask = breathLive;
 
-    if (useBreathMask || sampleBreathForFilter) {
+    if (sampleBreathMask) {
       const falloffExp = Math.max(0, breath.falloffExponent);
       const { width, height, depth } = liveWaveExtents(breath);
       const fog = {
@@ -468,6 +469,10 @@ export function Leds() {
         edgeNoise: breath.edgeNoise,
       };
       const fogCenter = cloudCenterWorld(cloudXformBreath);
+      // Geometric (pre-fog) coverage for audio drive — see setBreathEffectDrive.
+      let solidSum = 0;
+      let solidCount = 0;
+      const SOLID_ACTIVE = 0.04;
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
         const sample = breathSampleAt(
@@ -488,6 +493,10 @@ export function Leds() {
         buffers.breathColorFloats[i3] = sample.mask;
         buffers.breathColorFloats[i3 + 1] = sample.mask;
         buffers.breathColorFloats[i3 + 2] = sample.mask;
+        if (sample.solid > SOLID_ACTIVE) {
+          solidSum += sample.solid;
+          solidCount++;
+        }
         if (useBreathMask) {
           buffers.breathRimWeights[i] = sample.rim;
           buffers.breathRimColors[i3] = sample.rimR;
@@ -500,10 +509,21 @@ export function Leds() {
           buffers.breathRimColors[i3 + 2] = 0;
         }
       }
+      // Mean geometric fill of LEDs inside the spheroid. Fog is ignored so
+      // a sphere fully over the cloud reads near 1 even when fog speckles
+      // the visible mask. Soft breadth avoids pegging on a single LED.
+      if (solidCount === 0) {
+        setBreathEffectDrive(0);
+      } else {
+        const fill = solidSum / solidCount;
+        const breadth = Math.min(1, solidCount / 40);
+        setBreathEffectDrive(fill * breadth);
+      }
     } else {
       buffers.breathColorFloats.fill(0);
       buffers.breathRimWeights.fill(0);
       buffers.breathRimColors.fill(0);
+      setBreathEffectDrive(0);
     }
 
     // Persistent breath-filter memory (TOD gate). Rebuild cooldown field
@@ -540,7 +560,7 @@ export function Leds() {
       const prevMs = breathFilterClockRef.current.lastMs;
       const dtSec = prevMs > 0 ? (nowMs - prevMs) / 1000 : 0;
       breathFilterClockRef.current.lastMs = nowMs;
-      if (useBreathMask || sampleBreathForFilter) {
+      if (sampleBreathMask) {
         updateBreathFilterMemory(
           buffers.breathFilterMemory,
           buffers.breathFilterReleaseAge,

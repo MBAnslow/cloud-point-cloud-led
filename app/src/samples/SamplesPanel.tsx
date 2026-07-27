@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "react-router-dom";
 import { useSimStore, type DroneLfoShape, type Sample, type SampleClip } from "../state";
 import { LFO_SHAPES, LfoScope } from "../drones/SynthSection";
@@ -10,9 +17,21 @@ import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOv
 const HOURS = 24;
 const LANE_HEIGHT = 40;
 const LIBRARY_WIDTH = 220;
-/** Fixed on-screen width of a trigger block, in pixels. Independent
- *  of sample duration — clips are triggers, not spans. */
-const CLIP_BLOCK_PX = 56;
+/** Floor so very short clips stay clickable on the lane. */
+const CLIP_MIN_WIDTH_PX = 8;
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 24;
+
+/** Simulated hours covered while the sample plays at the current
+ *  day-cycle speed: playSec × (24 / cycleSeconds). */
+function clipWidthHours(
+  durationSec: number,
+  playbackRate: number,
+  cycleSeconds: number,
+): number {
+  const playSec = durationSec / Math.max(1e-6, playbackRate);
+  return playSec * (HOURS / Math.max(1, cycleSeconds));
+}
 
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
@@ -23,6 +42,25 @@ function fmtTime(hour: number): string {
   const H = Math.floor(h);
   const M = Math.floor((h - H) * 60);
   return `${H.toString().padStart(2, "0")}:${M.toString().padStart(2, "0")}`;
+}
+
+function clampZoom(z: number): number {
+  return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+}
+
+/** Hour tick step for ruler/grid labels at the current zoom. */
+function hourLabelStep(zoom: number): number {
+  if (zoom >= 12) return 0.5;
+  if (zoom >= 6) return 1;
+  if (zoom >= 3) return 2;
+  return 3;
+}
+
+function hourTicks(step: number): number[] {
+  const out: number[] = [];
+  const n = Math.round(HOURS / step);
+  for (let i = 0; i < n; i++) out.push(Number((i * step).toFixed(4)));
+  return out;
 }
 
 /**
@@ -76,8 +114,12 @@ export function SamplesPanel() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rollRef = useRef<HTMLDivElement | null>(null);
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const zoomAnchorRef = useRef<{ hour: number; viewX: number } | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const scrubbingRef = useRef(false);
   const [dragSampleId, setDragSampleId] = useState<string | null>(null);
@@ -95,6 +137,8 @@ export function SamplesPanel() {
 
   const laneCount = Math.max(1, samples.library.length);
   const rollHeight = laneCount * LANE_HEIGHT;
+  const labelStep = hourLabelStep(zoom);
+  const rulerHours = useMemo(() => hourTicks(labelStep), [labelStep]);
 
   const clientToHourLane = useCallback((clientX: number, clientY: number) => {
     const grid = rollRef.current?.querySelector<HTMLDivElement>("[data-grid]");
@@ -107,6 +151,60 @@ export function SamplesPanel() {
       lane: Math.floor(y / LANE_HEIGHT),
     };
   }, []);
+
+  /** Change zoom, optionally keeping the hour under `clientX` fixed in view. */
+  const applyZoom = useCallback(
+    (next: number | ((prev: number) => number), clientX?: number) => {
+      const prev = zoomRef.current;
+      const clamped = clampZoom(
+        typeof next === "function" ? next(prev) : next,
+      );
+      if (clamped === prev) return;
+
+      const scrollEl = timelineScrollRef.current;
+      const content = scrollEl?.firstElementChild as HTMLElement | null;
+      const contentWidth = content?.offsetWidth ?? scrollEl?.clientWidth ?? 0;
+      if (scrollEl && contentWidth > 0) {
+        const viewX =
+          clientX != null
+            ? clientX - scrollEl.getBoundingClientRect().left
+            : scrollEl.clientWidth / 2;
+        const hour =
+          ((scrollEl.scrollLeft + viewX) / contentWidth) * HOURS;
+        zoomAnchorRef.current = { hour, viewX };
+      }
+
+      zoomRef.current = clamped;
+      setZoom(clamped);
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    zoomAnchorRef.current = null;
+    const scrollEl = timelineScrollRef.current;
+    const content = scrollEl?.firstElementChild as HTMLElement | null;
+    if (!scrollEl || !content) return;
+    const contentWidth = content.offsetWidth;
+    scrollEl.scrollLeft =
+      (anchor.hour / HOURS) * contentWidth - anchor.viewX;
+  }, [zoom]);
+
+  // Ctrl/Cmd + wheel zooms the arrangement toward the cursor.
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      applyZoom((z) => z * factor, e.clientX);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [applyZoom]);
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -463,14 +561,75 @@ export function SamplesPanel() {
           />
         </section>
         <section style={rollSectionStyle}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
             <strong style={{ fontSize: 12 }}>Arrangement</strong>
             <span style={{ fontSize: 11, opacity: 0.6 }}>
               drag a sample from the library onto a lane · drag block to move
-              its trigger point · Del to remove · drag ruler to scrub
+              its trigger · Del to remove · drag ruler to scrub · ⌘/Ctrl+wheel
+              to zoom
             </span>
+            <label
+              style={{
+                ...row,
+                marginLeft: "auto",
+                fontSize: 11,
+                gap: 6,
+              }}
+              title="Zoom the time axis (also ⌘/Ctrl + scroll)"
+            >
+              Zoom
+              <button
+                type="button"
+                style={{ ...btn, padding: "1px 7px" }}
+                onClick={() => applyZoom(zoom / 1.25)}
+                disabled={zoom <= ZOOM_MIN}
+              >
+                −
+              </button>
+              <input
+                type="range"
+                min={ZOOM_MIN}
+                max={ZOOM_MAX}
+                step={0.1}
+                value={zoom}
+                onChange={(e) => applyZoom(parseFloat(e.target.value))}
+                style={{ width: 100 }}
+              />
+              <button
+                type="button"
+                style={{ ...btn, padding: "1px 7px" }}
+                onClick={() => applyZoom(zoom * 1.25)}
+                disabled={zoom >= ZOOM_MAX}
+              >
+                +
+              </button>
+              <span
+                style={{
+                  width: 36,
+                  textAlign: "right",
+                  fontVariantNumeric: "tabular-nums",
+                  opacity: 0.85,
+                }}
+              >
+                {zoom < 10 ? zoom.toFixed(1) : zoom.toFixed(0)}×
+              </span>
+              <button
+                type="button"
+                style={btn}
+                onClick={() => {
+                  zoomAnchorRef.current = null;
+                  zoomRef.current = 1;
+                  setZoom(1);
+                  const el = timelineScrollRef.current;
+                  if (el) el.scrollLeft = 0;
+                }}
+                disabled={zoom === 1}
+              >
+                Fit
+              </button>
+            </label>
             <button
-              style={{ ...btn, marginLeft: "auto" }}
+              style={btn}
               onClick={() => {
                 if (confirm("Clear all clips?")) {
                   clearSampleClips();
@@ -543,153 +702,205 @@ export function SamplesPanel() {
               ))}
             </div>
 
-            {/* Timeline */}
-            <div style={{ flex: 1, minWidth: 400, position: "relative" }}>
-              {/* Scrubber ruler */}
-              <div
-                onPointerDown={(e) => {
-                  scrubbingRef.current = true;
-                  const { hour } = clientToHourLane(e.clientX, e.clientY);
-                  setSky({ timeHours: Math.max(0, Math.min(24, hour)) });
-                  (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-                  e.preventDefault();
-                }}
-                style={rulerStyle}
-                title="Drag to scrub"
-              >
-                <ActivePeriodBand opacity={0.3} />
-                {[0, 3, 6, 9, 12, 15, 18, 21].map((h) => (
-                  <span
-                    key={h}
-                    style={{
-                      position: "absolute",
-                      left: `${(h / HOURS) * 100}%`,
-                      top: 3,
-                      fontSize: 9,
-                      opacity: 0.7,
-                      paddingLeft: 3,
-                      pointerEvents: "none",
-                    }}
-                  >
-                    {h.toString().padStart(2, "0")}h
-                  </span>
-                ))}
-                <div style={playheadTop(timeHours)} />
-                <div style={playheadKnob(timeHours)} />
-              </div>
-
-              <div
-                data-grid
-                onPointerDown={onGridPointerDown}
-                onDragOver={onLaneDragOver}
-                onDrop={onLaneDrop}
-                style={{
-                  position: "relative",
-                  width: "100%",
-                  height: rollHeight,
-                  cursor: dragSampleId ? "copy" : "default",
-                }}
-              >
-                {/* Lane rows */}
-                {Array.from({ length: laneCount }, (_, lane) => (
-                  <div
-                    key={lane}
-                    style={{
-                      position: "absolute",
-                      left: 0,
-                      right: 0,
-                      top: lane * LANE_HEIGHT,
-                      height: LANE_HEIGHT,
-                      borderTop: "1px solid rgba(255,255,255,0.08)",
-                      background:
-                        lane % 2 === 0
-                          ? "rgba(255,255,255,0.015)"
-                          : "rgba(255,255,255,0.035)",
-                      pointerEvents: "none",
-                    }}
-                  />
-                ))}
-                {/* Hour gridlines */}
-                {Array.from({ length: HOURS + 1 }, (_, h) => (
-                  <div
-                    key={h}
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      bottom: 0,
-                      left: `${(h / HOURS) * 100}%`,
-                      width: 1,
-                      background:
-                        h % 6 === 0
-                          ? "rgba(255,255,255,0.25)"
-                          : h % 3 === 0
-                            ? "rgba(255,255,255,0.12)"
-                            : "rgba(255,255,255,0.05)",
-                      pointerEvents: "none",
-                    }}
-                  />
-                ))}
-                {/* Playhead */}
+            {/* Timeline — horizontal scroll when zoomed */}
+            <div style={timelinePaneStyle}>
+              <div ref={timelineScrollRef} style={timelineScrollStyle}>
                 <div
                   style={{
-                    position: "absolute",
-                    top: 0,
-                    bottom: 0,
-                    left: `${(timeHours / HOURS) * 100}%`,
-                    width: 2,
-                    background: "#ffe14d",
-                    pointerEvents: "none",
+                    width: `${zoom * 100}%`,
+                    minWidth: "100%",
+                    position: "relative",
                   }}
-                />
-                {/* Clip triggers — fixed-width blocks, positioned by
-                    their `startHour`. The block's left edge is the
-                    trigger point. */}
-                {samples.clips.map((c) => {
-                  const sample = sampleById.get(c.sampleId);
-                  if (!sample) return null;
-                  const lane = laneIndexBySampleId.get(c.sampleId);
-                  if (lane === undefined) return null;
-                  const leftPct = (c.startHour / HOURS) * 100;
-                  const isSel = c.id === selectedId;
-                  return (
+                >
+                  {/* Scrubber ruler */}
+                  <div
+                    onPointerDown={(e) => {
+                      scrubbingRef.current = true;
+                      const { hour } = clientToHourLane(e.clientX, e.clientY);
+                      setSky({ timeHours: Math.max(0, Math.min(24, hour)) });
+                      (e.currentTarget as Element).setPointerCapture?.(
+                        e.pointerId,
+                      );
+                      e.preventDefault();
+                    }}
+                    style={rulerStyle}
+                    title="Drag to scrub"
+                  >
+                    <ActivePeriodBand opacity={0.3} />
+                    {rulerHours.map((h) => (
+                      <span
+                        key={h}
+                        style={{
+                          position: "absolute",
+                          left: `${(h / HOURS) * 100}%`,
+                          top: 3,
+                          fontSize: 9,
+                          opacity: 0.7,
+                          paddingLeft: 3,
+                          pointerEvents: "none",
+                        }}
+                      >
+                        {labelStep < 1
+                          ? fmtTime(h)
+                          : `${Math.floor(h).toString().padStart(2, "0")}h`}
+                      </span>
+                    ))}
+                    <div style={playheadTop(timeHours)} />
+                    <div style={playheadKnob(timeHours)} />
+                  </div>
+
+                  <div
+                    data-grid
+                    onPointerDown={onGridPointerDown}
+                    onDragOver={onLaneDragOver}
+                    onDrop={onLaneDrop}
+                    style={{
+                      position: "relative",
+                      width: "100%",
+                      height: rollHeight,
+                      cursor: dragSampleId ? "copy" : "default",
+                    }}
+                  >
+                    {/* Lane rows */}
+                    {Array.from({ length: laneCount }, (_, lane) => (
+                      <div
+                        key={lane}
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          right: 0,
+                          top: lane * LANE_HEIGHT,
+                          height: LANE_HEIGHT,
+                          borderTop: "1px solid rgba(255,255,255,0.08)",
+                          background:
+                            lane % 2 === 0
+                              ? "rgba(255,255,255,0.015)"
+                              : "rgba(255,255,255,0.035)",
+                          pointerEvents: "none",
+                        }}
+                      />
+                    ))}
+                    {/* Hour gridlines — denser when zoomed */}
+                    {Array.from(
+                      {
+                        length:
+                          Math.round(HOURS / Math.min(labelStep, 1)) + 1,
+                      },
+                      (_, i) => {
+                        const step = Math.min(labelStep, 1);
+                        const h = i * step;
+                        if (h > HOURS + 1e-9) return null;
+                        const major = Math.abs(h % 6) < 1e-9;
+                        const mid = Math.abs(h % 3) < 1e-9;
+                        return (
+                          <div
+                            key={h}
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              bottom: 0,
+                              left: `${(h / HOURS) * 100}%`,
+                              width: 1,
+                              background: major
+                                ? "rgba(255,255,255,0.25)"
+                                : mid
+                                  ? "rgba(255,255,255,0.12)"
+                                  : "rgba(255,255,255,0.05)",
+                              pointerEvents: "none",
+                            }}
+                          />
+                        );
+                      },
+                    )}
+                    {/* Playhead */}
                     <div
-                      key={c.id}
-                      data-clip-id={c.id}
-                      onPointerDown={(e) => beginClipDrag(e, c.id)}
                       style={{
                         position: "absolute",
-                        top: lane * LANE_HEIGHT + 2,
-                        left: `${leftPct}%`,
-                        width: CLIP_BLOCK_PX,
-                        height: LANE_HEIGHT - 4,
-                        background: isSel
-                          ? "linear-gradient(180deg,#fb923c,#ea580c)"
-                          : "linear-gradient(180deg,#fb923caa,#ea580caa)",
-                        border: `1px solid ${isSel ? "#fff" : "#7c2d12"}`,
-                        borderLeft: `3px solid ${isSel ? "#fff" : "#fdba74"}`,
-                        borderRadius: 3,
-                        cursor: "grab",
-                        boxSizing: "border-box",
-                        display: "flex",
-                        alignItems: "center",
-                        paddingLeft: 4,
-                        fontSize: 10,
-                        color: "#1a0a05",
-                        fontWeight: 600,
-                        overflow: "hidden",
-                        whiteSpace: "nowrap",
+                        top: 0,
+                        bottom: 0,
+                        left: `${(timeHours / HOURS) * 100}%`,
+                        width: 2,
+                        background: "#ffe14d",
+                        pointerEvents: "none",
                       }}
-                      title={`${sample.name}  @ ${fmtTime(c.startHour)}  rate ${c.playbackRate.toFixed(2)}× gain ${c.gain.toFixed(2)}  · ${sample.durationSec.toFixed(2)}s`}
-                    >
-                      ▶ {sample.name}
-                    </div>
-                  );
-                })}
-              </div>
-              <div style={bottomLabelsStyle}>
-                {[0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => (
-                  <span key={h}>{h.toString().padStart(2, "0")}h</span>
-                ))}
+                    />
+                    {/* Clip spans — width = how many sky-hours the audio
+                        covers at the current cycle speed. Left edge is the
+                        trigger (`startHour`). */}
+                    {samples.clips.map((c) => {
+                      const sample = sampleById.get(c.sampleId);
+                      if (!sample) return null;
+                      const lane = laneIndexBySampleId.get(c.sampleId);
+                      if (lane === undefined) return null;
+                      const leftPct = (c.startHour / HOURS) * 100;
+                      const widthHours = clipWidthHours(
+                        sample.durationSec,
+                        c.playbackRate,
+                        sky.cycleSeconds,
+                      );
+                      const widthPct = (widthHours / HOURS) * 100;
+                      const playSec =
+                        sample.durationSec /
+                        Math.max(1e-6, c.playbackRate);
+                      const skyMinutes = widthHours * 60;
+                      const isSel = c.id === selectedId;
+                      return (
+                        <div
+                          key={c.id}
+                          data-clip-id={c.id}
+                          onPointerDown={(e) => beginClipDrag(e, c.id)}
+                          style={{
+                            position: "absolute",
+                            top: lane * LANE_HEIGHT + 2,
+                            left: `${leftPct}%`,
+                            width: `${widthPct}%`,
+                            minWidth: CLIP_MIN_WIDTH_PX,
+                            height: LANE_HEIGHT - 4,
+                            background: isSel
+                              ? "linear-gradient(180deg,#fb923c,#ea580c)"
+                              : "linear-gradient(180deg,#fb923caa,#ea580caa)",
+                            border: `1px solid ${isSel ? "#fff" : "#7c2d12"}`,
+                            borderLeft: `3px solid ${
+                              isSel ? "#fff" : "#fdba74"
+                            }`,
+                            borderRadius: 3,
+                            cursor: "grab",
+                            boxSizing: "border-box",
+                            display: "flex",
+                            alignItems: "center",
+                            paddingLeft: 4,
+                            fontSize: 10,
+                            color: "#1a0a05",
+                            fontWeight: 600,
+                            overflow: "hidden",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={`${sample.name}  @ ${fmtTime(c.startHour)}  · ${playSec.toFixed(1)}s audio ≈ ${skyMinutes.toFixed(1)} sky-min  · rate ${c.playbackRate.toFixed(2)}× gain ${c.gain.toFixed(2)}`}
+                        >
+                          ▶ {sample.name}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={bottomLabelsStyle}>
+                    {[...rulerHours, HOURS].map((h) => (
+                      <span
+                        key={h}
+                        style={{
+                          position: "absolute",
+                          left: `${(h / HOURS) * 100}%`,
+                          transform: h === HOURS ? "translateX(-100%)" : undefined,
+                          paddingLeft: h === HOURS ? 0 : 2,
+                          paddingRight: h === HOURS ? 2 : 0,
+                        }}
+                      >
+                        {labelStep < 1
+                          ? fmtTime(h)
+                          : `${Math.floor(h).toString().padStart(2, "0")}h`}
+                      </span>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -763,10 +974,22 @@ const arrangementWrap: React.CSSProperties = {
   display: "flex",
   flex: 1,
   minHeight: 0,
-  overflow: "auto",
+  overflow: "hidden",
   border: "1px solid rgba(255,255,255,0.15)",
   borderRadius: 6,
   background: "rgba(255,255,255,0.02)",
+};
+const timelinePaneStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+};
+const timelineScrollStyle: React.CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  overflow: "auto",
 };
 const librarySideStyle: React.CSSProperties = {
   width: LIBRARY_WIDTH,
@@ -806,13 +1029,10 @@ const rulerStyle: React.CSSProperties = {
   userSelect: "none",
 };
 const bottomLabelsStyle: React.CSSProperties = {
-  position: "sticky",
-  bottom: 0,
-  display: "flex",
-  justifyContent: "space-between",
+  position: "relative",
+  height: 16,
   fontSize: 9,
   opacity: 0.6,
-  padding: "2px 2px",
   background: "rgba(0,0,0,0.5)",
   pointerEvents: "none",
 };

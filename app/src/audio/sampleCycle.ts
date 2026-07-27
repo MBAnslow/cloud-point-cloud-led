@@ -4,8 +4,8 @@ import type { SampleClip, SamplesParams } from "../state";
  * A sample clip is a *trigger*: when the playhead crosses its
  * `startHour` the clip fires once and plays the entire sample buffer
  * to its natural end (or is torn down when the track is disabled).
- * The clip has no visual duration on the timeline — it's a fixed-size
- * block whose position is the trigger point.
+ * Runtime is still a trigger at `startHour`; the Samples panel draws
+ * width from duration × cycle speed (sky-hours covered while playing).
  */
 export interface TriggeredClip {
   clipId: string;

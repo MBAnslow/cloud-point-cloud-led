@@ -10,7 +10,7 @@ import { pickBoltSample } from "./boltSampleMatch";
  *   long as `enabled && withinActiveWindow`.
  * - Cloud-flash bolts pick from the tagged `boltSamples` library.
  * - Ground strikes play the single `strikeSample` (if set).
- * - Each one-shot applies ±jitter cents to the playback rate.
+ * - Each one-shot gets a random Tone.PitchShift in ±boltPitchJitterCents.
  *
  * Buffers are lazily loaded from the shared IndexedDB blob store
  * (same one used by the Samples panel). Missing buffers are silently
@@ -26,7 +26,9 @@ export class LightningAudioEngine {
   private boltBuffers = new Map<string, AudioBuffer>();
   private pendingLoads = new Set<string>();
   private voices: Array<{
-    player: Tone.Player;
+    source: Tone.ToneBufferSource;
+    pitchShift: Tone.PitchShift | null;
+    gain: Tone.Gain;
     panner: Tone.Panner;
     endsAt: number;
   }> = [];
@@ -119,29 +121,57 @@ export class LightningAudioEngine {
       void this.ensureBoltBuffer(sample.id);
       return;
     }
-    const cents =
-      (Math.random() * 2 - 1) * Math.max(0, p.boltPitchJitterCents);
-    const rate = Math.pow(2, cents / 1200);
-    const gain = Math.max(0, boltGain) * Math.max(0, strikeIntensity);
+    // Random pitch in ±boltPitchJitterCents. Use PitchShift (semitones)
+    // rather than playbackRate so thunder keeps its length — rate-only
+    // jitter is easy to miss on broadband rumble (strike sound).
+    const jitter = Math.max(0, Number(p.boltPitchJitterCents) || 0);
+    const cents = jitter > 0 ? (Math.random() * 2 - 1) * jitter : 0;
+    const semitones = cents / 100;
+    const gainLin = Math.max(
+      0.0001,
+      Math.max(0, boltGain) * Math.max(0, strikeIntensity),
+    );
     const panVal = Math.max(-1, Math.min(1, pan));
-    const player = new Tone.Player();
+
+    const source = new Tone.ToneBufferSource({
+      url: buf,
+      playbackRate: 1,
+    });
+    const gain = new Tone.Gain(gainLin);
     const panner = new Tone.Panner(panVal);
-    (player as unknown as { buffer: Tone.ToneAudioBuffer }).buffer =
-      new Tone.ToneAudioBuffer(buf);
-    player.playbackRate = rate;
-    player.volume.value = Tone.gainToDb(Math.max(0.0001, gain));
-    player.connect(panner);
+    let pitchShift: Tone.PitchShift | null = null;
+    if (Math.abs(semitones) >= 0.01) {
+      pitchShift = new Tone.PitchShift({
+        pitch: semitones,
+        windowSize: 0.1,
+        feedback: 0,
+      });
+      source.connect(pitchShift);
+      pitchShift.connect(gain);
+    } else {
+      source.connect(gain);
+    }
+    gain.connect(panner);
     panner.connect(this.out);
     try {
-      player.start();
+      source.start();
     } catch (err) {
       console.warn("[lightning] one-shot start failed", err);
-      player.dispose();
+      source.dispose();
+      pitchShift?.dispose();
+      gain.dispose();
       panner.dispose();
       return;
     }
-    const dur = buf.duration / Math.max(0.01, rate) + 0.05;
-    this.voices.push({ player, panner, endsAt: Tone.now() + dur });
+    // PitchShift adds a short delay line; keep the voice alive a bit longer.
+    const dur = buf.duration + (pitchShift ? 0.2 : 0.05);
+    this.voices.push({
+      source,
+      pitchShift,
+      gain,
+      panner,
+      endsAt: Tone.now() + dur,
+    });
     this.reap();
   }
 
@@ -150,11 +180,13 @@ export class LightningAudioEngine {
     this.voices = this.voices.filter((v) => {
       if (v.endsAt <= now) {
         try {
-          v.player.stop();
+          v.source.stop();
         } catch {
           /* ignore */
         }
-        v.player.dispose();
+        v.source.dispose();
+        v.pitchShift?.dispose();
+        v.gain.dispose();
         v.panner.dispose();
         return false;
       }

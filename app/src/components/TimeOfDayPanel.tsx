@@ -53,7 +53,7 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           label="24h cycle"
           value={sky.cycleSeconds}
           min={20}
-          max={600}
+          max={900}
           step={1}
           onChange={(v) => upd({ cycleSeconds: v })}
           formatValue={(v) => `${v.toFixed(0)}s`}

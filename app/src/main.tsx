@@ -10,6 +10,7 @@ import { PadRuntime } from "./audio/PadRuntime";
 import { SampleRuntime } from "./audio/SampleRuntime";
 import { MasterFxRuntime } from "./audio/MasterFxRuntime";
 import { LightningAudioRuntime } from "./audio/LightningAudioRuntime";
+import { BreathExhaleAudioRuntime } from "./audio/BreathExhaleAudioRuntime";
 import { startPersistence } from "./state/persistRuntime";
 import { startOscBreathClient } from "./breath/oscBreathClient";
 
@@ -23,6 +24,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <SampleRuntime />
     <MasterFxRuntime />
     <LightningAudioRuntime />
+    <BreathExhaleAudioRuntime />
     <Routes>
       <Route path="/" element={<App />} />
       <Route path="/mapping" element={<MappingApp />} />

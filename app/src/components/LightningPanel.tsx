@@ -1354,7 +1354,7 @@ function AudioSection({
         max={1200}
         step={5}
         onChange={(v) => upd({ boltPitchJitterCents: v })}
-        formatValue={(v) => `${v.toFixed(0)}¢`}
+        formatValue={(v) => `±${v.toFixed(0)}¢`}
       />
       <SliderRow
         label={`Thunder delay${KF}`}
