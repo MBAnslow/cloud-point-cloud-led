@@ -1,5 +1,5 @@
 import * as Tone from "tone";
-import { useSimStore, type Sample, type SamplesParams } from "../state";
+import { useSimStore, sampleTrimRange, type Sample, type SamplesParams } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
 import { clipsActiveAt, type ActiveClip } from "./sampleCycle";
 import { applyFilterChain } from "./filterChain";
@@ -19,7 +19,7 @@ import { ensureLimitedAux } from "./MasterFxBus";
  * not change playback length / timeline lock.
  *
  * Per-voice chain:
- *   Player → PitchShift → gain (position fades) → panner →
+ *   Player → PitchShift → gain (position fades) → filter (LP) → panner →
  *      ┬── dryGain ──►
  *      ├── reverb → reverbWet ──►  → sampleBus → master → destination
  *      └── delay  → delayWet  ──►
@@ -38,6 +38,7 @@ interface Voice {
   player: Tone.Player;
   pitchShift: Tone.PitchShift;
   gain: Tone.Gain;
+  filter: Tone.Filter;
   panner: Tone.Panner;
   dryGain: Tone.Gain;
   reverb: Tone.Freeverb;
@@ -164,6 +165,12 @@ export class SampleEngine {
     });
   }
 
+  private previewNodes: {
+    source: Tone.ToneBufferSource;
+    gain: Tone.Gain;
+    panner: Tone.Panner;
+  } | null = null;
+
   /** Peak level after engine EQ (0..1+). */
   getPeakLevel(): number {
     if (!this.meter) return 0;
@@ -172,6 +179,80 @@ export class SampleEngine {
 
   async ensureSampleLoaded(sample: Sample): Promise<void> {
     await this.loadBuffer(sample.id);
+  }
+
+  /**
+   * Audition a library track once through the limited bus, independent
+   * of arrangement clips / Samples enable. Stops any prior preview.
+   */
+  async previewSample(sample: Sample): Promise<void> {
+    if (!this.started) await this.start();
+    const buf = await this.loadBuffer(sample.id);
+    if (!buf) {
+      console.warn("[samples] preview: missing buffer", sample.id);
+      return;
+    }
+    this.stopPreview();
+    const aux = await ensureLimitedAux();
+    const { start, playSec } = sampleTrimRange(sample);
+    if (playSec < MIN_REMAINING_BUF_SEC) {
+      console.warn("[samples] preview: empty trim", sample.id);
+      return;
+    }
+    const rate = Math.max(0.05, sample.playbackRate);
+    const master = useSimStore.getState().samples.master;
+    const gainLin = Math.max(
+      0.0001,
+      Math.max(0, sample.gain) * Math.max(0, master),
+    );
+    const source = new Tone.ToneBufferSource({
+      url: buf,
+      playbackRate: rate,
+    });
+    const gain = new Tone.Gain(gainLin);
+    const panner = new Tone.Panner(
+      Math.max(-1, Math.min(1, sample.pan ?? 0)),
+    );
+    source.connect(gain);
+    gain.connect(panner);
+    panner.connect(aux);
+    const now = Tone.now();
+    try {
+      source.start(now, start, playSec);
+    } catch (err) {
+      console.warn("[samples] preview start failed", err);
+      source.dispose();
+      gain.dispose();
+      panner.dispose();
+      return;
+    }
+    this.previewNodes = { source, gain, panner };
+    const wallSec = playSec / rate + 0.05;
+    source.onended = () => {
+      if (this.previewNodes?.source === source) this.stopPreview();
+    };
+    // Safety dispose if onended never fires.
+    setTimeout(() => {
+      if (this.previewNodes?.source === source) this.stopPreview();
+    }, (wallSec + 0.5) * 1000);
+  }
+
+  stopPreview(): void {
+    const nodes = this.previewNodes;
+    this.previewNodes = null;
+    if (!nodes) return;
+    try {
+      nodes.source.stop();
+    } catch {
+      /* already stopped */
+    }
+    try {
+      nodes.source.dispose();
+      nodes.gain.dispose();
+      nodes.panner.dispose();
+    } catch {
+      /* ignore */
+    }
   }
 
   /** Drop a cached decode so a rewritten blob is picked up next play. */
@@ -351,6 +432,10 @@ export class SampleEngine {
 
   private applyLiveParams(voice: Voice, a: ActiveClip): void {
     voice.panner.pan.rampTo(a.pan, 0.05);
+    voice.filter.frequency.rampTo(
+      Math.max(20, Math.min(20000, a.filterHz)),
+      0.05,
+    );
     const reverbMix = Math.max(0, Math.min(1, a.reverbMix));
     const delayMix = Math.max(0, Math.min(1, a.delayMix));
     voice.dryGain.gain.rampTo(Math.max(0, 1 - reverbMix - delayMix), 0.08);
@@ -421,6 +506,11 @@ export class SampleEngine {
       feedback: 0,
     });
     const gain = new Tone.Gain(0);
+    const filter = new Tone.Filter({
+      type: "lowpass",
+      frequency: Math.max(20, Math.min(20000, a.filterHz)),
+      Q: 0.7,
+    });
     const panner = new Tone.Panner(a.pan);
     const reverbMix = Math.max(0, Math.min(1, a.reverbMix));
     const delayMix = Math.max(0, Math.min(1, a.delayMix));
@@ -439,7 +529,8 @@ export class SampleEngine {
 
     player.connect(pitchShift);
     pitchShift.connect(gain);
-    gain.connect(panner);
+    gain.connect(filter);
+    filter.connect(panner);
     panner.connect(dryGain);
     panner.connect(reverb);
     reverb.connect(reverbWet);
@@ -455,6 +546,7 @@ export class SampleEngine {
       player,
       pitchShift,
       gain,
+      filter,
       panner,
       dryGain,
       reverb,
@@ -557,6 +649,7 @@ export class SampleEngine {
       v.player.dispose();
       v.pitchShift.dispose();
       v.gain.dispose();
+      v.filter.dispose();
       v.panner.dispose();
       v.dryGain.dispose();
       v.reverb.dispose();

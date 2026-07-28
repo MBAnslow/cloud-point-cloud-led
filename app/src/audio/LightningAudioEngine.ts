@@ -11,6 +11,7 @@ import { ensureLimitedAux } from "./MasterFxBus";
  *   long as `enabled && withinActiveWindow`.
  * - Cloud-flash bolts pick from the tagged `boltSamples` library.
  * - Ground strikes play the single `strikeSample` (if set).
+ * - Sprite flashes play the single `spriteSample` (if set).
  * - Each one-shot gets a random Tone.PitchShift in ±boltPitchJitterCents.
  *
  * Buffers are lazily loaded from the shared IndexedDB blob store
@@ -105,10 +106,28 @@ export class LightningAudioEngine {
     this.playOneShot(p, sample, strikeIntensity, boltGain, pan);
   }
 
+  /**
+   * Trigger the storm-sprite appear one-shot (`spriteSample`).
+   * No-op when no sprite sound is uploaded.
+   */
+  triggerSprite(
+    p: LightningParams,
+    intensity = 1,
+    gain = p.spriteGain,
+    pan = p.pan ?? 0,
+  ): void {
+    if (!this.started || !this.out) return;
+    if (!p.enabled) return;
+    const sample = p.spriteSample;
+    if (!sample) return;
+    this.playOneShot(p, sample, intensity, gain, pan);
+  }
+
   /** Preload all referenced buffers so first triggers aren't skipped. */
   preload(p: LightningParams): void {
     for (const s of p.boltSamples) void this.ensureBoltBuffer(s.id);
     if (p.strikeSample) void this.ensureBoltBuffer(p.strikeSample.id);
+    if (p.spriteSample) void this.ensureBoltBuffer(p.spriteSample.id);
     if (p.backgroundSample) void this.ensureBoltBuffer(p.backgroundSample.id);
   }
 

@@ -3,12 +3,15 @@ import {
   samplePlayDurationSec,
   sampleTrimRange,
   type Sample,
+  type SampleAutoParam,
   type SampleClip,
 } from "../state";
+import { sampleTrackAutomation } from "../audio/sampleAutomation";
 import { RangeSlider } from "../components/RangeSlider";
 import { SampleWaveform } from "./SampleWaveform";
 import { bakeSampleTrim } from "./bakeSampleTrim";
 import { getSampleEngine } from "../audio/SampleEngine";
+import { useSimStore } from "../state";
 
 interface Props {
   clip: SampleClip;
@@ -55,6 +58,10 @@ export function SampleClipEditor({
   const playSec = samplePlayDurationSec(sample);
   const isTrimmed =
     trim.start > 0.001 || trim.end < sample.durationSec - 0.001;
+  const skyHour = useSimStore((s) => s.sky.timeHours);
+
+  const live = (param: SampleAutoParam) =>
+    sampleTrackAutomation(sample, skyHour, param);
 
   const setTrim = (start: number, end: number) => {
     onChangeTrack({ trimStartSec: start, trimEndSec: end });
@@ -220,18 +227,34 @@ export function SampleClipEditor({
       <Slider
         label="Gain"
         value={sample.gain}
+        live={live("gain")}
         min={0}
         max={1}
         step={0.01}
+        auto={!!sample.automation?.gain?.length}
         onChange={(v) => onChangeTrack({ gain: v })}
       />
       <Slider
         label="Pan"
         value={sample.pan}
+        live={live("pan")}
         min={-1}
         max={1}
         step={0.01}
+        auto={!!sample.automation?.pan?.length}
         onChange={(v) => onChangeTrack({ pan: v })}
+      />
+      <Slider
+        label="Filter"
+        value={sample.filterHz}
+        live={live("filterHz")}
+        min={20}
+        max={20000}
+        step={1}
+        logScale
+        unit="Hz"
+        auto={!!sample.automation?.filterHz?.length}
+        onChange={(v) => onChangeTrack({ filterHz: v })}
       />
       <Slider
         label="Rate"
@@ -301,9 +324,11 @@ export function SampleClipEditor({
         <Slider
           label="Mix"
           value={sample.reverbMix}
+          live={live("reverbMix")}
           min={0}
           max={1}
           step={0.01}
+          auto={!!sample.automation?.reverbMix?.length}
           onChange={(v) => onChangeTrack({ reverbMix: v })}
         />
         <Slider
@@ -338,9 +363,11 @@ export function SampleClipEditor({
         <Slider
           label="Mix"
           value={sample.delayMix}
+          live={live("delayMix")}
           min={0}
           max={1}
           step={0.01}
+          auto={!!sample.automation?.delayMix?.length}
           onChange={(v) => onChangeTrack({ delayMix: v })}
         />
       </div>
@@ -381,20 +408,59 @@ const hint: React.CSSProperties = {
 interface SliderProps {
   label: string;
   value: number;
+  /** Live automated value at the playhead (shown when `auto`). */
+  live?: number;
   min: number;
   max: number;
   step: number;
   logScale?: boolean;
   unit?: string;
+  /** True when day-timeline automation overrides this knob. */
+  auto?: boolean;
   onChange: (v: number) => void;
 }
 
-function Slider({ label, value, min, max, step, logScale, unit, onChange }: SliderProps) {
+function Slider({
+  label,
+  value,
+  live,
+  min,
+  max,
+  step,
+  logScale,
+  unit,
+  auto,
+  onChange,
+}: SliderProps) {
   const to = (v: number) => (logScale ? Math.log(Math.max(1e-4, v)) : v);
   const from = (v: number) => (logScale ? Math.exp(v) : v);
+  const shown = auto && live != null ? live : value;
+  const fmt = (v: number) => {
+    if (unit === "Hz") {
+      return v >= 1000 ? `${(v / 1000).toFixed(1)}k Hz` : `${Math.round(v)} Hz`;
+    }
+    return `${v.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+  };
   return (
     <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <span style={{ width: 56, fontSize: 11 }}>{label}</span>
+      <span style={{ width: 56, fontSize: 11 }}>
+        {label}
+        {auto ? (
+          <span
+            title="Automated on the day timeline — Clear the lane to use this knob. Number shows live playhead value."
+            style={{
+              marginLeft: 4,
+              fontSize: 8,
+              fontWeight: 700,
+              letterSpacing: 0.3,
+              color: "rgba(251,146,60,0.95)",
+              verticalAlign: "super",
+            }}
+          >
+            AUTO
+          </span>
+        ) : null}
+      </span>
       <input
         type="range"
         min={to(min)}
@@ -402,19 +468,19 @@ function Slider({ label, value, min, max, step, logScale, unit, onChange }: Slid
         step={logScale ? (to(max) - to(min)) / 400 : step}
         value={to(value)}
         onChange={(e) => onChange(from(parseFloat(e.target.value)))}
-        style={{ flex: 1 }}
+        style={{ flex: 1, opacity: auto ? 0.55 : 1 }}
       />
       <span
         style={{
-          width: 46,
+          width: 52,
           textAlign: "right",
           fontSize: 10,
           opacity: 0.8,
           fontVariantNumeric: "tabular-nums",
+          color: auto ? "rgba(251,146,60,0.95)" : "inherit",
         }}
       >
-        {value.toFixed(2)}
-        {unit ? ` ${unit}` : ""}
+        {fmt(shown)}
       </span>
     </label>
   );

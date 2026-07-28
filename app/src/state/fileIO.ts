@@ -229,6 +229,7 @@ export interface MissingAssets {
   lightningBolts: { id: string; name: string }[];
   lightningStrike: { id: string; name: string } | null;
   lightningBackground: { id: string; name: string } | null;
+  lightningSpriteSound: { id: string; name: string } | null;
   lightningSprites: { id: string; name: string }[];
   breathExhale: { id: string; name: string } | null;
   mesh: { id: string; name: string } | null;
@@ -330,6 +331,7 @@ async function auditBinaryAssets(state: SimState): Promise<MissingAssets> {
     lightningBolts: [],
     lightningStrike: null,
     lightningBackground: null,
+    lightningSpriteSound: null,
     lightningSprites: [],
     breathExhale: null,
     mesh: null,
@@ -351,6 +353,16 @@ async function auditBinaryAssets(state: SimState): Promise<MissingAssets> {
   if (bg) {
     const blob = await getSampleBlob(bg.id).catch(() => null);
     if (!blob) missing.lightningBackground = { id: bg.id, name: bg.name };
+  }
+  const spriteSound = state.lightning.spriteSample;
+  if (spriteSound) {
+    const blob = await getSampleBlob(spriteSound.id).catch(() => null);
+    if (!blob) {
+      missing.lightningSpriteSound = {
+        id: spriteSound.id,
+        name: spriteSound.name,
+      };
+    }
   }
   for (const s of state.lightning.spriteSamples ?? []) {
     const blob = await getSampleBlob(s.id).catch(() => null);
@@ -376,6 +388,7 @@ export function summariseMissing(m: MissingAssets): string | null {
     parts.push(`${m.lightningBolts.length} lightning bolt sound(s)`);
   if (m.lightningStrike) parts.push("lightning strike sound");
   if (m.lightningBackground) parts.push("lightning background sound");
+  if (m.lightningSpriteSound) parts.push("lightning sprite sound");
   if (m.lightningSprites.length)
     parts.push(`${m.lightningSprites.length} lightning sprite image(s)`);
   if (m.breathExhale) parts.push("breath exhale sound");

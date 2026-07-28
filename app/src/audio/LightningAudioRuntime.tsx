@@ -14,16 +14,19 @@ import { getLightningAudioEngine } from "./LightningAudioEngine";
  *   3. detects newly-born strikes in `sharedLightningController` by
  *      tracking born-timestamps and fires a bolt sound per new strike.
  *      Ground strikes (`kind === "strike"`) use `strikeSample`; cloud
- *      flashes use the tagged `boltSamples` library.
+ *      flashes use the tagged `boltSamples` library. Newly spawned
+ *      storm sprites fire `spriteSample` when set.
  *
  * We identify new strikes by the max `bornMs` seen so far — cheap and
- * doesn't require patching the LightningController API.
+ * doesn't require patching the LightningController API. Sprites use
+ * the same watermark pattern on `getSprites()`.
  */
 export function LightningAudioRuntime(): null {
   useEffect(() => {
     const engine = getLightningAudioEngine();
     let raf = 0;
     let lastMaxBorn = -Infinity;
+    let lastMaxSpriteBorn = -Infinity;
     let unlockedOnce = false;
     let firstFrame = true;
     // Pending thunder timers so we can clear queued sounds on unmount /
@@ -70,11 +73,15 @@ export function LightningAudioRuntime(): null {
       );
 
       const strikes = sharedLightningController.getStrikes();
+      const sprites = sharedLightningController.getSprites();
       // Skip on the very first tick after start — otherwise pre-existing
       // strikes would all replay simultaneously.
       if (firstFrame) {
         for (const s of strikes) {
           if (s.bornMs > lastMaxBorn) lastMaxBorn = s.bornMs;
+        }
+        for (const s of sprites) {
+          if (s.bornMs > lastMaxSpriteBorn) lastMaxSpriteBorn = s.bornMs;
         }
         firstFrame = false;
         return;
@@ -113,6 +120,16 @@ export function LightningAudioRuntime(): null {
         }
       }
       lastMaxBorn = newMax;
+
+      let newSpriteMax = lastMaxSpriteBorn;
+      for (const sp of sprites) {
+        if (sp.bornMs > lastMaxSpriteBorn) {
+          const pan = live.pan ?? p.pan ?? 0;
+          engine.triggerSprite(p, 1, sp.gain, pan);
+          if (sp.bornMs > newSpriteMax) newSpriteMax = sp.bornMs;
+        }
+      }
+      lastMaxSpriteBorn = newSpriteMax;
     };
     raf = requestAnimationFrame(tick);
 

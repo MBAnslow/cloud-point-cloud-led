@@ -5,7 +5,7 @@ import {
   type FilterParams,
 } from "../state";
 import { getBreathEffectDrive } from "../lighting/breathEffectDrive";
-import { currentBreathDrive } from "../audio/breathModulation";
+import { currentBreathDrive, isBreathModActive } from "../audio/breathModulation";
 import { getDroneEngine } from "../audio/DroneEngine";
 import { getPadEngine } from "../audio/PadEngine";
 import { getSampleEngine } from "../audio/SampleEngine";
@@ -215,8 +215,9 @@ function VolumeWithMeter({
 }
 
 /**
- * Live cloud-effect drive meter + enable toggle. When the checkbox is
- * on, `breathMod` follows the mean live breath-sphere coverage on LEDs.
+ * Live cloud-effect drive meter + enable toggle. When on, engine params
+ * lerp from the % rest offset toward the yellow slider during the breath
+ * period (reveal 0 → 1). Outside the period, stored slider values play.
  */
 function BreathModHeader() {
   const enabled = useSimStore((s) => s.breathModEnabled);
@@ -243,7 +244,7 @@ function BreathModHeader() {
           cursor: "pointer",
           userSelect: "none",
         }}
-        title="Drive engines from live breath-sphere coverage on the cloud"
+        title="Off: engines play the yellow slider levels exactly. On: during the breath period, params rest at the % offset (reveal 0) and return to the slider as reveal rises."
       >
         <input
           type="checkbox"
@@ -544,8 +545,14 @@ function SliderRow({
   meterSource?: "drone" | "pad" | "samples" | "output";
 }) {
   const modAmount = useSimStore((s) => (modKey ? s.breathMod[modKey] ?? 0 : 0));
-  const extreme = modKey ? computeExtreme(value, min, max, modAmount, false) : null;
+  const modEnabled = useSimStore((s) => s.breathModEnabled);
   const live = useLiveModValue(value, min, max, modAmount, false, modKey);
+  // Blue offset marker only while mod can actually move the engine.
+  const offset =
+    modKey && modEnabled && modAmount !== 0
+      ? computeOffset(value, min, max, modAmount, false)
+      : null;
+  const shown = live != null ? live : value;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
       <span style={{ width: 72, opacity: 0.85 }}>{label}</span>
@@ -556,12 +563,12 @@ function SliderRow({
         step={step}
         value={value}
         base={value}
-        extreme={extreme}
+        extreme={offset}
         live={live}
         onChange={onChange}
       />
       <span style={{ width: 48, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-        {formatValue ? formatValue(value) : value.toFixed(2)}
+        {formatValue ? formatValue(shown) : shown.toFixed(2)}
       </span>
       {modKey && <BreathModColumn modKey={modKey} />}
     </div>
@@ -570,9 +577,9 @@ function SliderRow({
 
 /**
  * Range input with ticks under the track:
- *   yellow — stored base (thumb when not dragging via mod)
- *   blue   — value at full cloud breath effect (mod amount × drive=1)
- *   green  — live playing value (mod amount × current drive)
+ *   yellow — slider target (reveal = 1)
+ *   blue   — rest offset at reveal = 0 (mod % shift)
+ *   green  — live playing value during the breath period
  */
 function RangeWithBaseTick({
   min,
@@ -590,9 +597,9 @@ function RangeWithBaseTick({
   step: number;
   value: number;
   base: number;
-  /** Where the parameter lands at full cloud effect (drive = 1). */
+  /** Rest offset at reveal 0 (mod amount). */
   extreme?: number | null;
-  /** Live engine value at the current breath-mod drive. */
+  /** Live engine value while breath mod is active. */
   live?: number | null;
   onChange: (v: number) => void;
   logScale?: boolean;
@@ -645,7 +652,7 @@ function RangeWithBaseTick({
             pointerEvents: "none",
             borderRadius: 1,
           }}
-          title="Value at full cloud breath effect (current mod amount)"
+          title="Rest offset at reveal 0 (mod %)"
         />
       )}
       {livePct != null && (
@@ -662,7 +669,7 @@ function RangeWithBaseTick({
             borderRadius: 1,
             zIndex: 1,
           }}
-          title="Live playing value (breath-modded)"
+          title="Live playing value (lerp offset → slider by reveal)"
         />
       )}
       <div
@@ -677,54 +684,56 @@ function RangeWithBaseTick({
           pointerEvents: "none",
           borderRadius: 1,
         }}
-        title="Stored base value"
+        title="Slider target at reveal 1"
       />
     </div>
   );
 }
 
 /**
- * Compute where a parameter lands at full cloud breath effect (drive =
- * 1) for the current mod amount, matching `modulatedEngineParams`.
- * `amount` is signed in [-1, 1]; log-scale sliders interpolate in log
- * space so the extreme marker matches the visual midpoint the slider draws.
+ * Rest offset at reveal = 0 for the current mod amount (blue tick).
+ * Matches breathModulation.apply with reveal = 0.
  */
-function computeExtreme(
+function computeOffset(
   base: number,
   min: number,
   max: number,
   amount: number,
   logScale: boolean,
 ): number {
-  return computeModulated(base, min, max, amount, 1, logScale);
+  return computeModulated(base, min, max, amount, 0, logScale);
 }
 
-/** Same mapping as breathModulation.apply, with explicit drive intensity. */
+/**
+ * Same mapping as breathModulation.apply: slider is reveal=1 target;
+ * live = base + amount * range * (1 - reveal).
+ */
 function computeModulated(
   base: number,
   min: number,
   max: number,
   amount: number,
-  drive: number,
+  reveal: number,
   logScale: boolean,
 ): number {
-  if (amount === 0 || drive <= 0) return base;
+  if (amount === 0) return base;
+  const t = reveal < 0 ? 0 : reveal > 1 ? 1 : reveal;
   if (logScale) {
     const lo = Math.log(Math.max(1e-6, min));
     const hi = Math.log(Math.max(1e-6, max));
     const bLog = Math.log(Math.max(1e-6, base));
-    const next = bLog + drive * amount * (hi - lo);
+    const next = bLog + amount * (1 - t) * (hi - lo);
     return Math.exp(Math.max(lo, Math.min(hi, next)));
   }
   return Math.max(
     min,
-    Math.min(max, base + drive * amount * (max - min)),
+    Math.min(max, base + amount * (1 - t) * (max - min)),
   );
 }
 
 /**
- * RAF-polled live value for a breath-modulated slider. Returns null when
- * mod is inactive / amount is 0 so the green tick can hide.
+ * RAF-polled live value while breath mod is active in the breath window.
+ * Null outside the period / when amount is 0 so the green tick hides.
  */
 function useLiveModValue(
   base: number,
@@ -744,11 +753,11 @@ function useLiveModValue(
     let raf = 0;
     const tick = () => {
       const state = useSimStore.getState();
-      const drive = currentBreathDrive(state);
-      if (drive <= 0) {
+      if (!isBreathModActive(state)) {
         setLive(null);
       } else {
-        setLive(computeModulated(base, min, max, amount, drive, logScale));
+        const reveal = currentBreathDrive(state);
+        setLive(computeModulated(base, min, max, amount, reveal, logScale));
       }
       raf = requestAnimationFrame(tick);
     };
@@ -761,13 +770,14 @@ function useLiveModValue(
 
 /**
  * Bipolar cloud-breath modulation cell. Value is a signed fraction in
- * [-1, +1]; positive drives the parameter up as more of the cloud has
- * breath applied. Magnitude is the fraction of the slider range applied
- * at full cloud effect. Alt-click resets to 0.
+ * [-1, +1]: the rest offset at reveal 0 as a fraction of the slider
+ * range. Reveal lerps from that offset back to the yellow slider.
+ * Alt-click / double-click resets to 0.
  */
 function BreathModColumn({ modKey }: { modKey: string }) {
   const value = useSimStore((s) => s.breathMod[modKey] ?? 0);
   const setBreathMod = useSimStore((s) => s.setBreathMod);
+  const modEnabled = useSimStore((s) => s.breathModEnabled);
   const pct = Math.round(value * 100);
   const dir = pct > 0 ? "R" : pct < 0 ? "L" : "·";
   return (
@@ -777,8 +787,13 @@ function BreathModColumn({ modKey }: { modKey: string }) {
         alignItems: "center",
         gap: 4,
         minWidth: 118,
+        opacity: modEnabled ? 1 : 0.35,
       }}
-      title="Cloud breath modulation (applied × mean LED time-of-day reveal)"
+      title={
+        modEnabled
+          ? "% = rest offset at reveal 0; inhale (reveal) returns to the slider. Only during the breath period."
+          : "Cloud breath mod is off — engines use the yellow slider levels as-is."
+      }
     >
       <input
         type="range"
@@ -855,10 +870,13 @@ function FilterRow({
   modKey?: string;
 }) {
   const modAmount = useSimStore((s) => (modKey ? s.breathMod[modKey] ?? 0 : 0));
-  const filterExtreme = modKey
-    ? computeExtreme(hz, F_MIN, F_MAX, modAmount, true)
-    : null;
+  const modEnabled = useSimStore((s) => s.breathModEnabled);
   const live = useLiveModValue(hz, F_MIN, F_MAX, modAmount, true, modKey);
+  const offset =
+    modKey && modEnabled && modAmount !== 0
+      ? computeOffset(hz, F_MIN, F_MAX, modAmount, true)
+      : null;
+  const shownHz = live != null ? live : hz;
   return (
     <div
       style={{
@@ -888,14 +906,14 @@ function FilterRow({
           step={1}
           value={hz}
           base={hz}
-          extreme={filterExtreme}
+          extreme={offset}
           live={live}
           onChange={onHz}
           logScale
         />
       </div>
       <span style={{ width: 60, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-        {formatHz(hz)}
+        {formatHz(shownHz)}
       </span>
       {modKey && <BreathModColumn modKey={modKey} />}
     </div>

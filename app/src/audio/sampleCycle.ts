@@ -4,6 +4,7 @@ import {
   type SampleClip,
   type SamplesParams,
 } from "../state";
+import { sampleTrackAutomation } from "./sampleAutomation";
 
 const HOURS = 24;
 
@@ -12,8 +13,7 @@ const HOURS = 24;
  * inside `[startHour, startHour + widthHours)` the engine plays the
  * trimmed buffer region at the matching offset; outside the span the
  * voice stops. Sound params come from the parent library `Sample`
- * (track); width uses that track's playable duration × playbackRate
- * × cycle speed.
+ * (track), with day-timeline automation applied at `hour`.
  */
 export interface ActiveClip {
   clipId: string;
@@ -29,6 +29,8 @@ export interface ActiveClip {
   offsetSec: number;
   gain: number;
   pan: number;
+  /** Per-voice lowpass cutoff (Hz), from track automation / knob. */
+  filterHz: number;
   playbackRate: number;
   fadeInSec: number;
   fadeOutSec: number;
@@ -91,6 +93,7 @@ export function clipOffsetSec(
 function toActive(
   c: SampleClip,
   sample: Sample,
+  hour: number,
   offsetSec: number,
   widthHours: number,
   playSec: number,
@@ -104,17 +107,18 @@ function toActive(
     bufferStartSec,
     widthHours,
     offsetSec,
-    gain: sample.gain,
-    pan: sample.pan,
+    gain: sampleTrackAutomation(sample, hour, "gain"),
+    pan: sampleTrackAutomation(sample, hour, "pan"),
+    filterHz: sampleTrackAutomation(sample, hour, "filterHz"),
     playbackRate: sample.playbackRate,
     fadeInSec: sample.fadeInSec,
     fadeOutSec: sample.fadeOutSec,
     randomPitchCents: sample.randomPitchCents,
-    reverbMix: sample.reverbMix,
+    reverbMix: sampleTrackAutomation(sample, hour, "reverbMix"),
     reverbDecay: sample.reverbDecay,
     delayTimeSec: sample.delayTimeSec,
     delayFeedback: sample.delayFeedback,
-    delayMix: sample.delayMix,
+    delayMix: sampleTrackAutomation(sample, hour, "delayMix"),
     triggerProbability: Math.max(
       0,
       Math.min(1, sample.triggerProbability),
@@ -124,7 +128,8 @@ function toActive(
 
 /**
  * Every clip whose span covers `hour` at the current day-cycle speed.
- * Params are taken from the library track (`Sample`), not the clip.
+ * Params are taken from the library track (`Sample`), with automation
+ * sampled at `hour`.
  */
 export function clipsActiveAt(
   hour: number,
@@ -150,7 +155,7 @@ export function clipsActiveAt(
       playSec,
     );
     if (offset == null) continue;
-    out.push(toActive(c, sample, offset, width, playSec, start));
+    out.push(toActive(c, sample, hour, offset, width, playSec, start));
   }
   return out;
 }

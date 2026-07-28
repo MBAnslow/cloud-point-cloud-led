@@ -282,7 +282,7 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                   ? "rgba(140,220,160,0.95)"
                   : "rgba(255,180,120,0.95)",
               }}
-              title="Relay must be running (npm run dev) to receive UDP OSC on port 999"
+              title="Relay must be running (npm run dev). Expects UDP OSC on port 999: /chainN/breath_binary or /breathN/breath_binary"
             >
               {(() => {
                 if (!isOscBreathConnected()) return "relay offline";

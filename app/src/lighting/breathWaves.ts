@@ -189,34 +189,37 @@ export class BreathWaveController {
     return this.waves;
   }
 
-  /**
-   * Advance the simulation. Wave ages use wall-clock `nowMs`
-   * (`performance.now()`). Pass `breathClockMs` for internal oscillator
-   * phase sampling (may be frozen while paused).
-   *
-   * Call {@link syncLedContact} afterward with live LED positions so
-   * waves despawn when they leave the cloud.
-   */
-  update(
-    nowMs: number,
-    params: BreathParams,
-    transform: CloudTransform,
-    breathClockMs: number = nowMs,
-  ): void {
-    // Safety prune only (waves that never hit the cloud).
-    this.waves = this.waves.filter((w) => nowMs - w.bornMs <= w.durationMs);
+/**
+ * Advance the simulation. Wave ages use wall-clock `nowMs`
+ * (`performance.now()`). Pass `breathClockMs` for internal oscillator
+ * phase sampling (may be frozen while paused).
+ *
+ * Call {@link syncLedContact} afterward with live LED positions so
+ * waves despawn when they leave the cloud.
+ */
+update(
+  nowMs: number,
+  params: BreathParams,
+  transform: CloudTransform,
+  breathClockMs: number = nowMs,
+): void {
+  // Safety prune only (waves that never hit the cloud).
+  this.waves = this.waves.filter((w) => nowMs - w.bornMs <= w.durationMs);
 
-    // Drain every pending OSC pulse (duplicates = independent spawns).
-    const oscExhaleChannels = consumeOscExhaleTriggers();
+  if (!params.enabled) {
+    // Drop pending OSC edges while inactive so they don't burst-fire
+    // when the breath window opens again.
+    consumeOscExhaleTriggers();
+    this.lastPhase.clear();
+    this.lastOscBinary.clear();
+    this.waves = [];
+    return;
+  }
 
-    if (!params.enabled) {
-      this.lastPhase.clear();
-      this.lastOscBinary.clear();
-      this.waves = [];
-      return;
-    }
+  // Drain every pending OSC pulse (duplicates = independent spawns).
+  const oscExhaleChannels = consumeOscExhaleTriggers();
 
-    const center = cloudCenterWorld(transform);
+  const center = cloudCenterWorld(transform);
     const cloudDist = Math.max(0.2, params.cloudDistance);
     const metrics = waveMetrics(params, cloudDist);
     const useInternal = params.triggerSource !== "osc";

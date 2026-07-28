@@ -1,7 +1,8 @@
 /**
  * WebSocket client that receives breath OSC forwards from the local
- * relay (UDP 999 → WS). TouchDesigner sends `/breathN/breath_binary`
- * etc.; the relay broadcasts `{ type: "oscBreath", channel, key, value }`.
+ * relay (UDP 999 → WS). TouchDesigner sends `/breathN/breath_binary` or
+ * `/chainN/breath_binary` etc.; the relay broadcasts
+ * `{ type: "oscBreath", channel, key, value }`.
  */
 
 export type OscBreathKey = "binary" | "thresholded";

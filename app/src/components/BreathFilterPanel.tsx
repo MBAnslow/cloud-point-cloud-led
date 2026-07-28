@@ -187,7 +187,8 @@ export function BreathFilterPanel({ visible = true }: { visible?: boolean }) {
       </div>
       <div style={{ marginTop: 6, fontSize: 10, opacity: 0.65, lineHeight: 1.35 }}>
         Show noise overrides the current view (including locate) with
-        cooldown rates (black = linger, white = snap). Turn it off to restore
+        cooldown rates (black = long fade, white = snap). Decay max is the
+        full fade length for black LEDs. Turn show-noise off to restore
         normal shading. Regenerate reshuffles the field.
       </div>
     </div>

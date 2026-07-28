@@ -206,6 +206,11 @@ export interface LightningParams {
   /** Optional looping background ambience (rain, thunder rumble, …). */
   backgroundSample: LightningSample | null;
   /**
+   * One-shot audio played when a storm sprite flash appears.
+   * Null = silent sprites (images still project).
+   */
+  spriteSample: LightningSample | null;
+  /**
    * Uploaded sprite image library. Each sprite trigger picks one at
    * random and projects it through the cloud along a random ±X/Y/Z axis.
    */
@@ -885,6 +890,30 @@ export interface PadParams {
   notes: PadNote[];
 }
 
+/** Day-timeline automation params on a sample library track. */
+export type SampleAutoParam =
+  | "gain"
+  | "pan"
+  | "filterHz"
+  | "reverbMix"
+  | "delayMix";
+
+export const SAMPLE_AUTO_PARAMS: SampleAutoParam[] = [
+  "gain",
+  "pan",
+  "filterHz",
+  "reverbMix",
+  "delayMix",
+];
+
+/** One breakpoint on the 24h sky timeline for a track automation lane. */
+export interface SampleAutoPoint {
+  id: string;
+  /** Sky hour, [0, 24). */
+  hour: number;
+  value: number;
+}
+
 /**
  * Uploaded audio-sample metadata + per-track playback settings.
  * The actual binary blob lives in IndexedDB keyed by `id`; only these
@@ -910,6 +939,11 @@ export interface Sample {
   gain: number;
   /** Stereo pan, [-1, 1]. */
   pan: number;
+  /**
+   * Per-voice lowpass cutoff (Hz). 20 kHz ≈ open. Overridden by
+   * `automation.filterHz` when that lane has points.
+   */
+  filterHz: number;
   /** Playback rate (>0). 1 = normal, 2 = double speed / octave up. */
   playbackRate: number;
   /** Fade-in duration in seconds (applied near buffer start). */
@@ -936,6 +970,11 @@ export interface Sample {
    * Rolled once per visit. 1 = always play.
    */
   triggerProbability: number;
+  /**
+   * Optional day-timeline automation curves. Empty / missing lane →
+   * use the matching static knob (`gain`, `pan`, …).
+   */
+  automation: Partial<Record<SampleAutoParam, SampleAutoPoint[]>>;
 }
 
 /** Defaults for a newly uploaded library track (trim end set at upload). */
@@ -943,6 +982,7 @@ export const DEFAULT_SAMPLE_TRACK = {
   trimStartSec: 0,
   gain: 1,
   pan: 0,
+  filterHz: 20000,
   playbackRate: 1,
   fadeInSec: 0.01,
   fadeOutSec: 0.05,
@@ -953,6 +993,7 @@ export const DEFAULT_SAMPLE_TRACK = {
   delayFeedback: 0.3,
   delayMix: 0,
   triggerProbability: 1,
+  automation: {},
 } as const satisfies Omit<Sample, "id" | "name" | "durationSec" | "trimEndSec">;
 
 /** Clamped trim window and playable length for a library sample. */
@@ -977,6 +1018,54 @@ export function samplePlayDurationSec(sample: Sample): number {
   return sampleTrimRange(sample).playSec;
 }
 
+function resolveSampleAutomation(
+  raw: unknown,
+): Partial<Record<SampleAutoParam, SampleAutoPoint[]>> {
+  if (!raw || typeof raw !== "object") return {};
+  const src = raw as Record<string, unknown>;
+  const out: Partial<Record<SampleAutoParam, SampleAutoPoint[]>> = {};
+  for (const param of SAMPLE_AUTO_PARAMS) {
+    const arr = src[param];
+    if (!Array.isArray(arr)) continue;
+    const points: SampleAutoPoint[] = [];
+    for (const item of arr) {
+      if (!item || typeof item !== "object") continue;
+      const o = item as Record<string, unknown>;
+      const hour = typeof o.hour === "number" && Number.isFinite(o.hour) ? o.hour : NaN;
+      const value =
+        typeof o.value === "number" && Number.isFinite(o.value) ? o.value : NaN;
+      if (!(hour >= 0) || !(value === value)) continue;
+      const id =
+        typeof o.id === "string" && o.id
+          ? o.id
+          : `auto-${param}-${points.length}-${Math.round(hour * 1000)}`;
+      points.push({
+        id,
+        hour: ((hour % 24) + 24) % 24,
+        value: clampSampleAutoValue(param, value),
+      });
+    }
+    if (points.length > 0) out[param] = points;
+  }
+  return out;
+}
+
+export function clampSampleAutoValue(
+  param: SampleAutoParam,
+  value: number,
+): number {
+  switch (param) {
+    case "gain":
+    case "reverbMix":
+    case "delayMix":
+      return Math.max(0, Math.min(1, value));
+    case "pan":
+      return Math.max(-1, Math.min(1, value));
+    case "filterHz":
+      return Math.max(20, Math.min(20000, value));
+  }
+}
+
 function resolveSampleTrackFields(
   raw: Record<string, unknown> | undefined,
   fallback?: Record<string, unknown>,
@@ -995,11 +1084,16 @@ function resolveSampleTrackFields(
     trimStartSec,
     Math.min(dur, g("trimEndSec", dur)),
   );
+  const automationRaw = raw?.automation ?? fallback?.automation;
   return {
     trimStartSec,
     trimEndSec,
     gain: Math.max(0, Math.min(1, g("gain", DEFAULT_SAMPLE_TRACK.gain))),
     pan: Math.max(-1, Math.min(1, g("pan", DEFAULT_SAMPLE_TRACK.pan))),
+    filterHz: Math.max(
+      20,
+      Math.min(20000, g("filterHz", DEFAULT_SAMPLE_TRACK.filterHz)),
+    ),
     playbackRate: Math.max(
       0.05,
       Math.min(8, g("playbackRate", DEFAULT_SAMPLE_TRACK.playbackRate)),
@@ -1037,6 +1131,7 @@ function resolveSampleTrackFields(
         g("triggerProbability", DEFAULT_SAMPLE_TRACK.triggerProbability),
       ),
     ),
+    automation: resolveSampleAutomation(automationRaw),
   };
 }
 
@@ -1877,6 +1972,7 @@ const DEFAULTS = {
     boltSamples: [],
     strikeSample: null,
     backgroundSample: null,
+    spriteSample: null,
     spriteSamples: [],
     spriteDurationMs: 180,
     spriteStrobeHz: 18,
@@ -3218,6 +3314,11 @@ function resolveLightning(input: unknown): LightningParams {
       if (!raw || typeof raw !== "object") return null;
       return resolveLightningSample(raw as Record<string, unknown>);
     })(),
+    spriteSample: (() => {
+      const raw = (saved as Record<string, unknown>).spriteSample;
+      if (!raw || typeof raw !== "object") return null;
+      return resolveLightningSample(raw as Record<string, unknown>);
+    })(),
     spriteSamples: resolveLightningSpriteSamples(
       (saved as Record<string, unknown>).spriteSamples,
     ),
@@ -3578,7 +3679,12 @@ export const useSimStore = create<SimState>((set) => ({
         ...s.samples,
         library: s.samples.library.map((x) => {
           if (x.id !== id) return x;
-          const next = { ...x, ...patch };
+          const next = {
+            ...x,
+            filterHz: x.filterHz ?? DEFAULT_SAMPLE_TRACK.filterHz,
+            automation: x.automation ?? {},
+            ...patch,
+          };
           const dur = Math.max(0, next.durationSec);
           const start = Math.max(
             0,

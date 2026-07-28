@@ -1,8 +1,8 @@
 /**
  * Per-LED breath-filter memory: follows breath while the wave covers an
- * LED, then lingers after release for up to `decayMaxSeconds` (shortened
- * by spatial cooldown noise). Low-noise LEDs keep their latched reveal
- * until the hold expires; high-noise LEDs clear sooner.
+ * LED, then fades out after release over up to `decayMaxSeconds`
+ * (shortened by spatial cooldown noise). Low-noise LEDs linger longest;
+ * high-noise LEDs fade out sooner.
  */
 
 import type { BreathFilterKeyframe, BreathFilterParams } from "../state";
@@ -21,8 +21,8 @@ const MASK_ACTIVE = 0.04;
 export const BREATH_FILTER_DECAY_MAX_SEC = 30;
 
 /**
- * Hold after release before clear.
- * noise=0 → full decayMaxSeconds (linger)
+ * Fade duration after release.
+ * noise=0 → full decayMaxSeconds (slow linger fade)
  * noise=1 → 0 (clear on the next frame)
  */
 function holdTimeSec(noise: number, decayMaxSeconds: number): number {
@@ -105,10 +105,10 @@ export function buildCooldownRates(
 
 /**
  * While mask active: latch up to mask, reset release age.
- * Once released: keep the latched reveal until `hold` seconds elapse
- * (≤ Decay max, shortened by noise), then hard-clear. An older
- * exp(-4/hold) fade wiped most of the reveal in the first quarter of
- * Decay max even when the slider was high.
+ * Once released: linearly fade the latched reveal down to the threshold
+ * floor over `hold` seconds (≤ Decay max, shortened by noise). Hold=0
+ * snaps immediately. This replaces the previous latch-then-hard-clear
+ * (abrupt) and the older exp(-4/hold) fade (too fast vs Decay max).
  */
 export function updateBreathFilterMemory(
   memory: Float32Array,
@@ -141,14 +141,24 @@ export function updateBreathFilterMemory(
       if (mask > v) v = mask;
       age = 0;
     } else if (v > floor + 1e-4 && dt > 0) {
+      const ageBefore = age;
       age += dt;
       const noise = clamp01(cooldownRates[i] ?? 0);
       const hold = holdTimeSec(noise, maxSec);
       if (hold <= 1e-4 || age >= hold) {
         v = floor;
         age = Math.max(age, hold);
+      } else {
+        // Linear fade across the full hold window so Decay max is the
+        // audible/visible linger length, not a delayed hard cut.
+        const remBefore = hold - ageBefore;
+        const remAfter = hold - age;
+        if (remBefore > 1e-9) {
+          v = floor + (v - floor) * (remAfter / remBefore);
+        } else {
+          v = floor;
+        }
       }
-      // else: keep latched `v` for the full hold window
     } else {
       v = floor;
     }

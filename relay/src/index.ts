@@ -143,8 +143,13 @@ function unpackOsc(buf: Buffer, out: { address: string; value: number }[]): void
   if (parsed) out.push(parsed);
 }
 
+/**
+ * Accepted OSC addresses (channel N → breath participant N):
+ *   /breathN/breath_binary | /breathN/binary | /breath_binary (→1)
+ *   /chainN/breath_binary  | /chainN/binary  (TouchDesigner CHOP export)
+ */
 const BREATH_RE =
-  /^\/?breath[_\s-]?(\d+)\/(breath[_\s-]?)?(binary|thresholded)$/i;
+  /^\/?(?:breath|chain)[_\s-]?(\d+)\/(?:breath[_\s-]?)?(binary|thresholded)$/i;
 /** Single-channel forms TouchDesigner often emits from a CHOP named breath_binary. */
 const BREATH_FLAT_RE = /^\/?breath[_\s-]?(binary|thresholded)$/i;
 
@@ -206,7 +211,7 @@ function resolveBreathAddress(
   if (m) {
     const channel = Number(m[1]);
     if (!Number.isFinite(channel) || channel < 1) return null;
-    const key = m[3].toLowerCase().startsWith("binary")
+    const key = m[2].toLowerCase().startsWith("binary")
       ? "binary"
       : "thresholded";
     return { channel, key };

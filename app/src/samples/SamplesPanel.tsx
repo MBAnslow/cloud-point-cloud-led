@@ -11,6 +11,7 @@ import {
   useSimStore,
   type DroneLfoShape,
   type Sample,
+  type SampleAutoParam,
   type SampleClip,
   DEFAULT_SAMPLE_TRACK,
   samplePlayDurationSec,
@@ -22,11 +23,16 @@ import { invalidateSamplePeaks } from "./samplePeaks";
 import { SampleWaveform } from "./SampleWaveform";
 import { getSampleEngine } from "../audio/SampleEngine";
 import { SampleClipEditor } from "./SampleClipEditor";
+import { SampleAutomationStrip } from "./SampleAutomationStrip";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
 
 const HOURS = 24;
-/** Taller lanes so waveforms and clip names have room. */
-const LANE_HEIGHT = 72;
+/** Clip waveform / placement area within each track row. */
+const CLIP_LANE_HEIGHT = 56;
+/** Param tabs + automation curve strip under each clip lane. */
+const AUTO_STRIP_HEIGHT = 64;
+/** Full row = clip lane + automation. */
+const ROW_HEIGHT = CLIP_LANE_HEIGHT + AUTO_STRIP_HEIGHT;
 const LIBRARY_WIDTH = 220;
 /** Floor so very short clips stay clickable on the lane. */
 const CLIP_MIN_WIDTH_PX = 8;
@@ -135,6 +141,10 @@ export function SamplesPanel() {
   const dragRef = useRef<DragState | null>(null);
   const scrubbingRef = useRef(false);
   const [dragSampleId, setDragSampleId] = useState<string | null>(null);
+  /** Active automation param per library track id. */
+  const [autoParamBySample, setAutoParamBySample] = useState<
+    Record<string, SampleAutoParam>
+  >({});
 
   const laneIndexBySampleId = useMemo(() => {
     const m = new Map<string, number>();
@@ -148,7 +158,7 @@ export function SamplesPanel() {
   }, [samples.library]);
 
   const laneCount = Math.max(1, samples.library.length);
-  const rollHeight = laneCount * LANE_HEIGHT;
+  const rollHeight = laneCount * ROW_HEIGHT;
   const labelStep = hourLabelStep(zoom);
   const rulerHours = useMemo(() => hourTicks(labelStep), [labelStep]);
 
@@ -160,7 +170,7 @@ export function SamplesPanel() {
     const y = Math.max(0, Math.min(rect.height - 1, clientY - rect.top));
     return {
       hour: (x / rect.width) * HOURS,
-      lane: Math.floor(y / LANE_HEIGHT),
+      lane: Math.floor(y / ROW_HEIGHT),
     };
   }, []);
 
@@ -570,6 +580,7 @@ export function SamplesPanel() {
             <span style={{ fontSize: 11, opacity: 0.6 }}>
               drag a sample from the library onto a lane · drag block to move
               · Del to remove · drag ruler to scrub · ⌘/Ctrl+wheel to zoom ·
+              click automation strip for Vol/Pan/Filter/Rev/Delay curves ·
               audio follows the playhead through each clip
             </span>
             <label
@@ -665,7 +676,7 @@ export function SamplesPanel() {
                   }}
                   onDragEnd={() => setDragSampleId(null)}
                   style={{
-                    height: LANE_HEIGHT,
+                    height: ROW_HEIGHT,
                     display: "flex",
                     alignItems: "stretch",
                     gap: 6,
@@ -730,6 +741,26 @@ export function SamplesPanel() {
                       />
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void getSampleEngine()
+                        .previewSample(s)
+                        .catch((err) =>
+                          console.warn("[samples] preview failed", err),
+                        );
+                    }}
+                    style={{
+                      ...btn,
+                      padding: "1px 5px",
+                      fontSize: 10,
+                      alignSelf: "center",
+                    }}
+                    title="Preview this track (ignores arrangement)"
+                  >
+                    ▶
+                  </button>
                   <button
                     onClick={() => void deleteSample(s.id)}
                     style={{
@@ -805,16 +836,16 @@ export function SamplesPanel() {
                       cursor: dragSampleId ? "copy" : "default",
                     }}
                   >
-                    {/* Lane rows */}
-                    {Array.from({ length: laneCount }, (_, lane) => (
+                    {/* Lane rows: clip band + automation strip */}
+                    {samples.library.map((s, lane) => (
                       <div
-                        key={lane}
+                        key={s.id}
                         style={{
                           position: "absolute",
                           left: 0,
                           right: 0,
-                          top: lane * LANE_HEIGHT,
-                          height: LANE_HEIGHT,
+                          top: lane * ROW_HEIGHT,
+                          height: ROW_HEIGHT,
                           borderTop: "1px solid rgba(255,255,255,0.08)",
                           background:
                             lane % 2 === 0
@@ -822,8 +853,33 @@ export function SamplesPanel() {
                               : "rgba(255,255,255,0.035)",
                           pointerEvents: "none",
                         }}
-                      />
+                      >
+                        <div
+                          style={{
+                            position: "absolute",
+                            left: 0,
+                            right: 0,
+                            top: CLIP_LANE_HEIGHT,
+                            height: 1,
+                            background: "rgba(255,255,255,0.06)",
+                          }}
+                        />
+                      </div>
                     ))}
+                    {samples.library.length === 0 && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          right: 0,
+                          top: 0,
+                          height: ROW_HEIGHT,
+                          borderTop: "1px solid rgba(255,255,255,0.08)",
+                          background: "rgba(255,255,255,0.015)",
+                          pointerEvents: "none",
+                        }}
+                      />
+                    )}
                     {/* Hour gridlines — denser when zoomed */}
                     {Array.from(
                       {
@@ -895,11 +951,11 @@ export function SamplesPanel() {
                           onPointerDown={(e) => beginClipDrag(e, c.id)}
                           style={{
                             position: "absolute",
-                            top: lane * LANE_HEIGHT + 3,
+                            top: lane * ROW_HEIGHT + 3,
                             left: `${leftPct}%`,
                             width: `${widthPct}%`,
                             minWidth: CLIP_MIN_WIDTH_PX,
-                            height: LANE_HEIGHT - 6,
+                            height: CLIP_LANE_HEIGHT - 6,
                             background: isSel
                               ? "linear-gradient(180deg,#fb923c,#ea580c)"
                               : "linear-gradient(180deg,#c2410caa,#9a3412aa)",
@@ -953,6 +1009,39 @@ export function SamplesPanel() {
                           >
                             {sample.name}
                           </div>
+                        </div>
+                      );
+                    })}
+                    {/* Per-track automation strips under each clip lane */}
+                    {samples.library.map((s, lane) => {
+                      const param = autoParamBySample[s.id] ?? "gain";
+                      return (
+                        <div
+                          key={`auto-${s.id}`}
+                          style={{
+                            position: "absolute",
+                            left: 0,
+                            right: 0,
+                            top: lane * ROW_HEIGHT + CLIP_LANE_HEIGHT,
+                            height: AUTO_STRIP_HEIGHT,
+                            pointerEvents: "auto",
+                            zIndex: 3,
+                          }}
+                          onPointerDown={(e) => e.stopPropagation()}
+                        >
+                          <SampleAutomationStrip
+                            sample={s}
+                            param={param}
+                            onParamChange={(p) =>
+                              setAutoParamBySample((prev) => ({
+                                ...prev,
+                                [s.id]: p,
+                              }))
+                            }
+                            onChangeTrack={(patch) => updateSample(s.id, patch)}
+                            playheadHour={timeHours}
+                            height={AUTO_STRIP_HEIGHT}
+                          />
                         </div>
                       );
                     })}
