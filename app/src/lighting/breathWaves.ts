@@ -175,9 +175,10 @@ export function waveLocalFrame(
 
 /**
  * Stateful tracker for travelling exhale waves. Spawn on exhale onset
- * (OSC breath-out and/or internal oscillator); advance on wall clock so
- * motion is decoupled from breath pause/scrub. Despawn as soon as a wave
- * that has touched the LED cloud loses all LED contact.
+ * from exactly one source (`triggerSource`: internal oscillator **or**
+ * OSC) — never both. Advance on wall clock so motion is decoupled from
+ * breath pause/scrub. Despawn as soon as a wave that has touched the
+ * LED cloud loses all LED contact.
  */
 export class BreathWaveController {
   private waves: BreathWave[] = [];
@@ -216,39 +217,41 @@ update(
     return;
   }
 
-  // Drain every pending OSC pulse (duplicates = independent spawns).
-  const oscExhaleChannels = consumeOscExhaleTriggers();
-
   const center = cloudCenterWorld(transform);
-    const cloudDist = Math.max(0.2, params.cloudDistance);
-    const metrics = waveMetrics(params, cloudDist);
-    const useInternal = params.triggerSource !== "osc";
+  const cloudDist = Math.max(0.2, params.cloudDistance);
+  const metrics = waveMetrics(params, cloudDist);
+  const useOsc = params.triggerSource === "osc";
 
-    const spawnWave = (p: BreathParticipant) => {
-      const origin = participantWorldPos(
-        p,
-        cloudDist,
-        params.horizonDistance,
-        transform,
-      );
-      const dx = center[0] - origin[0];
-      const dy = center[1] - origin[1];
-      const dz = center[2] - origin[2];
-      const len = Math.hypot(dx, dy, dz) || 1;
-      this.waves.push({
-        participantId: p.id,
-        color: p.color,
-        bornMs: nowMs,
-        origin,
-        direction: [dx / len, dy / len, dz / len],
-        speed: metrics.speed,
-        durationMs: metrics.durationMs,
-        peakStrength: 1,
-        fogSeed: p.fogSeed >>> 0,
-        hasTouchedLed: false,
-      });
-    };
+  const spawnWave = (p: BreathParticipant) => {
+    const origin = participantWorldPos(
+      p,
+      cloudDist,
+      params.horizonDistance,
+      transform,
+    );
+    const dx = center[0] - origin[0];
+    const dy = center[1] - origin[1];
+    const dz = center[2] - origin[2];
+    const len = Math.hypot(dx, dy, dz) || 1;
+    this.waves.push({
+      participantId: p.id,
+      color: p.color,
+      bornMs: nowMs,
+      origin,
+      direction: [dx / len, dy / len, dz / len],
+      speed: metrics.speed,
+      durationMs: metrics.durationMs,
+      peakStrength: 1,
+      fogSeed: p.fogSeed >>> 0,
+      hasTouchedLed: false,
+    });
+  };
 
+  if (useOsc) {
+    // OSC mode: only rising-edge binary pulses spawn. Internal phase
+    // memory is cleared so switching back doesn't inherit a stale edge.
+    this.lastPhase.clear();
+    const oscExhaleChannels = consumeOscExhaleTriggers();
     for (const channel of oscExhaleChannels) {
       const pi = channel - 1;
       if (pi < 0 || pi >= params.participants.length) continue;
@@ -256,30 +259,40 @@ update(
       if (!p.enabled) continue;
       spawnWave(p);
     }
+  } else {
+    // Internal mode: discard OSC pulses so they never leak into spawns
+    // (and don't pile up for a burst when switching to OSC later).
+    consumeOscExhaleTriggers();
+  }
 
-    for (let pi = 0; pi < params.participants.length; pi++) {
-      const p = params.participants[pi];
-      if (!p.enabled) {
-        this.lastPhase.delete(p.id);
-        this.lastOscBinary.delete(p.id);
-        continue;
-      }
+  for (let pi = 0; pi < params.participants.length; pi++) {
+    const p = params.participants[pi];
+    if (!p.enabled) {
+      this.lastPhase.delete(p.id);
+      this.lastOscBinary.delete(p.id);
+      continue;
+    }
 
-      const channel = pi + 1;
-      this.lastOscBinary.set(p.id, getOscBreathBinary(channel));
+    const channel = pi + 1;
+    this.lastOscBinary.set(p.id, getOscBreathBinary(channel));
 
-      if (useInternal) {
-        const sample = sampleParticipantBreath(p, params, breathClockMs);
-        const prev = this.lastPhase.get(p.id);
-        this.lastPhase.set(p.id, sample.phase);
-        if (sample.phase === "exhale" && prev !== "exhale") {
-          spawnWave(p);
-        }
-      } else {
-        this.lastPhase.delete(p.id);
-      }
+    if (useOsc) continue;
+
+    const sample = sampleParticipantBreath(p, params, breathClockMs);
+    const prev = this.lastPhase.get(p.id);
+    this.lastPhase.set(p.id, sample.phase);
+    // Require a known prior phase so window open / mode switch / first
+    // frame mid-exhale cannot count as a fresh onset (that was firing
+    // waves far more often than one per cycle).
+    if (
+      prev !== undefined &&
+      sample.phase === "exhale" &&
+      prev !== "exhale"
+    ) {
+      spawnWave(p);
     }
   }
+}
 
   /**
    * Mark waves that currently overlap any LED; remove waves that previously

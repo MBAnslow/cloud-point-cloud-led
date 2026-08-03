@@ -14,6 +14,7 @@ import { CloudPanel } from "./components/CloudPanel";
 import { PresetsPanel } from "./components/PresetsPanel";
 import { SkyTimeline } from "./components/SkyTimeline";
 import { Ellipsoid } from "./scene/Ellipsoid";
+import { CloudTop } from "./scene/CloudTop";
 import { BreathArea } from "./scene/BreathArea";
 import { HorizonGuide } from "./scene/HorizonGuide";
 import { Leds } from "./scene/Leds";
@@ -79,6 +80,7 @@ export default function App() {
         <HorizonGuide />
         <Ellipsoid />
         <Leds />
+        <CloudTop />
         <BreathArea />
         <LightningBolts />
 

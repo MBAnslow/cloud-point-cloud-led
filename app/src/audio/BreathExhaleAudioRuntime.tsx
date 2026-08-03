@@ -5,7 +5,7 @@ import { getBreathExhaleAudioEngine } from "./BreathExhaleAudioEngine";
 
 /**
  * Fires the breath-out one-shot once per newly spawned travelling wave
- * (internal exhale edge or OSC breath-out). Same bornMs watermark
+ * (whichever exclusive trigger source is selected). Same bornMs watermark
  * pattern as LightningAudioRuntime.
  */
 export function BreathExhaleAudioRuntime(): null {

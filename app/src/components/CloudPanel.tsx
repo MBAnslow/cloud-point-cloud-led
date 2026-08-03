@@ -1,9 +1,16 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import {
   useSimStore,
+  type CloudTopParams,
   type CloudParams,
   type StrandParams,
 } from "../state";
+import {
+  deleteMeshBlob,
+  invalidateMeshGeometry,
+  loadMeshGeometry,
+  putMeshBlob,
+} from "../mapping/meshAsset";
 import { useDraggable } from "./useDraggable";
 
 /**
@@ -13,8 +20,11 @@ import { useDraggable } from "./useDraggable";
 export function CloudPanel({ visible = true }: { visible?: boolean }) {
   const cloud = useSimStore((s) => s.cloud);
   const setCloud = useSimStore((s) => s.setCloud);
+  const cloudTop = useSimStore((s) => s.cloudTop);
+  const setCloudTop = useSimStore((s) => s.setCloudTop);
   const strand = useSimStore((s) => s.strand);
   const setStrand = useSimStore((s) => s.setStrand);
+  const [cloudTopError, setCloudTopError] = useState("");
   const panelRef = useRef<HTMLDivElement | null>(null);
   const { pos, handleProps } = useDraggable(panelRef);
   const dynStyle: React.CSSProperties = pos
@@ -22,6 +32,7 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
     : {};
   if (!visible) return null;
   const upd = (patch: Partial<CloudParams>) => setCloud(patch);
+  const updCloudTop = (patch: Partial<CloudTopParams>) => setCloudTop(patch);
   const updStrand = (patch: Partial<StrandParams>) => setStrand(patch);
   return (
     <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
@@ -36,7 +47,7 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
             checked={cloud.showOpacity}
             onChange={(e) => upd({ showOpacity: e.target.checked })}
           />
-          show cloud
+          show pyramid shell
         </label>
         <label style={inlineLabel}>
           <input
@@ -101,6 +112,175 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
           step={0.01}
           onChange={(v) => upd({ offsetZ: v })}
           formatValue={(v) => `${v.toFixed(2)} m`}
+        />
+        <div style={sectionLabel}>Cloud top</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <label style={inlineLabel}>
+            <input
+              type="checkbox"
+              checked={cloudTop.visible}
+              onChange={(e) => updCloudTop({ visible: e.target.checked })}
+            />
+            show cloud top
+          </label>
+          <span
+            title={cloudTop.name}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              opacity: 0.75,
+            }}
+          >
+            {cloudTop.id ? cloudTop.name : "No model loaded"}
+          </span>
+          {cloudTop.id && (
+            <button
+              type="button"
+              style={smallButtonStyle}
+              onClick={() => {
+                const id = cloudTop.id;
+                if (id) {
+                  invalidateMeshGeometry(id);
+                  void deleteMeshBlob(id);
+                }
+                updCloudTop({ id: null, name: "" });
+                setCloudTopError("");
+              }}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+        <label style={{ ...smallButtonStyle, display: "inline-block", cursor: "pointer" }}>
+          {cloudTop.id ? "Replace GLB" : "Upload GLB"}
+          <input
+            type="file"
+            accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+            style={{ display: "none" }}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (!file) return;
+              const id = `cloud-top-${Date.now().toString(36)}-${Math.random()
+                .toString(36)
+                .slice(2, 8)}`;
+              try {
+                await putMeshBlob(id, file);
+                const geometry = await loadMeshGeometry(id);
+                if (!geometry) throw new Error("The file contains no mesh geometry.");
+                const previousId = cloudTop.id;
+                updCloudTop({ id, name: file.name, visible: true });
+                if (previousId) {
+                  invalidateMeshGeometry(previousId);
+                  void deleteMeshBlob(previousId);
+                }
+                setCloudTopError("");
+              } catch (err) {
+                invalidateMeshGeometry(id);
+                void deleteMeshBlob(id);
+                setCloudTopError(
+                  err instanceof Error ? err.message : "Could not load this model.",
+                );
+              }
+            }}
+          />
+        </label>
+        {cloudTopError && (
+          <div style={{ color: "#ff9f9f", fontSize: 10 }}>{cloudTopError}</div>
+        )}
+        <SliderRow
+          label="Top scale"
+          value={cloudTop.scale}
+          min={0.05}
+          max={10}
+          step={0.05}
+          onChange={(v) => updCloudTop({ scale: v })}
+          formatValue={(v) => `${v.toFixed(2)}×`}
+        />
+        <SliderRow
+          label="Top yaw"
+          value={cloudTop.yawDeg}
+          min={-180}
+          max={180}
+          step={1}
+          onChange={(v) => updCloudTop({ yawDeg: v })}
+          formatValue={(v) => `${v.toFixed(0)}°`}
+        />
+        <SliderRow
+          label="Top tilt"
+          value={cloudTop.tiltDeg}
+          min={-180}
+          max={180}
+          step={1}
+          onChange={(v) => updCloudTop({ tiltDeg: v })}
+          formatValue={(v) => `${v.toFixed(0)}°`}
+        />
+        <SliderRow
+          label="Top X"
+          value={cloudTop.offsetX}
+          min={-5}
+          max={5}
+          step={0.01}
+          onChange={(v) => updCloudTop({ offsetX: v })}
+          formatValue={(v) => `${v.toFixed(2)} m`}
+        />
+        <SliderRow
+          label="Top Y"
+          value={cloudTop.offsetY}
+          min={-5}
+          max={5}
+          step={0.01}
+          onChange={(v) => updCloudTop({ offsetY: v })}
+          formatValue={(v) => `${v.toFixed(2)} m`}
+        />
+        <SliderRow
+          label="Top Z"
+          value={cloudTop.offsetZ}
+          min={-5}
+          max={5}
+          step={0.01}
+          onChange={(v) => updCloudTop({ offsetZ: v })}
+          formatValue={(v) => `${v.toFixed(2)} m`}
+        />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+          <span style={{ width: 80, opacity: 0.85 }}>Top tint</span>
+          <input
+            type="color"
+            value={cloudTop.tint}
+            onChange={(e) => updCloudTop({ tint: e.target.value })}
+            style={{ width: 42, height: 22, padding: 0, border: 0 }}
+          />
+          <span style={{ opacity: 0.7 }}>{cloudTop.tint}</span>
+        </div>
+        <SliderRow
+          label="LED glow"
+          value={cloudTop.glowStrength}
+          min={0}
+          max={5}
+          step={0.05}
+          onChange={(v) => updCloudTop({ glowStrength: v })}
+          formatValue={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="Glow spread"
+          value={cloudTop.glowRadius}
+          min={0.02}
+          max={1.5}
+          step={0.01}
+          onChange={(v) => updCloudTop({ glowRadius: v })}
+          formatValue={(v) => `${v.toFixed(2)} m`}
+        />
+        <SliderRow
+          label="Glow focus"
+          value={cloudTop.glowFocus}
+          min={1}
+          max={16}
+          step={0.25}
+          onChange={(v) => updCloudTop({ glowFocus: v })}
+          formatValue={(v) => v.toFixed(1)}
         />
         <div style={sectionLabel}>Strand</div>
         <SliderRow
@@ -206,4 +386,13 @@ const inlineLabel: React.CSSProperties = {
   alignItems: "center",
   gap: 5,
   fontSize: 11,
+};
+
+const smallButtonStyle: React.CSSProperties = {
+  background: "rgba(255,255,255,0.06)",
+  border: "1px solid rgba(255,255,255,0.15)",
+  borderRadius: 5,
+  color: "inherit",
+  padding: "3px 7px",
+  fontSize: 10,
 };

@@ -45,7 +45,7 @@ import { activeWindowProgress, hourInRange, isBreathActive, useSimStore } from "
 import { computeSkyLighting } from "../lighting/skyCycle";
 import { sharedLightningController } from "../lighting/lightning";
 import { WledStreamClient } from "../wled/client";
-import { publishFrame } from "../stream/frameBuffer";
+import { publishFrame, publishLedPositions } from "../stream/frameBuffer";
 
 function clamp01(v: number): number {
   if (v <= 0) return 0;
@@ -90,6 +90,7 @@ function offsetXZ(v: [number, number, number], x: number, z: number): [number, n
 export function Leds() {
   const ellipsoid = useSimStore((s) => s.ellipsoid);
   const cloud = useSimStore((s) => s.cloud);
+  const cloudTop = useSimStore((s) => s.cloudTop);
   const strand = useSimStore((s) => s.strand);
   const mapping = useSimStore((s) => s.mapping);
   const meshTarget = useSimStore((s) => s.mesh);
@@ -128,6 +129,7 @@ export function Leds() {
       n,
       positions: new Float32Array(n * 3),
       normals: new Float32Array(n * 3),
+      validPositions: new Uint8Array(n),
       colorFloats: new Float32Array(n * 3),
       timeColorFloats: new Float32Array(n * 3),
       breathColorFloats: new Float32Array(n * 3),
@@ -185,6 +187,8 @@ export function Leds() {
       // the reverse toggle flips which physical end is LED #0.
       const physical = mapping.reversed ? buffers.n - 1 - i : i;
       const led = mapping.leds[physical];
+      const hasPosition = !!led.pos;
+      buffers.validPositions[i] = hasPosition ? 1 : 0;
       // LEDs without a mesh-mode record contribute an origin dummy (0,0,0)
       // so they still count in the strand but have no visible position.
       const rawPos: [number, number, number] = led.pos
@@ -256,6 +260,14 @@ export function Leds() {
       const normalVec = new Vector3();
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
+        if (!buffers.validPositions[i]) {
+          dummy.position.set(0, 0, 0);
+          dummy.quaternion.identity();
+          dummy.scale.setScalar(0);
+          dummy.updateMatrix();
+          mesh.setMatrixAt(i, dummy.matrix);
+          continue;
+        }
         const nx = buffers.normals[i3];
         const ny = buffers.normals[i3 + 1];
         const nz = buffers.normals[i3 + 2];
@@ -276,6 +288,12 @@ export function Leds() {
       mesh.count = buffers.n;
     }
     positionsVersionRef.current += 1;
+    publishLedPositions(
+      buffers.positions,
+      buffers.normals,
+      buffers.n,
+      buffers.validPositions,
+    );
   }, [
     ellipsoid.rx,
     ellipsoid.ry,
@@ -725,24 +743,26 @@ export function Leds() {
         const inhaleMask = useMemFilter
           ? breathFilterGate(buffers.breathFilterMemory[i], thresh)
           : clamp01((br + bg + bb) / 3);
-        if (breathTimeCombineMode === "revealOnInhale") {
-          // Hide time-of-day by default and reveal it where the filter is active.
-          r = tr * inhaleMask;
-          g = tg * inhaleMask;
-          b = tb * inhaleMask;
-        } else {
-          // Linear filter depth: 0 = unfiltered time-of-day, 1 = fully masked.
-          const filter = 1 - mix + mix * inhaleMask;
-          r = tr * filter;
-          g = tg * filter;
-          b = tb * filter;
-        }
-        // Participant-colour rim shell around the wave surface.
-        const w = clamp01(buffers.breathRimWeights[i] * rimAmount);
-        if (w > 0) {
-          r = r + (buffers.breathRimColors[i3] - r) * w;
-          g = g + (buffers.breathRimColors[i3 + 1] - g) * w;
-          b = b + (buffers.breathRimColors[i3 + 2] - b) * w;
+        if (breathLive && ledStreamPipeline.breathStage) {
+          if (breathTimeCombineMode === "revealOnInhale") {
+            // During the breath period, reveal time-of-day where inhale is active.
+            r = tr * inhaleMask;
+            g = tg * inhaleMask;
+            b = tb * inhaleMask;
+          } else {
+            // Linear filter depth: 0 = unfiltered time-of-day, 1 = fully masked.
+            const filter = 1 - mix + mix * inhaleMask;
+            r = tr * filter;
+            g = tg * filter;
+            b = tb * filter;
+          }
+          // Participant-colour rim shell around the active wave surface.
+          const w = clamp01(buffers.breathRimWeights[i] * rimAmount);
+          if (w > 0) {
+            r = r + (buffers.breathRimColors[i3] - r) * w;
+            g = g + (buffers.breathRimColors[i3 + 1] - g) * w;
+            b = b + (buffers.breathRimColors[i3 + 2] - b) * w;
+          }
         }
         r = clamp01(r + buffers.lightningColorFloats[i3]);
         g = clamp01(g + buffers.lightningColorFloats[i3 + 1]);
@@ -840,6 +860,19 @@ export function Leds() {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
+    // Unmapped strand slots retain their physical indices but must not emit
+    // from the origin or contribute to the cloud-top diffuser.
+    for (let i = 0; i < buffers.n; i++) {
+      if (buffers.validPositions[i]) continue;
+      const i3 = i * 3;
+      buffers.colorFloats[i3] = 0;
+      buffers.colorFloats[i3 + 1] = 0;
+      buffers.colorFloats[i3 + 2] = 0;
+      buffers.colorBytes[i3] = 0;
+      buffers.colorBytes[i3 + 1] = 0;
+      buffers.colorBytes[i3 + 2] = 0;
+    }
+
     // Suppress 1-LSB chatter in streamed bytes. This removes tiny histogram
     // flicker from floating-point noise while preserving meaningful motion.
     const byteCount = buffers.n * 3;
@@ -856,6 +889,16 @@ export function Leds() {
           stable[i] = next;
         }
       }
+    }
+    for (let i = 0; i < buffers.n; i++) {
+      if (buffers.validPositions[i]) continue;
+      const i3 = i * 3;
+      buffers.colorBytes[i3] = 0;
+      buffers.colorBytes[i3 + 1] = 0;
+      buffers.colorBytes[i3 + 2] = 0;
+      stableBytesRef.current![i3] = 0;
+      stableBytesRef.current![i3 + 1] = 0;
+      stableBytesRef.current![i3 + 2] = 0;
     }
 
     publishFrame(buffers.colorBytes, buffers.n);
@@ -878,6 +921,11 @@ export function Leds() {
     toggleLocatedLed(e.instanceId);
   };
 
+  // Keep the instanced mesh mounted while the diffuser is shown. Unmounting
+  // it loses the mapped instance matrices; remounting would briefly place
+  // every default instance at the origin as one large overlapping cap.
+  const showDirectLeds = !(cloudTop.id && cloudTop.visible);
+
   if (ledDisplayMode === "leds") {
     return (
       <instancedMesh
@@ -885,6 +933,7 @@ export function Leds() {
         ref={meshRef}
         args={[undefined, undefined, buffers.n]}
         frustumCulled={false}
+        visible={showDirectLeds}
         onPointerDown={onPointerDown}
         renderOrder={5}
       >
@@ -902,7 +951,7 @@ export function Leds() {
           opacity={1}
           side={FrontSide}
           blending={AdditiveBlending}
-          depthTest={false}
+          depthTest
           depthWrite={false}
         />
       </instancedMesh>
@@ -915,6 +964,7 @@ export function Leds() {
       ref={meshRef}
       args={[undefined, undefined, buffers.n]}
       frustumCulled={false}
+      visible={showDirectLeds}
       onPointerDown={onPointerDown}
     >
       {/* Sensor cap: outward hemisphere embedded in the cloud surface. */}

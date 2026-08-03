@@ -2,6 +2,7 @@ import type {
   AmbientLightParams,
   BreathTimeCombineMode,
   BreathParams,
+  CloudTopParams,
   CloudParams,
   DirectionalLightParams,
   DayCycleParams,
@@ -32,6 +33,7 @@ export interface Snapshot {
   version: typeof SCHEMA_VERSION;
   ellipsoid: EllipsoidParams;
   cloud: CloudParams;
+  cloudTop?: CloudTopParams;
   strand: StrandParams;
   ambient: AmbientLightParams;
   directional: DirectionalLightParams;
@@ -47,6 +49,7 @@ export interface Snapshot {
   masterFx?: MasterFxParams;
   breathMod?: Record<string, number>;
   breathModEnabled?: boolean;
+  breathModRevealCeiling?: number;
   ledViewMode?: LedViewMode;
   ledDisplayMode?: LedDisplayMode;
   breathTimeCombineMode?: BreathTimeCombineMode;

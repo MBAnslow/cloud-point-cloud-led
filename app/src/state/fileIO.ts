@@ -160,7 +160,10 @@ export async function autosaveBoundFileIfPermitted(): Promise<boolean> {
   const handle = await getConfigHandle();
   if (!handle) return false;
   try {
-    const status = await handle.queryPermission({ mode: "readwrite" });
+    const permissionHandle = handle as FileSystemFileHandle & {
+      queryPermission: (opts: { mode: "readwrite" }) => Promise<PermissionState>;
+    };
+    const status = await permissionHandle.queryPermission({ mode: "readwrite" });
     if (status !== "granted") return false;
     await writeYamlToHandle(handle, snapshotToYaml(currentSnapshot()));
     return true;
@@ -233,6 +236,7 @@ export interface MissingAssets {
   lightningSprites: { id: string; name: string }[];
   breathExhale: { id: string; name: string } | null;
   mesh: { id: string; name: string } | null;
+  cloudTop: { id: string; name: string } | null;
 }
 
 /**
@@ -335,6 +339,7 @@ async function auditBinaryAssets(state: SimState): Promise<MissingAssets> {
     lightningSprites: [],
     breathExhale: null,
     mesh: null,
+    cloudTop: null,
   };
   for (const s of state.samples.library) {
     const blob = await getSampleBlob(s.id).catch(() => null);
@@ -377,6 +382,12 @@ async function auditBinaryAssets(state: SimState): Promise<MissingAssets> {
     const blob = await getMeshBlob(state.mesh.id).catch(() => null);
     if (!blob) missing.mesh = { id: state.mesh.id, name: state.mesh.name };
   }
+  if (state.cloudTop.id) {
+    const blob = await getMeshBlob(state.cloudTop.id).catch(() => null);
+    if (!blob) {
+      missing.cloudTop = { id: state.cloudTop.id, name: state.cloudTop.name };
+    }
+  }
   return missing;
 }
 
@@ -393,6 +404,7 @@ export function summariseMissing(m: MissingAssets): string | null {
     parts.push(`${m.lightningSprites.length} lightning sprite image(s)`);
   if (m.breathExhale) parts.push("breath exhale sound");
   if (m.mesh) parts.push(`mesh "${m.mesh.name}"`);
+  if (m.cloudTop) parts.push(`cloud top "${m.cloudTop.name}"`);
   if (parts.length === 0) return null;
   return `Config loaded, but the following are not on this machine and need re-uploading: ${parts.join(", ")}.`;
 }

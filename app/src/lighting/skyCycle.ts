@@ -32,6 +32,15 @@ function smoothstep(a: number, b: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+function altitudeVisibility(
+  altitudeDeg: number,
+  startDeg: number,
+  fullDeg: number,
+): number {
+  if (fullDeg <= startDeg) return altitudeDeg >= startDeg ? 1 : 0;
+  return smoothstep(startDeg, fullDeg, altitudeDeg);
+}
+
 function normalizeHour(hour: number): number {
   const h = hour % 24;
   return h < 0 ? h + 24 : h;
@@ -159,14 +168,18 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
     -sunDirection[2],
   ];
 
-  const hCut = sky.horizonCutoffDeg ?? -7;
-  const hSoft = Math.max(0, sky.horizonSoftnessDeg ?? 0);
-  const sunVisible = hSoft <= 0
-    ? (altitudeDeg >= hCut ? 1 : 0)
-    : smoothstep(hCut, hCut + hSoft, altitudeDeg);
-  const moonVisible = hSoft <= 0
-    ? (-altitudeDeg >= hCut ? 1 : 0)
-    : smoothstep(hCut, hCut + hSoft, -altitudeDeg);
+  const legacyStart = sky.horizonCutoffDeg ?? -7;
+  const legacyFull = legacyStart + Math.max(0, sky.horizonSoftnessDeg ?? 0);
+  const sunVisible = altitudeVisibility(
+    altitudeDeg,
+    sky.sunHorizonStartDeg ?? legacyStart,
+    sky.sunHorizonFullDeg ?? legacyFull,
+  );
+  const moonVisible = altitudeVisibility(
+    -altitudeDeg,
+    sky.moonHorizonStartDeg ?? legacyStart,
+    sky.moonHorizonFullDeg ?? legacyFull,
+  );
   const twilight = Math.exp(-Math.pow(solar / 0.22, 2));
   const twilightSun = twilight * sunVisible;
   const twilightMoon = twilight * moonVisible;

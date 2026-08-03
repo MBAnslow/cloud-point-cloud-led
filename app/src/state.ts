@@ -400,6 +400,29 @@ export interface CloudParams {
   applyLedOffset: boolean;
 }
 
+/** A second, visual-only GLB that diffuses the live LED output. */
+export interface CloudTopParams {
+  /** IndexedDB blob id, or null when no cloud-top model is loaded. */
+  id: string | null;
+  /** Display name of the uploaded model. */
+  name: string;
+  visible: boolean;
+  /** Transform relative to the global cloud transform. */
+  scale: number;
+  yawDeg: number;
+  tiltDeg: number;
+  offsetX: number;
+  offsetY: number;
+  offsetZ: number;
+  /** Surface appearance. */
+  tint: string;
+  /** Strength and local-space spread of LED light transported by the model. */
+  glowStrength: number;
+  glowRadius: number;
+  /** Cosine-lobe exponent for outward emission; higher values narrow the beam. */
+  glowFocus: number;
+}
+
 export interface StrandParams {
   /** Bead size for each rendered LED, in metres. */
   ledSize: number;
@@ -482,13 +505,15 @@ export interface SkyParams {
   sunSpread: number;
   /** Angular spread of moon light (0 = tight hotspot, 1 = broad sky-like). */
   moonSpread: number;
-  /**
-   * Altitude (deg) where horizon occlusion starts opening.
-   * Negative values allow a bit of under-horizon twilight.
-   */
-  horizonCutoffDeg: number;
-  /** Soft transition width (deg) for horizon occlusion. */
-  horizonSoftnessDeg: number;
+  /** Legacy shared horizon controls retained for snapshot compatibility. */
+  horizonCutoffDeg?: number;
+  horizonSoftnessDeg?: number;
+  /** Sun altitude where its contribution begins and reaches full strength. */
+  sunHorizonStartDeg: number;
+  sunHorizonFullDeg: number;
+  /** Moon altitude where its contribution begins and reaches full strength. */
+  moonHorizonStartDeg: number;
+  moonHorizonFullDeg: number;
   /**
    * Draggable timeline of sun-color stops across the 24-hour day. The
    * sky cycle sorts stops by `timeHours` internally and interpolates
@@ -1460,9 +1485,9 @@ export interface BreathParams {
    */
   paused: boolean;
   /**
-   * Where exhale wave spawns come from:
-   * - `internal` — simulated oscillator rising edge into exhale
-   * - `osc` — TouchDesigner `/breathN/breath_binary` rising edge to 1
+   * Where exhale wave spawns come from (mutually exclusive):
+   * - `internal` — simulated oscillator rising edge into exhale only
+   * - `osc` — TouchDesigner `/breathN/breath_binary` rising edge to 1 only
    */
   triggerSource: "internal" | "osc";
   /** Duration of inhale ramp (seconds). */
@@ -1548,6 +1573,7 @@ type BreathPatch = Partial<BreathParams>;
 export interface SimState {
   ellipsoid: EllipsoidParams;
   cloud: CloudParams;
+  cloudTop: CloudTopParams;
   strand: StrandParams;
   ambient: AmbientLightParams;
   directional: DirectionalLightParams;
@@ -1570,6 +1596,12 @@ export interface SimState {
   breathMod: Record<string, number>;
   /** When true, `breathMod` values are applied every frame to the running engines. */
   breathModEnabled: boolean;
+  /**
+   * Upper bound on mean LED reveal for breath-mod audio. Raw reveal is
+   * divided by this and clamped to [0,1], so values below 1 let audio
+   * fully saturate without requiring every LED to be fully revealed.
+   */
+  breathModRevealCeiling: number;
   ledViewMode: LedViewMode;
   ledDisplayMode: LedDisplayMode;
   breathTimeCombineMode: BreathTimeCombineMode;
@@ -1580,6 +1612,7 @@ export interface SimState {
   ui: UiParams;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
+  setCloudTop: (c: Partial<CloudTopParams>) => void;
   setStrand: (s: Partial<StrandParams>) => void;
   setAmbient: (a: Partial<AmbientLightParams>) => void;
   setDirectional: (d: Partial<DirectionalLightParams>) => void;
@@ -1610,6 +1643,7 @@ export interface SimState {
   setMasterFx: (patch: Partial<MasterFxParams>) => void;
   setBreathMod: (key: string, value: number) => void;
   setBreathModEnabled: (v: boolean) => void;
+  setBreathModRevealCeiling: (v: number) => void;
   updateDayPeriod: (id: string, patch: Partial<DayPeriod>) => void;
   setActivePeriod: (id: string) => void;
   advancePeriod: () => void;
@@ -1825,6 +1859,21 @@ const DEFAULTS = {
     offsetZ: 0,
     applyLedOffset: true,
   } as CloudParams,
+  cloudTop: {
+    id: null,
+    name: "",
+    visible: true,
+    scale: 1,
+    yawDeg: 0,
+    tiltDeg: 0,
+    offsetX: 0,
+    offsetY: 0,
+    offsetZ: 0,
+    tint: "#ffffff",
+    glowStrength: 1.5,
+    glowRadius: 0.25,
+    glowFocus: 4,
+  } as CloudTopParams,
   strand: {
     ledSize: 0.04,
     sensorHemisphereFocus: 0,
@@ -1847,8 +1896,10 @@ const DEFAULTS = {
     moonScale: 1,
     sunSpread: 0.9,
     moonSpread: 0.9,
-    horizonCutoffDeg: -7,
-    horizonSoftnessDeg: 19,
+    sunHorizonStartDeg: -8,
+    sunHorizonFullDeg: 3,
+    moonHorizonStartDeg: -8,
+    moonHorizonFullDeg: 3,
     sunStops: buildDefaultChannelStops("sun"),
     moonStops: buildDefaultChannelStops("moon"),
     ambientStops: buildDefaultChannelStops("ambient"),
@@ -2103,6 +2154,7 @@ const DEFAULTS = {
   } as MasterFxParams,
   breathMod: {} as Record<string, number>,
   breathModEnabled: false,
+  breathModRevealCeiling: 1,
   ledViewMode: "breathPlusTimeOfDay" as LedViewMode,
   ledDisplayMode: "sensors" as LedDisplayMode,
   breathTimeCombineMode: "revealOnInhale" as BreathTimeCombineMode,
@@ -3539,6 +3591,7 @@ function initialState() {
   return {
     ellipsoid: { ...DEFAULTS.ellipsoid, ...saved.ellipsoid },
     cloud: { ...DEFAULTS.cloud, ...saved.cloud },
+    cloudTop: { ...DEFAULTS.cloudTop, ...(saved.cloudTop ?? {}) },
     strand: { ...DEFAULTS.strand, ...saved.strand },
     ambient: { ...DEFAULTS.ambient, ...saved.ambient },
     directional: { ...DEFAULTS.directional, ...saved.directional },
@@ -3582,6 +3635,14 @@ function initialState() {
       const v = (saved as unknown as Record<string, unknown>).breathModEnabled;
       return typeof v === "boolean" ? v : DEFAULTS.breathModEnabled;
     })(),
+    breathModRevealCeiling: (() => {
+      const v = (saved as unknown as Record<string, unknown>)
+        .breathModRevealCeiling;
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        return DEFAULTS.breathModRevealCeiling;
+      }
+      return Math.max(0.05, Math.min(1, v));
+    })(),
     ledViewMode: normalizeLedViewMode(saved.ledViewMode),
     ledDisplayMode:
       saved.ledDisplayMode === "leds" || saved.ledDisplayMode === "sensors"
@@ -3607,6 +3668,8 @@ export const useSimStore = create<SimState>((set) => ({
   ...initialState(),
   setEllipsoid: (e) => set((s) => ({ ellipsoid: { ...s.ellipsoid, ...e } })),
   setCloud: (c) => set((s) => ({ cloud: { ...s.cloud, ...c } })),
+  setCloudTop: (c) =>
+    set((s) => ({ cloudTop: { ...s.cloudTop, ...c } })),
   setStrand: (st) => set((s) => ({ strand: { ...s.strand, ...st } })),
   setAmbient: (a) => set((s) => ({ ambient: { ...s.ambient, ...a } })),
   setDirectional: (d) =>
@@ -3733,6 +3796,13 @@ export const useSimStore = create<SimState>((set) => ({
       return { breathMod: next };
     }),
   setBreathModEnabled: (v) => set({ breathModEnabled: v }),
+  setBreathModRevealCeiling: (v) =>
+    set({
+      breathModRevealCeiling: Math.max(
+        0.05,
+        Math.min(1, Number.isFinite(v) ? v : 1),
+      ),
+    }),
   updateDayPeriod: (id, patch) =>
     set((s) => ({
       dayCycle: {
@@ -3959,6 +4029,14 @@ export function applySnapshot(snap: Snapshot): Snapshot {
       typeof snap.breathModEnabled === "boolean"
         ? snap.breathModEnabled
         : DEFAULTS.breathModEnabled,
+    breathModRevealCeiling: (() => {
+      const v = (snap as unknown as Record<string, unknown>)
+        .breathModRevealCeiling;
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        return DEFAULTS.breathModRevealCeiling;
+      }
+      return Math.max(0.05, Math.min(1, v));
+    })(),
   });
   s.setLedViewMode(normalizeLedViewMode(snap.ledViewMode));
   if (snap.ledDisplayMode === "leds" || snap.ledDisplayMode === "sensors") {
@@ -3981,6 +4059,7 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   s.setLedLocator({ ...DEFAULTS.ledLocator, ...snap.ledLocator });
   s.setMapping(resolveMapping(snap.mapping));
   s.setMesh({ ...DEFAULTS.mesh, ...(snap.mesh ?? {}) });
+  s.setCloudTop({ ...DEFAULTS.cloudTop, ...(snap.cloudTop ?? {}) });
   s.setUi({ ...DEFAULTS.ui, ...(snap.ui ?? {}) });
   return snap;
 }
@@ -3991,6 +4070,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
   return {
     ellipsoid: s.ellipsoid,
     cloud: s.cloud,
+    cloudTop: s.cloudTop,
     strand: s.strand,
     ambient: s.ambient,
     directional: s.directional,
@@ -4006,6 +4086,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     masterFx: s.masterFx,
     breathMod: s.breathMod,
     breathModEnabled: s.breathModEnabled,
+    breathModRevealCeiling: s.breathModRevealCeiling,
     ledViewMode: s.ledViewMode,
     ledDisplayMode: s.ledDisplayMode,
     breathTimeCombineMode: s.breathTimeCombineMode,

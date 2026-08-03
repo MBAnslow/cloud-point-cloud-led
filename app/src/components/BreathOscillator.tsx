@@ -250,7 +250,7 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
           </label>
           <label
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-            title="OSC breath-out always spawns travelling spheroids. Internal also runs the simulated oscillator when selected."
+            title="Internal: simulated oscillator exhale onset only. OSC: TouchDesigner breath_binary rising edges only. The two never mix."
           >
             trigger
             <select

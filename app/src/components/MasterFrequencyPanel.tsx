@@ -5,7 +5,12 @@ import {
   type FilterParams,
 } from "../state";
 import { getBreathEffectDrive } from "../lighting/breathEffectDrive";
-import { currentBreathDrive, isBreathModActive } from "../audio/breathModulation";
+import {
+  BREATH_MOD_REVEAL_CEILING_MIN,
+  currentBreathDrive,
+  isBreathModActive,
+  scaleBreathModReveal,
+} from "../audio/breathModulation";
 import { getDroneEngine } from "../audio/DroneEngine";
 import { getPadEngine } from "../audio/PadEngine";
 import { getSampleEngine } from "../audio/SampleEngine";
@@ -218,43 +223,89 @@ function VolumeWithMeter({
  * Live cloud-effect drive meter + enable toggle. When on, engine params
  * lerp from the % rest offset toward the yellow slider during the breath
  * period (reveal 0 → 1). Outside the period, stored slider values play.
+ * Reveal ceiling remaps mean LED reveal so audio can saturate earlier.
  */
 function BreathModHeader() {
   const enabled = useSimStore((s) => s.breathModEnabled);
   const setEnabled = useSimStore((s) => s.setBreathModEnabled);
+  const ceiling = useSimStore((s) => s.breathModRevealCeiling);
+  const setCeiling = useSimStore((s) => s.setBreathModRevealCeiling);
   return (
     <div
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
         marginTop: 6,
-        padding: "4px 6px",
+        padding: "4px 6px 6px",
         borderRadius: 4,
         background: "rgba(255,255,255,0.04)",
         border: "1px solid rgba(255,255,255,0.08)",
       }}
     >
-      <label
+      <div
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 4,
-          fontSize: 11,
-          cursor: "pointer",
-          userSelect: "none",
+          gap: 8,
         }}
-        title="Off: engines play the yellow slider levels exactly. On: during the breath period, params rest at the % offset (reveal 0) and return to the slider as reveal rises."
       >
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: 11,
+            cursor: "pointer",
+            userSelect: "none",
+            whiteSpace: "nowrap",
+          }}
+          title="Off: engines play the yellow slider levels exactly. On: during the breath period, params rest at the % offset (reveal 0) and return to the slider as reveal rises."
+        >
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          Cloud breath mod
+        </label>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <BreathFilterDriveMeter active={enabled} ceiling={ceiling} />
+        </div>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginTop: 4,
+          fontSize: 11,
+        }}
+      >
+        <span
+          style={{ width: 72, opacity: 0.85, flexShrink: 0 }}
+          title="Mean LED reveal at which breath-mod audio is fully at the yellow slider. Lower = easier saturation without changing visuals."
+        >
+          Reveal ceil
+        </span>
         <input
-          type="checkbox"
-          checked={enabled}
-          onChange={(e) => setEnabled(e.target.checked)}
+          type="range"
+          min={BREATH_MOD_REVEAL_CEILING_MIN}
+          max={1}
+          step={0.01}
+          value={ceiling}
+          disabled={!enabled}
+          onChange={(e) => setCeiling(parseFloat(e.target.value))}
+          onDoubleClick={() => setCeiling(1)}
+          style={{ flex: 1, opacity: enabled ? 1 : 0.45 }}
         />
-        Cloud breath mod
-      </label>
-      <div style={{ flex: 1 }}>
-        <BreathFilterDriveMeter active={enabled} />
+        <span
+          style={{
+            width: 40,
+            textAlign: "right",
+            fontVariantNumeric: "tabular-nums",
+            opacity: enabled ? 0.85 : 0.45,
+          }}
+        >
+          {(ceiling * 100).toFixed(0)}%
+        </span>
       </div>
     </div>
   );
@@ -263,25 +314,41 @@ function BreathModHeader() {
 const SCOPE_H = 32;
 
 /**
- * Meter of mean LED time-of-day reveal (threshold floor + breath
- * path/linger) — pulses as waves cross and tracks the threshold.
+ * Meter of mean LED time-of-day reveal. Fill = raw visual mean; yellow
+ * tick = reveal ceiling (audio saturates when fill reaches the tick).
  */
-function BreathFilterDriveMeter({ active }: { active: boolean }) {
-  const [drive, setDrive] = useState(0);
+function BreathFilterDriveMeter({
+  active,
+  ceiling,
+}: {
+  active: boolean;
+  ceiling: number;
+}) {
+  const [raw, setRaw] = useState(0);
   useEffect(() => {
     let raf = 0;
     const tick = () => {
-      setDrive(getBreathEffectDrive());
+      setRaw(getBreathEffectDrive());
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const fill = Math.max(0, Math.min(1, drive));
+  const raw01 = Math.max(0, Math.min(1, raw));
+  const mod = scaleBreathModReveal(raw01, ceiling);
+  const ceil01 = Math.max(
+    BREATH_MOD_REVEAL_CEILING_MIN,
+    Math.min(1, ceiling),
+  );
+  const showCeil = ceil01 < 0.999;
   return (
     <div
-      title="Mean LED time-of-day reveal (threshold + breath). 1 = all LEDs fully revealed, 0 = none"
+      title={
+        showCeil
+          ? `Raw mean LED reveal ${raw01.toFixed(2)}; mod drive ${mod.toFixed(2)} (saturates at reveal ${ceil01.toFixed(2)})`
+          : "Mean LED time-of-day reveal (threshold + breath). 1 = all LEDs fully revealed, 0 = none"
+      }
       style={{
         position: "relative",
         height: SCOPE_H,
@@ -297,13 +364,26 @@ function BreathFilterDriveMeter({ active }: { active: boolean }) {
           left: 0,
           top: 0,
           bottom: 0,
-          width: `${fill * 100}%`,
+          width: `${raw01 * 100}%`,
           background: active
             ? "rgba(130,201,255,0.55)"
             : "rgba(130,201,255,0.22)",
           transition: "width 60ms linear",
         }}
       />
+      {showCeil && (
+        <div
+          style={{
+            position: "absolute",
+            left: `${ceil01 * 100}%`,
+            top: 0,
+            bottom: 0,
+            width: 1,
+            background: "rgba(255,220,120,0.75)",
+            pointerEvents: "none",
+          }}
+        />
+      )}
       <div
         style={{
           position: "absolute",
@@ -317,7 +397,9 @@ function BreathFilterDriveMeter({ active }: { active: boolean }) {
           pointerEvents: "none",
         }}
       >
-        reveal {fill.toFixed(2)}
+        {showCeil
+          ? `mod ${mod.toFixed(2)} · raw ${raw01.toFixed(2)}`
+          : `reveal ${raw01.toFixed(2)}`}
       </div>
     </div>
   );
@@ -429,6 +511,7 @@ function DroneSubmenu() {
 function PadSubmenu() {
   const master = useSimStore((s) => s.pad.master);
   const saturation = useSimStore((s) => s.pad.saturation);
+  const unisonDetuneCents = useSimStore((s) => s.pad.unisonDetuneCents);
   const filters = useSimStore((s) => s.pad.filters);
   const setPad = useSimStore((s) => s.setPad);
   return (
@@ -451,6 +534,16 @@ function PadSubmenu() {
         value={saturation}
         onChange={(v) => setPad({ saturation: v })}
         modKey="pad.saturation"
+      />
+      <SliderRow
+        label="Spread"
+        min={0}
+        max={50}
+        step={0.5}
+        value={unisonDetuneCents}
+        onChange={(v) => setPad({ unisonDetuneCents: v })}
+        modKey="pad.unisonDetuneCents"
+        formatValue={(v) => `${v.toFixed(1)}c`}
       />
       <EngineFilterSection
         keyPrefix="pad"

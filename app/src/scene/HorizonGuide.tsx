@@ -5,10 +5,10 @@ import { useSimStore } from "../state";
 /**
  * Visual guide for the soft-horizon gate used by sky lighting.
  *
- * - One plane: horizon cutoff altitude.
+ * - One plane: altitude where the sun starts contributing.
  *
- * Softness remains purely a lighting fade parameter (not a second geometric
- * blocker plane), so this guide only shows the primary horizon level.
+ * Sun and moon now have independent response ranges; this guide shows the
+ * sun's start altitude as the primary visual reference.
  */
 export function HorizonGuide() {
   const sky = useSimStore((s) => s.sky);
@@ -19,14 +19,14 @@ export function HorizonGuide() {
   const { cutoffY, discRadius } = useMemo(() => {
     // Match the sky dome radius used in Lights.tsx.
     const skyRadius = 8;
-    const cutoffDeg = sky.horizonCutoffDeg ?? -7;
+    const cutoffDeg = sky.sunHorizonStartDeg ?? sky.horizonCutoffDeg ?? -7;
     const cutoffY = Math.sin((cutoffDeg * Math.PI) / 180) * skyRadius;
     // Keep the guide comfortably beyond the cloud silhouette so the
     // horizon reference is easy to read from any angle.
     const cloudRadius = Math.max(ellipsoid.rx, ellipsoid.ry, ellipsoid.rz);
     const discRadius = Math.max(22, cloudRadius * 18);
     return { cutoffY, discRadius };
-  }, [sky.horizonCutoffDeg, ellipsoid]);
+  }, [sky.sunHorizonStartDeg, sky.horizonCutoffDeg, ellipsoid]);
 
   return (
     <group renderOrder={4}>

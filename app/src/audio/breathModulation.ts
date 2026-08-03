@@ -28,6 +28,7 @@ export const BREATH_MOD_PARAMS: Record<string, ParamRange> = {
   "drone.filters.hp.hz": { min: 20, max: 20000, log: true },
   "pad.master": { min: 0, max: 1 },
   "pad.saturation": { min: 0, max: 1 },
+  "pad.unisonDetuneCents": { min: 0, max: 50 },
   "pad.filters.lp.hz": { min: 20, max: 20000, log: true },
   "pad.filters.hp.hz": { min: 20, max: 20000, log: true },
   "samples.master": { min: 0, max: 3 },
@@ -63,6 +64,23 @@ function apply(
   );
 }
 
+/** Floor for reveal ceiling so division stays stable. */
+export const BREATH_MOD_REVEAL_CEILING_MIN = 0.05;
+
+/**
+ * Remap raw mean LED reveal so audio saturates at `ceiling` instead of 1.
+ * ceiling=1 → identity; ceiling=0.4 → raw 0.4 already drives mod to 1.
+ */
+export function scaleBreathModReveal(raw: number, ceiling: number): number {
+  const r = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+  const c = Math.max(
+    BREATH_MOD_REVEAL_CEILING_MIN,
+    Math.min(1, Number.isFinite(ceiling) ? ceiling : 1),
+  );
+  const t = r / c;
+  return t <= 0 ? 0 : t >= 1 ? 1 : t;
+}
+
 /** True when cloud breath mod may move params (enabled + breath window). */
 export function isBreathModActive(state: SimState): boolean {
   return (
@@ -72,12 +90,15 @@ export function isBreathModActive(state: SimState): boolean {
 }
 
 /**
- * Breath-mod drive = mean per-LED time-of-day reveal gate.
- * 0 when mod off / outside breath period; otherwise [0,1] reveal.
+ * Breath-mod drive = mean per-LED TOD reveal, remapped by reveal ceiling.
+ * 0 when mod off / outside breath period; otherwise [0,1] after ceiling.
  */
 export function currentBreathDrive(state: SimState, _nowMs?: number): number {
   if (!isBreathModActive(state)) return 0;
-  return getBreathEffectDrive();
+  return scaleBreathModReveal(
+    getBreathEffectDrive(),
+    state.breathModRevealCeiling,
+  );
 }
 
 /**
@@ -99,7 +120,10 @@ export function modulatedEngineParams(
   if (!isBreathActive(state.breath, state.sky.timeHours)) {
     return { drone: state.drone, pad: state.pad, samples: state.samples };
   }
-  const reveal = getBreathEffectDrive();
+  const reveal = scaleBreathModReveal(
+    getBreathEffectDrive(),
+    state.breathModRevealCeiling,
+  );
   const bm = state.breathMod;
   const g = (k: string): number => bm[k] ?? 0;
   const drone: DroneParams = {
@@ -161,6 +185,12 @@ export function modulatedEngineParams(
       state.pad.saturation,
       BREATH_MOD_PARAMS["pad.saturation"],
       g("pad.saturation"),
+      reveal,
+    ),
+    unisonDetuneCents: apply(
+      state.pad.unisonDetuneCents,
+      BREATH_MOD_PARAMS["pad.unisonDetuneCents"],
+      g("pad.unisonDetuneCents"),
       reveal,
     ),
     filters: {

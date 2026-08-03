@@ -10,6 +10,11 @@
 let latestBuffer: Uint8Array | null = null;
 let latestCount = 0;
 let frameVersion = 0;
+let latestPositions: Float32Array | null = null;
+let latestNormals: Float32Array | null = null;
+let latestPositionValidity: Uint8Array | null = null;
+let positionCount = 0;
+let positionVersion = 0;
 
 export function publishFrame(bytes: Uint8Array, n: number): void {
   latestBuffer = bytes;
@@ -17,10 +22,29 @@ export function publishFrame(bytes: Uint8Array, n: number): void {
   frameVersion++;
 }
 
+/** Publish world-space LED centres whenever mapping or transforms change. */
+export function publishLedPositions(
+  positions: Float32Array,
+  normals: Float32Array,
+  n: number,
+  validity?: Uint8Array,
+): void {
+  latestPositions = positions;
+  latestNormals = normals;
+  latestPositionValidity = validity ?? null;
+  positionCount = n;
+  positionVersion++;
+}
+
 export interface FrameSnapshot {
   buffer: Uint8Array | null;
   count: number;
   version: number;
+  positions: Float32Array | null;
+  normals: Float32Array | null;
+  positionValidity: Uint8Array | null;
+  positionCount: number;
+  positionVersion: number;
 }
 
 export function getFrame(): FrameSnapshot {
@@ -28,5 +52,10 @@ export function getFrame(): FrameSnapshot {
     buffer: latestBuffer,
     count: latestCount,
     version: frameVersion,
+    positions: latestPositions,
+    normals: latestNormals,
+    positionValidity: latestPositionValidity,
+    positionCount,
+    positionVersion,
   };
 }
