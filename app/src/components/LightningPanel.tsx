@@ -31,6 +31,7 @@ import {
   sampleLightningColorTracks,
   samplePlotChannel,
   samplePlotChannelRange,
+  sharedLightningController,
   interpolateLightningColorStops,
   type LightningPlotChannel,
 } from "../lighting/lightning";
@@ -48,6 +49,40 @@ const CHANNEL_LABELS: Record<ColorChannel, string> = {
 
 const PIN_SIZE = 12;
 const TRACK_HEIGHT = 18;
+
+const LIGHTNING_TOOLTIPS: Record<string, string> = {
+  Intensity: "Random peak brightness range used when each event is spawned.",
+  "Cloud / min": "Average number of in-cloud lightning flashes spawned per real minute.",
+  "Strike / min": "Average number of cloud-to-ground strikes spawned per real minute.",
+  "Sprites / min": "Average number of uploaded sprite images projected per real minute.",
+  "Sprite brightness": "LED brightness applied to projected sprite events.",
+  "Audio-reactive brightness":
+    "Modulates sprite brightness from the source audio waveform before the Sprite volume control.",
+  "Sprite volume": "Playback volume of the sprite sound effect.",
+  "Sprite duration": "Total lifetime of each sprite, including its strobe off-phases.",
+  "Sprite strobe": "How many times per second an active sprite flashes.",
+  "Strobe duty": "Fraction of each strobe cycle for which the sprite is visible.",
+  "Light falloff": "Distance over which LEDs near a bolt path receive its glow.",
+  Segments: "Number of line segments used to draw each jagged bolt.",
+  Jitter: "Range of sideways randomness applied to the bolt path.",
+  "Travel (m/s)": "Range of propagation speeds sampled per bolt; slower bolts remain visible longer.",
+  "Sub-flashes": "Probability of spawning weaker branches from the main bolt.",
+  Span: "Minimum and maximum distance covered by in-cloud bolt endpoints.",
+  "Sim FPS": "Update rate for lightning LED contribution and strobing.",
+  "Start hour": "Time-of-day hour when automatic lightning becomes active.",
+  "End hour": "Time-of-day hour when automatic lightning stops; wrapping across midnight is supported.",
+  "Tint mix": "Amount of participant color blended into the lightning palette.",
+  Phase: "Position of this keyframe within the active lightning window.",
+  "Bolt gain": "Playback gain for cloud-bolt and strike audio.",
+  "BG gain": "Playback gain for the looping storm background.",
+  "Pitch ±¢": "Maximum random pitch variation in cents for each bolt sound.",
+  "Thunder delay": "Delay between the visual flash and its thunder sound.",
+  Pan: "Stereo position of lightning audio from left to right.",
+};
+
+function lightningTooltip(label: string): string | undefined {
+  return LIGHTNING_TOOLTIPS[label.replace(/\*$/, "")];
+}
 
 /**
  * Draggable lightning controls. Asterisked params are edited on the
@@ -84,6 +119,10 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
       selected?.values.strikePerMinute ?? lightning.strikePerMinute,
     spritesPerMinute:
       selected?.values.spritesPerMinute ?? lightning.spritesPerMinute,
+    spriteStrobeDutyRange: selected?.values.spriteStrobeDutyRange ?? [
+      lightning.spriteStrobeDuty,
+      lightning.spriteStrobeDuty,
+    ],
     subFlashes: selected?.values.subFlashes ?? lightning.subFlashes,
     spanScale: selected?.values.spanScale ?? lightning.spanScale,
     minSpanScale: selected?.values.minSpanScale ?? lightning.minSpanScale,
@@ -115,6 +154,19 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
 
   const patchAnim = (patch: Partial<LightningAnimParams>) => {
     if (!selected) return;
+    setSelectedId(selected.id);
+    const changed = Object.keys(patch)[0] as keyof LightningAnimParams | undefined;
+    const channel: LightningPlotChannel | null =
+      changed === "intensityRange"
+        ? "intensity"
+        : changed === "spanScale" || changed === "minSpanScale"
+          ? "span"
+          : changed === "thunderDelayMs"
+            ? "thunderDelay"
+            : changed && changed !== "spriteStrobeDutyRange"
+              ? (changed as LightningPlotChannel)
+              : null;
+    if (channel) setPlotChannel(channel);
     const nextValues: LightningAnimParams = {
       ...selected.values,
       ...patch,
@@ -123,6 +175,12 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
       nextValues.intensityRange = [
         patch.intensityRange[0],
         patch.intensityRange[1],
+      ];
+    }
+    if (patch.spriteStrobeDutyRange) {
+      nextValues.spriteStrobeDutyRange = [
+        patch.spriteStrobeDutyRange[0],
+        patch.spriteStrobeDutyRange[1],
       ];
     }
     if (patch.spanScale !== undefined || patch.minSpanScale !== undefined) {
@@ -171,7 +229,7 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
                 : plotChannel === "boltGain"
                   ? "bolt gain"
                   : plotChannel === "spriteGain"
-                    ? "sprite gain"
+                    ? "sprite brightness"
                     : plotChannel === "backgroundGain"
                       ? "bg gain"
                       : plotChannel === "thunderDelay"
@@ -201,6 +259,44 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
           />
           enabled
         </label>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 0",
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 10, opacity: 0.7 }}>Debug</span>
+        <button
+          type="button"
+          style={miniBtn}
+          onClick={() => sharedLightningController.requestManualTrigger("cloud")}
+        >
+          Cloud flash
+        </button>
+        <button
+          type="button"
+          style={miniBtn}
+          onClick={() => sharedLightningController.requestManualTrigger("strike")}
+        >
+          Ground strike
+        </button>
+        <button
+          type="button"
+          style={miniBtn}
+          disabled={(lightning.spriteSamples?.length ?? 0) === 0}
+          title={
+            (lightning.spriteSamples?.length ?? 0) === 0
+              ? "Upload at least one sprite image first"
+              : "Spawn a sprite using the current settings"
+          }
+          onClick={() => sharedLightningController.requestManualTrigger("sprite")}
+        >
+          Sprite
+        </button>
       </div>
       <div style={panelScrollStyle}>
         <KeyframeEditor
@@ -281,7 +377,7 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
               formatValue={(v) => `${v.toFixed(1)}/min`}
             />
             <SliderRow
-              label={`Sprite gain${KF}`}
+              label={`Sprite brightness${KF}`}
               labelActive={plotChannel === "spriteGain"}
               onLabelClick={() => setPlotChannel("spriteGain")}
               value={anim.spriteGain}
@@ -293,41 +389,70 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
               }
               formatValue={(v) => v.toFixed(2)}
             />
+            <label
+              title={LIGHTNING_TOOLTIPS["Audio-reactive brightness"]}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11,
+                padding: "2px 0",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={lightning.spriteAudioReactiveBrightness}
+                onChange={(e) =>
+                  upd({ spriteAudioReactiveBrightness: e.target.checked })
+                }
+              />
+              Audio-reactive brightness
+            </label>
             <SliderRow
               label="Sprite duration"
               value={lightning.spriteDurationMs}
               min={40}
-              max={800}
+              max={3000}
               step={10}
               onChange={(v) =>
-                upd({ spriteDurationMs: Math.max(20, Math.min(2000, v)) })
+                upd({ spriteDurationMs: Math.max(20, Math.min(3000, v)) })
               }
               formatValue={(v) => `${v.toFixed(0)} ms`}
             />
-            <SliderRow
-              label="Sprite strobe"
-              value={lightning.spriteStrobeHz}
-              min={1}
-              max={40}
-              step={1}
-              onChange={(v) =>
-                upd({ spriteStrobeHz: Math.max(1, Math.min(60, v)) })
-              }
-              formatValue={(v) => `${v.toFixed(0)} Hz`}
-            />
-            <SliderRow
-              label="Strobe duty"
-              value={lightning.spriteStrobeDuty}
-              min={0.05}
-              max={0.95}
-              step={0.05}
-              onChange={(v) =>
-                upd({
-                  spriteStrobeDuty: Math.max(0.05, Math.min(0.95, v)),
-                })
-              }
-              formatValue={(v) => `${(v * 100).toFixed(0)}%`}
-            />
+            {!lightning.spriteAudioReactiveBrightness && (
+              <>
+                <SliderRow
+                  label="Sprite strobe"
+                  value={lightning.spriteStrobeHz}
+                  min={1}
+                  max={40}
+                  step={1}
+                  onChange={(v) =>
+                    upd({ spriteStrobeHz: Math.max(1, Math.min(60, v)) })
+                  }
+                  formatValue={(v) => `${v.toFixed(0)} Hz`}
+                />
+                <RangeRow
+                  label={`Strobe duty${KF}`}
+                  min={0.05}
+                  max={0.95}
+                  step={0.01}
+                  low={anim.spriteStrobeDutyRange[0]}
+                  high={anim.spriteStrobeDutyRange[1]}
+                  onChange={(lo, hi) =>
+                    patchAnim({
+                      spriteStrobeDutyRange: [
+                        Math.max(0.05, Math.min(0.95, lo)),
+                        Math.max(0.05, Math.min(0.95, hi)),
+                      ],
+                    })
+                  }
+                  format={(lo, hi) =>
+                    `${(lo * 100).toFixed(0)}–${(hi * 100).toFixed(0)}%`
+                  }
+                />
+              </>
+            )}
             {lightning.enabled && !inActiveWindow && (
               <div
                 style={{
@@ -484,6 +609,10 @@ function cloneAnim(v: LightningAnimParams): LightningAnimParams {
     strikesPerMinute: v.strikesPerMinute,
     strikePerMinute: v.strikePerMinute,
     spritesPerMinute: v.spritesPerMinute,
+    spriteStrobeDutyRange: [
+      v.spriteStrobeDutyRange[0],
+      v.spriteStrobeDutyRange[1],
+    ],
     subFlashes: v.subFlashes,
     spanScale: v.spanScale,
     minSpanScale: v.minSpanScale,
@@ -1457,6 +1586,15 @@ function AudioSection({
         onChange={(v) => patchAnim({ backgroundGain: v })}
       />
       <SliderRow
+        label="Sprite volume"
+        value={lightning.spriteAudioGain}
+        min={0}
+        max={3}
+        step={0.01}
+        onChange={(v) => upd({ spriteAudioGain: v })}
+        formatValue={(v) => v.toFixed(2)}
+      />
+      <SliderRow
         label="Pitch ±¢"
         value={lightning.boltPitchJitterCents}
         min={0}
@@ -2013,8 +2151,12 @@ function RangeRow({
   onChange: (low: number, high: number) => void;
   format?: (low: number, high: number) => string;
 }) {
+  const tooltip = lightningTooltip(label);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+    <div
+      title={tooltip}
+      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}
+    >
       <span
         style={{
           width: 92,
@@ -2022,7 +2164,11 @@ function RangeRow({
           ...labelClickStyle(Boolean(labelActive)),
         }}
         onClick={onLabelClick}
-        title={onLabelClick ? "Show this parameter on the keyframe plot" : undefined}
+        title={
+          onLabelClick
+            ? `${tooltip ? `${tooltip} ` : ""}Click to show this parameter on the keyframe plot.`
+            : tooltip
+        }
       >
         {label}
       </span>
@@ -2067,8 +2213,12 @@ function SliderRow({
   onChange: (v: number) => void;
   formatValue?: (v: number) => string;
 }) {
+  const tooltip = lightningTooltip(label);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+    <div
+      title={tooltip}
+      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}
+    >
       <span
         style={{
           width: 92,
@@ -2076,7 +2226,11 @@ function SliderRow({
           ...labelClickStyle(Boolean(labelActive)),
         }}
         onClick={onLabelClick}
-        title={onLabelClick ? "Show this parameter on the keyframe plot" : undefined}
+        title={
+          onLabelClick
+            ? `${tooltip ? `${tooltip} ` : ""}Click to show this parameter on the keyframe plot.`
+            : tooltip
+        }
       >
         {label}
       </span>

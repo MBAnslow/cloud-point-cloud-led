@@ -70,6 +70,7 @@ export function BreathFilterPanel({ visible = true }: { visible?: boolean }) {
       upd({ threshold });
       return;
     }
+    setSelectedId(selected.id);
     const th = Math.max(0, Math.min(1, threshold));
     const keyframes = breathFilter.keyframes.map((k) =>
       k.id === selected.id ? { ...k, threshold: th } : k,

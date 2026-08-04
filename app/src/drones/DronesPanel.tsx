@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useSimStore, type DroneNote } from "../state";
 import { getDroneEngine } from "../audio/DroneEngine";
+import { AudioSoloButton } from "../components/AudioSoloButton";
+import {
+  confirmDestructiveClear,
+  destructiveButtonStyle,
+} from "../components/confirmDestructiveClear";
 import { SynthSection } from "./SynthSection";
 import { PostFxSection } from "./PostFxSection";
 import { NoteEffectsPanel } from "./NoteEffectsPanel";
@@ -77,6 +82,8 @@ export function DronesPanel() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rollWidth, setRollWidth] = useState(900);
+  const [horizontalZoom, setHorizontalZoom] = useState(1);
+  const [snapHours, setSnapHours] = useState(0.25);
   const rollRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const scrubbingRef = useRef(false);
@@ -93,6 +100,11 @@ export function DronesPanel() {
   }, []);
 
   const pxPerHour = rollWidth / HOURS;
+  const snapHour = useCallback(
+    (hour: number) =>
+      snapHours > 0 ? Math.round(hour / snapHours) * snapHours : hour,
+    [snapHours],
+  );
 
   const noteByMidi = useMemo(() => {
     const m = new Map<number, DroneNote[]>();
@@ -158,7 +170,7 @@ export function DronesPanel() {
       const dHour = hour - drag.originHour;
       if (drag.kind === "move") {
         const dur = drag.originEnd - drag.originStart;
-        let start = drag.originStart + dHour;
+        let start = snapHour(drag.originStart + dHour);
         start = Math.max(0, Math.min(HOURS - dur, start));
         const rowClamped = Math.max(
           0,
@@ -173,7 +185,7 @@ export function DronesPanel() {
       } else if (drag.kind === "resize-right" || drag.kind === "new") {
         const end = Math.max(
           drag.originStart + MIN_NOTE_LENGTH_H,
-          Math.min(HOURS, drag.originEnd + dHour),
+          Math.min(HOURS, snapHour(drag.originEnd + dHour)),
         );
         updateDroneNote(drag.noteId, { endHour: end });
       }
@@ -188,7 +200,7 @@ export function DronesPanel() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [clientToHourRow, updateDroneNote, setSky]);
+  }, [clientToHourRow, updateDroneNote, setSky, snapHour]);
 
   // Delete key removes selected note.
   useEffect(() => {
@@ -211,7 +223,10 @@ export function DronesPanel() {
     if ((e.target as HTMLElement).dataset.noteId) return;
     const { hour, row } = clientToHourRow(e.clientX, e.clientY);
     const midi = rowToMidi(row);
-    const start = Math.max(0, Math.min(HOURS - MIN_NOTE_LENGTH_H, hour));
+    const start = Math.max(
+      0,
+      Math.min(HOURS - MIN_NOTE_LENGTH_H, snapHour(hour)),
+    );
     const end = Math.min(HOURS, start + DEFAULT_NOTE_LENGTH_H);
     const id = newNoteId();
     const note: DroneNote = {
@@ -256,11 +271,11 @@ export function DronesPanel() {
         <span style={{ marginLeft: 8, fontSize: 16, fontWeight: 600 }}>
           Drones
         </span>
+        <AudioSoloButton instrument="drone" accent="#38bdf8" />
         <button
           onClick={() => setSky({ autoPlay: !sky.autoPlay })}
           style={{
             ...buttonStyle,
-            marginLeft: 8,
             background: sky.autoPlay
               ? "rgba(255,225,77,0.25)"
               : "rgba(56,189,248,0.2)",
@@ -298,6 +313,35 @@ export function DronesPanel() {
           />
           <span style={{ opacity: 0.6 }}>s / 24h</span>
         </label>
+        <label style={{ ...rowStyle, fontSize: 11 }} title="Horizontal piano-roll zoom">
+          Zoom
+          <select
+            value={horizontalZoom}
+            onChange={(e) => setHorizontalZoom(Number(e.target.value))}
+            style={numInput}
+          >
+            {[1, 2, 4, 6, 8].map((z) => (
+              <option key={z} value={z}>
+                {z}×
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ ...rowStyle, fontSize: 11 }} title="Snap note timing to a fixed grid">
+          Snap
+          <select
+            value={snapHours}
+            onChange={(e) => setSnapHours(Number(e.target.value))}
+            style={{ ...numInput, width: 72 }}
+          >
+            <option value={0}>Off</option>
+            <option value={1 / 12}>5 min</option>
+            <option value={1 / 6}>10 min</option>
+            <option value={0.25}>15 min</option>
+            <option value={0.5}>30 min</option>
+            <option value={1}>1 hour</option>
+          </select>
+        </label>
         <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85, fontVariantNumeric: "tabular-nums" }}>
           {fmtTime(timeHours)}
         </div>
@@ -316,9 +360,17 @@ export function DronesPanel() {
             click grid to add · drag body to move · drag right edge to resize · Del to remove · drag ruler to scrub
           </span>
           <button
-            style={{ ...buttonStyle, marginLeft: "auto" }}
+            style={{
+              ...buttonStyle,
+              ...destructiveButtonStyle,
+              marginLeft: "auto",
+            }}
             onClick={() => {
-              if (confirm("Clear all drone notes?")) {
+              if (
+                confirmDestructiveClear(
+                  `all ${drone.notes.length} drone notes`,
+                )
+              ) {
                 clearDroneNotes();
                 setSelectedId(null);
               }
@@ -344,7 +396,9 @@ export function DronesPanel() {
             style={{
               width: GUTTER_WIDTH,
               flexShrink: 0,
-              position: "relative",
+              position: "sticky",
+              left: 0,
+              zIndex: 5,
               background: "rgba(0,0,0,0.35)",
               borderRight: "1px solid rgba(255,255,255,0.15)",
             }}
@@ -383,7 +437,13 @@ export function DronesPanel() {
             })}
           </div>
           {/* Grid + notes */}
-          <div style={{ flex: 1, minWidth: 400, position: "relative" }}>
+          <div
+            style={{
+              flex: "0 0 auto",
+              width: Math.max(400, rollWidth * horizontalZoom),
+              position: "relative",
+            }}
+          >
             {/* Scrubber ruler — drag to move playhead. */}
             <div
               onPointerDown={(e) => {
@@ -482,6 +542,25 @@ export function DronesPanel() {
                   />
                 );
               })}
+              {snapHours > 0 &&
+                snapHours < 1 &&
+                Array.from(
+                  { length: Math.floor(HOURS / snapHours) + 1 },
+                  (_, i) => i * snapHours,
+                ).map((h) => (
+                  <div
+                    key={`snap-${h}`}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      bottom: 0,
+                      left: `${(h / HOURS) * 100}%`,
+                      width: 1,
+                      background: "rgba(255,255,255,0.045)",
+                      pointerEvents: "none",
+                    }}
+                  />
+                ))}
               {/* Hour gridlines */}
               {Array.from({ length: HOURS + 1 }, (_, h) => (
                 <div

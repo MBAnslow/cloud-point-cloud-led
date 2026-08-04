@@ -3,6 +3,7 @@ import { activeWindowProgress, hourInRange, useSimStore } from "../state";
 import {
   sampleLightningKeyframe,
   sharedLightningController,
+  spriteFlashEnvelope,
 } from "../lighting/lightning";
 import { getLightningAudioEngine } from "./LightningAudioEngine";
 
@@ -52,6 +53,9 @@ export function LightningAudioRuntime(): null {
       if (!unlockedOnce) return;
       const state = useSimStore.getState();
       const p = state.lightning;
+      // Keep newly uploaded/replaced sounds warm as well as those that were
+      // present when the AudioContext was first unlocked.
+      engine.preload(p);
       const active = hourInRange(
         state.sky.timeHours,
         p.activeStartHour,
@@ -74,6 +78,14 @@ export function LightningAudioRuntime(): null {
 
       const strikes = sharedLightningController.getStrikes();
       const sprites = sharedLightningController.getSprites();
+      const nowMs = performance.now();
+      for (const sp of sprites) {
+        engine.setSpriteEnvelope(
+          sp.bornMs,
+          p.spriteAudioReactiveBrightness ? 1 : spriteFlashEnvelope(sp, nowMs),
+        );
+        sp.audioDynamics = engine.getSpriteDynamics(sp.bornMs);
+      }
       // Skip on the very first tick after start — otherwise pre-existing
       // strikes would all replay simultaneously.
       if (firstFrame) {
@@ -125,7 +137,13 @@ export function LightningAudioRuntime(): null {
       for (const sp of sprites) {
         if (sp.bornMs > lastMaxSpriteBorn) {
           const pan = live.pan ?? p.pan ?? 0;
-          engine.triggerSprite(p, 1, sp.gain, pan);
+          engine.triggerSprite(p, 1, p.spriteAudioGain, pan, sp.bornMs);
+          engine.setSpriteEnvelope(
+            sp.bornMs,
+            p.spriteAudioReactiveBrightness
+              ? 1
+              : spriteFlashEnvelope(sp, performance.now()),
+          );
           if (sp.bornMs > newSpriteMax) newSpriteMax = sp.bornMs;
         }
       }

@@ -21,6 +21,7 @@ import { displaceLed, orientGaussians } from "../mapping/gaussians";
 import {
   getMeshHalfExtents,
   loadMeshGeometry,
+  sampleMeshSurfacePoint,
 } from "../mapping/meshAsset";
 import {
   breathFilterGate,
@@ -113,6 +114,7 @@ export function Leds() {
   const meshRef = useRef<InstancedMesh>(null);
   const dummy = useMemo(() => new Object3D(), []);
   const tmpColor = useMemo(() => new Color(), []);
+  const boltSurfacePoint = useMemo(() => new Vector3(), []);
   const stableBytesRef = useRef<Uint8Array | null>(null);
   const locatedSet = useMemo(
     () => new Set(ledLocator.highlighted),
@@ -616,12 +618,15 @@ export function Leds() {
         lightning.activeStartHour,
         lightning.activeEndHour,
       );
-    const useLightning =
-      lightningActive &&
-      ledStreamPipeline.lightningStage &&
-      ledViewMode !== "breathIntensity";
+    const hasActiveLightning =
+      lightningCtrl.getStrikes().length > 0 ||
+      lightningCtrl.getSprites().length > 0;
+    const lightningTick =
+      lightningActive ||
+      lightningCtrl.hasManualTriggers() ||
+      hasActiveLightning;
 
-    if (lightningActive) {
+    if (lightningTick) {
       // Strike spawn rate is always real wall-clock time (strikes per
       // real minute), independent of sky play speed and of simFps.
       // simFps only throttles the LED contribution / strobe look.
@@ -648,6 +653,18 @@ export function Leds() {
         lightning.activeStartHour,
         lightning.activeEndHour,
       );
+      const sampleBoltSurface = meshTarget.id
+        ? (): [number, number, number] | null => {
+            if (!sampleMeshSurfacePoint(meshTarget.id!, boltSurfacePoint)) {
+              return null;
+            }
+            return [
+              boltSurfacePoint.x * meshTarget.scale,
+              boltSurfacePoint.y * meshTarget.scale,
+              boltSurfacePoint.z * meshTarget.scale,
+            ];
+          }
+        : undefined;
       lightningCtrl.update(
         now,
         lightning,
@@ -655,7 +672,14 @@ export function Leds() {
         cloudXform,
         keyframeU,
         breath.participants,
+        sampleBoltSurface,
       );
+      const useLightning =
+        (lightningActive ||
+          lightningCtrl.getStrikes().length > 0 ||
+          lightningCtrl.getSprites().length > 0) &&
+        ledStreamPipeline.lightningStage &&
+        ledViewMode !== "breathIntensity";
 
       const fps = Math.max(1, Math.min(60, Math.round(lightning.simFps || 60)));
       const frameMs = 1000 / fps;

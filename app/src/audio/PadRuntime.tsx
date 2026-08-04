@@ -30,7 +30,12 @@ export function PadRuntime(): null {
       raf = requestAnimationFrame(tick);
       const state = useSimStore.getState();
       const { pad } = modulatedEngineParams(state, performance.now());
-      engine.update(state.sky.timeHours, pad);
+      engine.update(
+        state.sky.timeHours,
+        state.audioSolo && state.audioSolo !== "pad"
+          ? { ...pad, master: 0 }
+          : pad,
+      );
     };
     raf = requestAnimationFrame(tick);
 

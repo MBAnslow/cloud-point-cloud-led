@@ -9,6 +9,7 @@ import {
 } from "../state/fileIO";
 import { applyMappingOrientation, azElToDir, dirToAzEl } from "./geometry";
 import { deleteMeshBlob, invalidateMeshGeometry, putMeshBlob } from "./meshAsset";
+import { confirmDestructiveClear } from "../components/confirmDestructiveClear";
 
 interface Props {
   selected: number | null;
@@ -470,22 +471,34 @@ export function MappingPanel({
           </Button>
           <Button
             onClick={() => {
-              clearMappedLeds();
-              setSelected(null);
+              if (
+                confirmDestructiveClear(`all ${count} mapped LEDs`)
+              ) {
+                clearMappedLeds();
+                setSelected(null);
+              }
             }}
             disabled={count === 0}
+            danger
           >
             Clear all
           </Button>
           <Button
             onClick={() => {
-              clearMappingBumps();
-              setSelectedGaussianId(null);
+              if (
+                confirmDestructiveClear(
+                  `all ${gaussians.length} mapping bumps and LED offsets`,
+                )
+              ) {
+                clearMappingBumps();
+                setSelectedGaussianId(null);
+              }
             }}
             disabled={
               gaussians.length === 0 &&
               !mapping.leds.some((l) => (l.offset ?? 0) > 0)
             }
+            danger
           >
             Clear bumps
           </Button>

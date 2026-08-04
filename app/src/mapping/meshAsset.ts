@@ -11,6 +11,7 @@
 import { BufferGeometry, Mesh, MeshStandardMaterial, Box3, Vector3 } from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { MeshSurfaceSampler } from "three/examples/jsm/math/MeshSurfaceSampler.js";
 
 const DB_NAME = "cloudLeds.meshes";
 const STORE = "blobs";
@@ -64,6 +65,7 @@ export async function deleteMeshBlob(id: string): Promise<void> {
 }
 
 const geometryCache = new Map<string, BufferGeometry>();
+const surfaceSamplerCache = new Map<string, MeshSurfaceSampler>();
 
 /**
  * Parse a GLB/GLTF ArrayBuffer into a single merged BufferGeometry
@@ -137,11 +139,25 @@ export function getMeshHalfExtents(id: string): {
   };
 }
 
+/** Sample an area-uniform point on the uploaded mesh surface. */
+export function sampleMeshSurfacePoint(id: string, target: Vector3): boolean {
+  const geometry = geometryCache.get(id);
+  if (!geometry) return false;
+  let sampler = surfaceSamplerCache.get(id);
+  if (!sampler) {
+    sampler = new MeshSurfaceSampler(new Mesh(geometry)).build();
+    surfaceSamplerCache.set(id, sampler);
+  }
+  sampler.sample(target);
+  return true;
+}
+
 /** Drop the cached parsed geometry for `id` (call when the blob changes). */
 export function invalidateMeshGeometry(id: string): void {
   const g = geometryCache.get(id);
   if (g) g.dispose();
   geometryCache.delete(id);
+  surfaceSamplerCache.delete(id);
 }
 
 /** Convenience: default material used to render an uploaded mesh in the scene. */

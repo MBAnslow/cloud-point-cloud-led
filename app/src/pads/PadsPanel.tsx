@@ -3,6 +3,11 @@ import { Link } from "react-router-dom";
 import { useSimStore, type PadNote } from "../state";
 import { PadSynthPanel } from "./PadSynthPanel";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
+import { AudioSoloButton } from "../components/AudioSoloButton";
+import {
+  confirmDestructiveClear,
+  destructiveButtonStyle,
+} from "../components/confirmDestructiveClear";
 
 const HOURS = 24;
 
@@ -90,6 +95,8 @@ export function PadsPanel() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rollWidth, setRollWidth] = useState(900);
+  const [horizontalZoom, setHorizontalZoom] = useState(1);
+  const [snapHours, setSnapHours] = useState(0.25);
   const rollRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const scrubbingRef = useRef(false);
@@ -105,6 +112,11 @@ export function PadsPanel() {
     return () => ro.disconnect();
   }, []);
   const pxPerHour = rollWidth / HOURS;
+  const snapHour = useCallback(
+    (hour: number) =>
+      snapHours > 0 ? Math.round(hour / snapHours) * snapHours : hour,
+    [snapHours],
+  );
 
   const clientToHourRow = useCallback((clientX: number, clientY: number) => {
     const grid = rollRef.current?.querySelector<HTMLDivElement>("[data-grid]");
@@ -154,7 +166,7 @@ export function PadsPanel() {
       const dHour = hour - drag.originHour;
       if (drag.kind === "move") {
         const dur = drag.originEnd - drag.originStart;
-        let start = drag.originStart + dHour;
+        let start = snapHour(drag.originStart + dHour);
         start = Math.max(0, Math.min(HOURS - dur, start));
         const rowClamped = Math.max(0, Math.min(PITCH_COUNT - 1, row));
         const midi = rowToMidi(rowClamped);
@@ -166,7 +178,7 @@ export function PadsPanel() {
       } else if (drag.kind === "resize-right") {
         const end = Math.max(
           drag.originStart + MIN_NOTE_LENGTH_H,
-          Math.min(HOURS, drag.originEnd + dHour),
+          Math.min(HOURS, snapHour(drag.originEnd + dHour)),
         );
         updatePadNote(drag.noteId, { endHour: end });
       }
@@ -181,7 +193,7 @@ export function PadsPanel() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [clientToHourRow, updatePadNote, setSky]);
+  }, [clientToHourRow, updatePadNote, setSky, snapHour]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -202,7 +214,10 @@ export function PadsPanel() {
     if ((e.target as HTMLElement).dataset.noteId) return;
     const { hour, row } = clientToHourRow(e.clientX, e.clientY);
     const midi = rowToMidi(row);
-    const start = Math.max(0, Math.min(HOURS - MIN_NOTE_LENGTH_H, hour));
+    const start = Math.max(
+      0,
+      Math.min(HOURS - MIN_NOTE_LENGTH_H, snapHour(hour)),
+    );
     const end = Math.min(HOURS, start + DEFAULT_NOTE_LENGTH_H);
     const id = newNoteId();
     const note: PadNote = {
@@ -247,11 +262,11 @@ export function PadsPanel() {
         <span style={{ marginLeft: 8, fontSize: 16, fontWeight: 600 }}>
           Warm Pad
         </span>
+        <AudioSoloButton instrument="pad" accent="#c084fc" />
         <button
           onClick={() => setSky({ autoPlay: !sky.autoPlay })}
           style={{
             ...buttonStyle,
-            marginLeft: 8,
             background: sky.autoPlay
               ? "rgba(255,225,77,0.25)"
               : "rgba(192,132,252,0.2)",
@@ -289,6 +304,35 @@ export function PadsPanel() {
           />
           <span style={{ opacity: 0.6 }}>s / 24h</span>
         </label>
+        <label style={{ ...rowStyle, fontSize: 11 }} title="Horizontal piano-roll zoom">
+          Zoom
+          <select
+            value={horizontalZoom}
+            onChange={(e) => setHorizontalZoom(Number(e.target.value))}
+            style={numInput}
+          >
+            {[1, 2, 4, 6, 8].map((z) => (
+              <option key={z} value={z}>
+                {z}×
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ ...rowStyle, fontSize: 11 }} title="Snap note timing to a fixed grid">
+          Snap
+          <select
+            value={snapHours}
+            onChange={(e) => setSnapHours(Number(e.target.value))}
+            style={{ ...numInput, width: 72 }}
+          >
+            <option value={0}>Off</option>
+            <option value={1 / 12}>5 min</option>
+            <option value={1 / 6}>10 min</option>
+            <option value={0.25}>15 min</option>
+            <option value={0.5}>30 min</option>
+            <option value={1}>1 hour</option>
+          </select>
+        </label>
         <div
           style={{
             marginLeft: "auto",
@@ -317,9 +361,15 @@ export function PadsPanel() {
               resize · Del to remove · drag ruler to scrub
             </span>
             <button
-              style={{ ...buttonStyle, marginLeft: "auto" }}
+              style={{
+                ...buttonStyle,
+                ...destructiveButtonStyle,
+                marginLeft: "auto",
+              }}
               onClick={() => {
-                if (confirm("Clear all pad notes?")) {
+                if (
+                  confirmDestructiveClear(`all ${pad.notes.length} pad notes`)
+                ) {
                   clearPadNotes();
                   setSelectedId(null);
                 }
@@ -344,7 +394,9 @@ export function PadsPanel() {
               style={{
                 width: GUTTER_WIDTH,
                 flexShrink: 0,
-                position: "relative",
+                position: "sticky",
+                left: 0,
+                zIndex: 5,
                 background: "rgba(0,0,0,0.35)",
                 borderRight: "1px solid rgba(255,255,255,0.15)",
               }}
@@ -379,7 +431,13 @@ export function PadsPanel() {
                 );
               })}
             </div>
-            <div style={{ flex: 1, minWidth: 400, position: "relative" }}>
+            <div
+              style={{
+                flex: "0 0 auto",
+                width: Math.max(400, rollWidth * horizontalZoom),
+                position: "relative",
+              }}
+            >
               <div
                 onPointerDown={(e) => {
                   scrubbingRef.current = true;
@@ -476,6 +534,25 @@ export function PadsPanel() {
                     />
                   );
                 })}
+                {snapHours > 0 &&
+                  snapHours < 1 &&
+                  Array.from(
+                    { length: Math.floor(HOURS / snapHours) + 1 },
+                    (_, i) => i * snapHours,
+                  ).map((h) => (
+                    <div
+                      key={`snap-${h}`}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        bottom: 0,
+                        left: `${(h / HOURS) * 100}%`,
+                        width: 1,
+                        background: "rgba(255,255,255,0.045)",
+                        pointerEvents: "none",
+                      }}
+                    />
+                  ))}
                 {Array.from({ length: HOURS + 1 }, (_, h) => (
                   <div
                     key={h}

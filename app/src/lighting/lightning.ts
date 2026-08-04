@@ -87,6 +87,8 @@ export interface SpriteFlash {
   sampleId: string;
   axis: SpriteAxis;
   gain: number;
+  /** Live source-audio loudness, independent of the playback volume. */
+  audioDynamics: number;
   strobeHz: number;
   strobeDuty: number;
 }
@@ -238,26 +240,23 @@ function sampleColorRamp(
 }
 
 /**
- * Sample a random point within the ellipsoid's inscribed volume. Uses
- * rejection sampling in the unit sphere then scales by (rx, ry, rz).
+ * Sample a random point within the ellipsoid while distributing samples
+ * evenly by height. A uniform-volume sphere strongly favours its wide middle,
+ * making flashes near the narrow cloud base/apex needlessly rare.
  */
 function samplePointInEllipsoid(
   ellipsoid: EllipsoidParams,
   spanScale: number,
 ): [number, number, number] {
-  for (let attempts = 0; attempts < 16; attempts++) {
-    const x = rand() * 2 - 1;
-    const y = rand() * 2 - 1;
-    const z = rand() * 2 - 1;
-    if (x * x + y * y + z * z <= 1) {
-      return [
-        x * ellipsoid.rx * spanScale,
-        y * ellipsoid.ry * spanScale,
-        z * ellipsoid.rz * spanScale,
-      ];
-    }
-  }
-  return [0, 0, 0];
+  const y = rand() * 2 - 1;
+  const sliceRadius = Math.sqrt(Math.max(0, 1 - y * y));
+  const radial = Math.sqrt(rand()) * sliceRadius;
+  const angle = rand() * Math.PI * 2;
+  return [
+    Math.cos(angle) * radial * ellipsoid.rx * spanScale,
+    y * ellipsoid.ry * spanScale,
+    Math.sin(angle) * radial * ellipsoid.rz * spanScale,
+  ];
 }
 
 /**
@@ -272,11 +271,14 @@ function sampleBoltPath(
   jitter: number,
   spanScale: number,
   minSpanScale: number,
+  sampleSurfacePoint?: () => [number, number, number] | null,
 ): Float32Array {
   const meanR = (ellipsoid.rx + ellipsoid.ry + ellipsoid.rz) / 3;
   const minLen = Math.max(0, minSpanScale) * meanR;
-  let a = samplePointInEllipsoid(ellipsoid, spanScale);
-  let b = samplePointInEllipsoid(ellipsoid, spanScale);
+  const samplePoint = () =>
+    sampleSurfacePoint?.() ?? samplePointInEllipsoid(ellipsoid, spanScale);
+  let a = samplePoint();
+  let b = samplePoint();
   // Resample until the endpoints are at least `minLen` apart so bolts
   // don't degenerate into a tiny spark. Bounded retries so a degenerate
   // ellipsoid or overly-strict minimum can't spin forever.
@@ -285,8 +287,8 @@ function sampleBoltPath(
     const ddy = b[1] - a[1];
     const ddz = b[2] - a[2];
     if (ddx * ddx + ddy * ddy + ddz * ddz >= minLen * minLen) break;
-    a = samplePointInEllipsoid(ellipsoid, spanScale);
-    b = samplePointInEllipsoid(ellipsoid, spanScale);
+    a = samplePoint();
+    b = samplePoint();
   }
   const ax = a[0];
   const ay = a[1];
@@ -623,6 +625,10 @@ function cloneAnim(v: LightningAnimParams): LightningAnimParams {
     strikesPerMinute: v.strikesPerMinute,
     strikePerMinute: v.strikePerMinute,
     spritesPerMinute: v.spritesPerMinute ?? 0,
+    spriteStrobeDutyRange: [
+      v.spriteStrobeDutyRange?.[0] ?? 0.45,
+      v.spriteStrobeDutyRange?.[1] ?? 0.45,
+    ],
     subFlashes: v.subFlashes,
     spanScale: v.spanScale,
     minSpanScale: v.minSpanScale,
@@ -651,11 +657,14 @@ function lerpAnim(
   const spritesB = b.spritesPerMinute ?? 0;
   const spriteGainA = a.spriteGain ?? 1;
   const spriteGainB = b.spriteGain ?? 1;
+  const dutyA = a.spriteStrobeDutyRange ?? [0.45, 0.45];
+  const dutyB = b.spriteStrobeDutyRange ?? [0.45, 0.45];
   return {
     intensityRange: lerpPair(a.intensityRange, b.intensityRange, t),
     strikesPerMinute: lerp(a.strikesPerMinute, b.strikesPerMinute, t),
     strikePerMinute: lerp(a.strikePerMinute, b.strikePerMinute, t),
     spritesPerMinute: lerp(spritesA, spritesB, t),
+    spriteStrobeDutyRange: lerpPair(dutyA, dutyB, t),
     subFlashes: Math.max(0, Math.min(1, lerp(a.subFlashes, b.subFlashes, t))),
     spanScale,
     minSpanScale,
@@ -682,6 +691,7 @@ export function sampleLightningKeyframe(
       strikesPerMinute: 12,
       strikePerMinute: 1,
       spritesPerMinute: 1,
+      spriteStrobeDutyRange: [0.3, 0.6],
       subFlashes: 0.4,
       spanScale: 0.85,
       minSpanScale: 0.5,
@@ -992,6 +1002,14 @@ function spriteStrobeOn(
   return frac < duty;
 }
 
+/** Shared visual/audio gain envelope for one sprite event. */
+export function spriteFlashEnvelope(sprite: SpriteFlash, nowMs: number): number {
+  const age = nowMs - sprite.bornMs;
+  if (age < 0 || age > sprite.durationMs || sprite.durationMs <= 0) return 0;
+  if (!spriteStrobeOn(age, sprite.strobeHz, sprite.strobeDuty)) return 0;
+  return flashBrightness(age / sprite.durationMs);
+}
+
 /**
  * Stateful controller that maintains active strikes and produces a
  * per-LED additive RGB contribution each frame.
@@ -1006,6 +1024,19 @@ export class LightningController {
   private spawnAccStrike = 0;
   /** Fractional expected sprite-flash accumulator. */
   private spawnAccSprite = 0;
+  private manualCloud = 0;
+  private manualStrike = 0;
+  private manualSprite = 0;
+
+  requestManualTrigger(kind: "cloud" | "strike" | "sprite"): void {
+    if (kind === "cloud") this.manualCloud += 1;
+    else if (kind === "strike") this.manualStrike += 1;
+    else this.manualSprite += 1;
+  }
+
+  hasManualTriggers(): boolean {
+    return this.manualCloud > 0 || this.manualStrike > 0 || this.manualSprite > 0;
+  }
 
   getStrikes(): BoltStrike[] {
     return this.strikes;
@@ -1041,6 +1072,8 @@ export class LightningController {
     keyframeU: number,
     /** Breath participants — enabled slots drive tint track choice. */
     participants: BreathParticipant[] = [],
+    /** Optional area-uniform sampler for the actual uploaded mesh surface. */
+    sampleSurfacePoint?: () => [number, number, number] | null,
   ): void {
     // Prune expired strikes / sprites.
     if (this.strikes.length > 0) {
@@ -1058,11 +1091,18 @@ export class LightningController {
     const dtMs = Math.max(0, nowMs - this.lastUpdateMs);
     this.lastUpdateMs = nowMs;
 
-    if (!params.enabled) {
+    const manualCloud = this.manualCloud;
+    const manualStrike = this.manualStrike;
+    const manualSprite = this.manualSprite;
+    this.manualCloud = 0;
+    this.manualStrike = 0;
+    this.manualSprite = 0;
+    const automaticEnabled = params.enabled;
+
+    if (!automaticEnabled) {
       this.spawnAcc = 0;
       this.spawnAccStrike = 0;
       this.spawnAccSprite = 0;
-      return;
     }
 
     // Warm sprite image cache for uploaded library entries.
@@ -1095,19 +1135,23 @@ export class LightningController {
       return { next, n };
     };
 
-    const cloud = spawnCount(this.spawnAcc, cloudSpm);
+    const cloud = automaticEnabled
+      ? spawnCount(this.spawnAcc, cloudSpm)
+      : { next: 0, n: 0 };
     this.spawnAcc = cloud.next;
-    const ground = spawnCount(this.spawnAccStrike, groundSpm);
+    const ground = automaticEnabled
+      ? spawnCount(this.spawnAccStrike, groundSpm)
+      : { next: 0, n: 0 };
     this.spawnAccStrike = ground.next;
     const spriteN =
-      (params.spriteSamples?.length ?? 0) > 0
+      automaticEnabled && (params.spriteSamples?.length ?? 0) > 0
         ? spawnCount(this.spawnAccSprite, spriteSpm)
         : { next: 0, n: 0 };
     this.spawnAccSprite = spriteN.next;
 
     const tintIndices = enabledLightningTintIndices(participants);
     const segs = Math.max(2, Math.floor(params.boltSegments));
-    for (let i = 0; i < cloud.n; i++) {
+    for (let i = 0; i < cloud.n + manualCloud; i++) {
       this.pushStrike(
         nowMs,
         params,
@@ -1119,9 +1163,10 @@ export class LightningController {
         participants,
         tintIndices,
         keyframeU,
+        sampleSurfacePoint,
       );
     }
-    for (let i = 0; i < ground.n; i++) {
+    for (let i = 0; i < ground.n + manualStrike; i++) {
       this.pushStrike(
         nowMs,
         params,
@@ -1133,9 +1178,10 @@ export class LightningController {
         participants,
         tintIndices,
         keyframeU,
+        sampleSurfacePoint,
       );
     }
-    for (let i = 0; i < spriteN.n; i++) {
+    for (let i = 0; i < spriteN.n + manualSprite; i++) {
       this.pushSprite(nowMs, params, live);
     }
   }
@@ -1152,16 +1198,17 @@ export class LightningController {
     const axis = SPRITE_AXES[Math.floor(rand() * SPRITE_AXES.length)]!;
     const durationMs = Math.max(
       20,
-      Math.min(2000, Number(params.spriteDurationMs) || 180),
+      Math.min(3000, Number(params.spriteDurationMs) || 180),
     );
     const strobeHz = Math.max(
       1,
       Math.min(60, Number(params.spriteStrobeHz) || 18),
     );
-    const strobeDuty = Math.max(
-      0.05,
-      Math.min(0.95, Number(params.spriteStrobeDuty) || 0.45),
-    );
+    const dutyRange = live.spriteStrobeDutyRange ?? [
+      params.spriteStrobeDuty,
+      params.spriteStrobeDuty,
+    ];
+    const strobeDuty = Math.max(0.05, Math.min(0.95, sampleRange(dutyRange)));
     const gain = Math.max(0, live.spriteGain ?? params.spriteGain ?? 1);
     this.sprites.push({
       bornMs: nowMs,
@@ -1169,6 +1216,7 @@ export class LightningController {
       sampleId: pick.id,
       axis,
       gain,
+      audioDynamics: 1,
       strobeHz,
       strobeDuty,
     });
@@ -1185,6 +1233,7 @@ export class LightningController {
     participants: BreathParticipant[],
     tintIndices: number[],
     keyframeU: number,
+    sampleSurfacePoint?: () => [number, number, number] | null,
   ): void {
     const jitter = Math.max(0, sampleRange(params.boltJitterRange));
     const intensity01 = rand();
@@ -1200,7 +1249,15 @@ export class LightningController {
     const path =
       kind === "strike"
         ? sampleGroundStrikePath(ellipsoid, transform, segs + 4, jitter)
-        : sampleBoltPath(ellipsoid, transform, segs, jitter, spanHi, spanLo);
+        : sampleBoltPath(
+            ellipsoid,
+            transform,
+            segs,
+            jitter,
+            spanHi,
+            spanLo,
+            sampleSurfacePoint,
+          );
     // Flash duration is derived from the actual polyline length and a
     // per-strike sampled travel speed. Longer bolts and slower speeds
     // → longer flashes. The `* 4` keeps the existing 25% travel /
@@ -1267,7 +1324,6 @@ export class LightningController {
     transform: CloudTransform,
   ): void {
     out.fill(0);
-    if (!params.enabled) return;
     const hasBolts = this.strikes.length > 0;
     const hasSprites = this.sprites.length > 0;
     if (!hasBolts && !hasSprites) return;
@@ -1281,10 +1337,11 @@ export class LightningController {
         if (totalSegs <= 0) continue;
 
         const u = age / s.durationMs;
-        // Ground strikes use a much larger falloff so the bolt itself
-        // washes through the volume; cloud flashes keep the tight control.
+        // Ground strikes remain path-local. They get a modestly wider halo
+        // than in-cloud flashes, but never a whole-cloud wash.
         const baseFall = Math.max(1e-4, Math.min(0.2, params.falloffDistance));
-        const falloff = s.kind === "strike" ? Math.max(baseFall, 0.55) : baseFall;
+        const falloff =
+          s.kind === "strike" ? Math.min(0.3, baseFall * 1.5) : baseFall;
         const invFalloff = 1 / falloff;
         const cutoff = 5.5 * falloff;
         const cutoffSq = cutoff * cutoff;
@@ -1306,23 +1363,6 @@ export class LightningController {
         const cr = cr0 * strikeGain;
         const cg = cg0 * strikeGain;
         const cb = cb0 * strikeGain;
-
-        // Whole-cloud flood for ground strikes — every LED gets a hard wash
-        // scaled by the envelope so the cloud ignites with the bolt.
-        if (s.kind === "strike") {
-          const flood = Math.max(0, peak) * 0.95;
-          if (flood > 1e-4) {
-            const fr = cr0 * flood;
-            const fg = cg0 * flood;
-            const fb = cb0 * flood;
-            for (let i = 0; i < n; i++) {
-              const i3 = i * 3;
-              out[i3] += fr;
-              out[i3 + 1] += fg;
-              out[i3 + 2] += fb;
-            }
-          }
-        }
 
         accumulatePathContribution(
           positions,
@@ -1374,14 +1414,17 @@ export class LightningController {
       for (const sp of this.sprites) {
         const age = nowMs - sp.bornMs;
         if (age < 0 || age > sp.durationMs) continue;
-        if (!spriteStrobeOn(age, sp.strobeHz, sp.strobeDuty)) continue;
+        const visualEnvelope =
+          params.spriteAudioReactiveBrightness && params.spriteSample
+          ? Math.max(0, Math.min(1, sp.audioDynamics))
+          : spriteFlashEnvelope(sp, nowMs);
+        if (visualEnvelope <= 1e-4) continue;
         const img = getCachedSpriteImage(sp.sampleId);
         if (!img) {
           void ensureSpriteImage(sp.sampleId);
           continue;
         }
-        const uLife = age / sp.durationMs;
-        const env = flashBrightness(uLife) * sp.gain;
+        const env = visualEnvelope * sp.gain;
         if (env <= 1e-4) continue;
         for (let i = 0; i < n; i++) {
           const i3 = i * 3;

@@ -25,6 +25,11 @@ import { getSampleEngine } from "../audio/SampleEngine";
 import { SampleClipEditor } from "./SampleClipEditor";
 import { SampleAutomationStrip } from "./SampleAutomationStrip";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
+import { AudioSoloButton } from "../components/AudioSoloButton";
+import {
+  confirmDestructiveClear,
+  destructiveButtonStyle,
+} from "../components/confirmDestructiveClear";
 
 const HOURS = 24;
 /** Clip waveform / placement area within each track row. */
@@ -388,11 +393,11 @@ export function SamplesPanel() {
         <span style={{ marginLeft: 8, fontSize: 16, fontWeight: 600 }}>
           Samples
         </span>
+        <AudioSoloButton instrument="samples" accent="#fb923c" />
         <button
           onClick={() => setSky({ autoPlay: !sky.autoPlay })}
           style={{
             ...btn,
-            marginLeft: 8,
             background: sky.autoPlay
               ? "rgba(255,225,77,0.25)"
               : "rgba(251,146,60,0.2)",
@@ -644,9 +649,13 @@ export function SamplesPanel() {
               </button>
             </label>
             <button
-              style={btn}
+              style={{ ...btn, ...destructiveButtonStyle }}
               onClick={() => {
-                if (confirm("Clear all clips?")) {
+                if (
+                  confirmDestructiveClear(
+                    `all ${samples.clips.length} sample clips`,
+                  )
+                ) {
                   clearSampleClips();
                   setSelectedId(null);
                 }

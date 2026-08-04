@@ -20,6 +20,7 @@ import { HorizonGuide } from "./scene/HorizonGuide";
 import { Leds } from "./scene/Leds";
 import { LightningBolts } from "./scene/LightningBolts";
 import { Lights } from "./scene/Lights";
+import { SkyDome } from "./scene/SkyDome";
 import { useSimStore } from "./state";
 
 export default function App() {
@@ -76,6 +77,7 @@ export default function App() {
         />
         <axesHelper args={[1]} />
 
+        <SkyDome />
         <Lights />
         <HorizonGuide />
         <Ellipsoid />

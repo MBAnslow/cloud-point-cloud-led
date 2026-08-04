@@ -23,6 +23,9 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
   if (!visible) return null;
   const upd = (patch: Partial<SkyParams>) => setSky(patch);
   const updAmbient = (patch: Partial<AmbientLightParams>) => setAmbient(patch);
+  const orbital = ((sky.timeHours - 6) / 24) * Math.PI * 2;
+  const sunAltitudeDeg = (Math.asin(Math.sin(orbital)) * 180) / Math.PI;
+  const moonAltitudeDeg = -sunAltitudeDeg;
   return (
     <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
       <div
@@ -104,40 +107,67 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           formatValue={(v) => v.toFixed(2)}
         />
         <div style={sectionLabel}>Altitude response</div>
+        <div
+          style={{ fontSize: 10, opacity: 0.72, marginBottom: 3 }}
+          title="Current orbital altitude used by the response controls"
+        >
+          Current: sun {sunAltitudeDeg.toFixed(1)}° · moon{" "}
+          {moonAltitudeDeg.toFixed(1)}°
+        </div>
         <SliderRow
           label="Sun starts"
           value={sky.sunHorizonStartDeg}
-          min={-30}
-          max={15}
+          min={-90}
+          max={90}
           step={0.5}
-          onChange={(v) => upd({ sunHorizonStartDeg: v })}
+          onChange={(v) =>
+            upd({
+              sunHorizonStartDeg: v,
+              sunHorizonFullDeg: Math.max(v, sky.sunHorizonFullDeg),
+            })
+          }
           formatValue={(v) => `${v.toFixed(1)}°`}
         />
         <SliderRow
           label="Sun full"
           value={sky.sunHorizonFullDeg}
-          min={-15}
-          max={45}
+          min={-90}
+          max={90}
           step={0.5}
-          onChange={(v) => upd({ sunHorizonFullDeg: v })}
+          onChange={(v) =>
+            upd({
+              sunHorizonStartDeg: Math.min(v, sky.sunHorizonStartDeg),
+              sunHorizonFullDeg: v,
+            })
+          }
           formatValue={(v) => `${v.toFixed(1)}°`}
         />
         <SliderRow
           label="Moon starts"
           value={sky.moonHorizonStartDeg}
-          min={-30}
-          max={15}
+          min={-90}
+          max={90}
           step={0.5}
-          onChange={(v) => upd({ moonHorizonStartDeg: v })}
+          onChange={(v) =>
+            upd({
+              moonHorizonStartDeg: v,
+              moonHorizonFullDeg: Math.max(v, sky.moonHorizonFullDeg),
+            })
+          }
           formatValue={(v) => `${v.toFixed(1)}°`}
         />
         <SliderRow
           label="Moon full"
           value={sky.moonHorizonFullDeg}
-          min={-15}
-          max={45}
+          min={-90}
+          max={90}
           step={0.5}
-          onChange={(v) => upd({ moonHorizonFullDeg: v })}
+          onChange={(v) =>
+            upd({
+              moonHorizonStartDeg: Math.min(v, sky.moonHorizonStartDeg),
+              moonHorizonFullDeg: v,
+            })
+          }
           formatValue={(v) => `${v.toFixed(1)}°`}
         />
         <div style={sectionLabel}>Lights</div>

@@ -6,10 +6,7 @@
 
 import { currentSnapshot, useSimStore } from "../state";
 import { saveSnapshot } from "./persistence";
-import {
-  autosaveBoundFileIfPermitted,
-  reloadBoundFileIfPossible,
-} from "./fileIO";
+import { autosaveBoundFileIfPermitted } from "./fileIO";
 
 const AUTOSAVE_MS = 400;
 
@@ -21,10 +18,16 @@ export function startPersistence(): void {
   if (started) return;
   started = true;
 
-  // Debounced mirror of every store change into localStorage (and the bound
-  // YAML when write permission is already granted) so breath / panel edits
-  // survive a refresh even if the user never hits Save.
-  useSimStore.subscribe(() => {
+  // Note arrangements are irreplaceable authoring data, so mirror them to
+  // localStorage synchronously on every edit. Other high-frequency changes
+  // (notably the playing sky clock) remain debounced.
+  useSimStore.subscribe((state, previous) => {
+    const arrangementChanged =
+      state.drone.notes !== previous.drone.notes ||
+      state.pad.notes !== previous.pad.notes;
+    if (arrangementChanged) {
+      saveSnapshot(currentSnapshot());
+    }
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       saveSnapshot(currentSnapshot());
@@ -32,10 +35,21 @@ export function startPersistence(): void {
     }, AUTOSAVE_MS);
   });
 
-  // Prefer the last bound YAML file when the browser still grants access.
-  void reloadBoundFileIfPossible().then((res) => {
-    if (res) {
-      console.info(`[persistence] Restored config from ${res.fileName}`);
+  // Flush the latest state before the page is hidden or unloaded. This
+  // closes the debounce window when refreshing, closing, or backgrounding.
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
     }
+    saveSnapshot(currentSnapshot());
+  };
+  window.addEventListener("pagehide", flush);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flush();
   });
+
+  // Do not silently reload the previously bound YAML here. The browser
+  // snapshot is the live autosave and may be newer; files remain available
+  // through the explicit Load controls.
 }

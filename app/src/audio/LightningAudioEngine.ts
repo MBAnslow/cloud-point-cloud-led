@@ -3,6 +3,7 @@ import type { LightningParams, LightningSample } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
 import { pickBoltSample } from "./boltSampleMatch";
 import { ensureLimitedAux } from "./MasterFxBus";
+import { meterAbs } from "./meterAbs";
 
 /**
  * Audio engine for the lightning system.
@@ -27,11 +28,21 @@ export class LightningAudioEngine {
   private bgWasEnabled = false;
   private boltBuffers = new Map<string, AudioBuffer>();
   private pendingLoads = new Set<string>();
+  private spriteVoices = new Map<
+    number,
+    {
+      gain: Tone.Gain;
+      baseGain: number;
+      meter: Tone.Meter;
+      audioEndsAt: number;
+    }
+  >();
   private voices: Array<{
     source: Tone.ToneBufferSource;
     pitchShift: Tone.PitchShift | null;
     gain: Tone.Gain;
     panner: Tone.Panner;
+    meter: Tone.Meter;
     endsAt: number;
   }> = [];
 
@@ -55,6 +66,7 @@ export class LightningAudioEngine {
    */
   update(p: LightningParams, active: boolean): void {
     if (!this.started || !this.out) return;
+    this.reap();
     const bgWanted = p.enabled && active && !!p.backgroundSample;
     void this.syncBackground(
       p.backgroundSample,
@@ -77,7 +89,6 @@ export class LightningAudioEngine {
     match?: { intensity01: number; durationMs: number },
   ): void {
     if (!this.started || !this.out) return;
-    if (!p.enabled) return;
     if (p.boltSamples.length === 0) return;
     const sample =
       pickBoltSample(
@@ -100,7 +111,6 @@ export class LightningAudioEngine {
     pan = p.pan ?? 0,
   ): void {
     if (!this.started || !this.out) return;
-    if (!p.enabled) return;
     const sample = p.strikeSample;
     if (!sample) return;
     this.playOneShot(p, sample, strikeIntensity, boltGain, pan);
@@ -113,14 +123,45 @@ export class LightningAudioEngine {
   triggerSprite(
     p: LightningParams,
     intensity = 1,
-    gain = p.spriteGain,
+    gain = p.spriteAudioGain,
     pan = p.pan ?? 0,
+    eventId?: number,
   ): void {
     if (!this.started || !this.out) return;
-    if (!p.enabled) return;
     const sample = p.spriteSample;
     if (!sample) return;
-    this.playOneShot(p, sample, intensity, gain, pan);
+    const voice = this.playOneShot(p, sample, intensity, gain, pan);
+    if (voice && eventId !== undefined) {
+      this.spriteVoices.set(eventId, voice);
+    }
+  }
+
+  /** Apply the shared visual strobe envelope to an active sprite voice. */
+  setSpriteEnvelope(eventId: number, envelope: number): void {
+    const voice = this.spriteVoices.get(eventId);
+    if (!voice) return;
+    const target = voice.baseGain * Math.max(0, Math.min(1, envelope));
+    voice.gain.gain.rampTo(target, 0.008);
+  }
+
+  /**
+   * Source-waveform loudness for visual modulation. The meter is connected
+   * before the user volume gain, so Sprite volume cannot alter brightness.
+   */
+  getSpriteDynamics(eventId: number): number {
+    const voice = this.spriteVoices.get(eventId);
+    if (!voice) return 0;
+    const raw = meterAbs(voice.meter.getValue());
+    if (!Number.isFinite(raw)) return 0;
+    // Ignore tiny decoder/meter tail impulses, then taper the final 50 ms so
+    // an end-of-buffer discontinuity cannot become a full visual flash.
+    if (raw <= 0.002) return 0;
+    const tail = Math.max(
+      0,
+      Math.min(1, (voice.audioEndsAt - Tone.now()) / 0.05),
+    );
+    const level = (Math.sqrt(raw) - Math.sqrt(0.002)) * 2.7;
+    return Math.max(0, Math.min(1, level)) * tail;
   }
 
   /** Preload all referenced buffers so first triggers aren't skipped. */
@@ -137,12 +178,17 @@ export class LightningAudioEngine {
     strikeIntensity: number,
     boltGain: number,
     pan: number,
-  ): void {
-    if (!this.out) return;
+  ): {
+    gain: Tone.Gain;
+    baseGain: number;
+    meter: Tone.Meter;
+    audioEndsAt: number;
+  } | null {
+    if (!this.out) return null;
     const buf = this.boltBuffers.get(sample.id);
     if (!buf) {
       void this.ensureBoltBuffer(sample.id);
-      return;
+      return null;
     }
     // Random pitch in ±boltPitchJitterCents. Use PitchShift (semitones)
     // rather than playbackRate so thunder keeps its length — rate-only
@@ -162,6 +208,7 @@ export class LightningAudioEngine {
     });
     const gain = new Tone.Gain(gainLin);
     const panner = new Tone.Panner(panVal);
+    const meter = new Tone.Meter({ normalRange: true, smoothing: 0.8 });
     let pitchShift: Tone.PitchShift | null = null;
     if (Math.abs(semitones) >= 0.01) {
       pitchShift = new Tone.PitchShift({
@@ -171,8 +218,10 @@ export class LightningAudioEngine {
       });
       source.connect(pitchShift);
       pitchShift.connect(gain);
+      pitchShift.connect(meter);
     } else {
       source.connect(gain);
+      source.connect(meter);
     }
     gain.connect(panner);
     panner.connect(this.out);
@@ -184,7 +233,8 @@ export class LightningAudioEngine {
       pitchShift?.dispose();
       gain.dispose();
       panner.dispose();
-      return;
+      meter.dispose();
+      return null;
     }
     // PitchShift adds a short delay line; keep the voice alive a bit longer.
     const dur = buf.duration + (pitchShift ? 0.2 : 0.05);
@@ -193,9 +243,16 @@ export class LightningAudioEngine {
       pitchShift,
       gain,
       panner,
+      meter,
       endsAt: Tone.now() + dur,
     });
     this.reap();
+    return {
+      gain,
+      baseGain: gainLin,
+      meter,
+      audioEndsAt: Tone.now() + buf.duration,
+    };
   }
 
   private reap(): void {
@@ -211,6 +268,10 @@ export class LightningAudioEngine {
         v.pitchShift?.dispose();
         v.gain.dispose();
         v.panner.dispose();
+        v.meter.dispose();
+        for (const [id, spriteVoice] of this.spriteVoices) {
+          if (spriteVoice.gain === v.gain) this.spriteVoices.delete(id);
+        }
         return false;
       }
       return true;

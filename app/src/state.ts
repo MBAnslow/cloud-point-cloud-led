@@ -20,6 +20,7 @@ export type LedViewMode =
  */
 export type LedDisplayMode = "sensors" | "leds";
 export type BreathTimeCombineMode = "revealOnInhale" | "linearMix";
+export type AudioSolo = "drone" | "pad" | "samples" | null;
 
 export interface LedStreamPipeline {
   /** Enables the base time-of-day lighting stage. */
@@ -93,6 +94,8 @@ export interface LightningAnimParams {
    * Each trigger picks a random uploaded image and a random ±X/Y/Z axis.
    */
   spritesPerMinute: number;
+  /** Per-sprite strobe duty range sampled at spawn, [0.05, 0.95]. */
+  spriteStrobeDutyRange: [number, number];
   /**
    * Per-segment branch probability in [0, 1]. At each interior main-bolt
    * vertex, a weaker side branch spawns with this chance (1 = every segment).
@@ -232,6 +235,10 @@ export interface LightningParams {
   boltGain: number;
   /** Additive LED gain for projected sprites. Also keyframed. */
   spriteGain: number;
+  /** Playback gain for the sprite sound effect, independent of brightness. */
+  spriteAudioGain: number;
+  /** Modulate sprite brightness from the source audio waveform. */
+  spriteAudioReactiveBrightness: boolean;
   /** Playback gain for the background loop, [0, 1]. */
   backgroundGain: number;
   /**
@@ -1610,6 +1617,8 @@ export interface SimState {
   mapping: MappingParams;
   mesh: MeshTargetParams;
   ui: UiParams;
+  /** Transient mixer solo; intentionally not persisted. */
+  audioSolo: AudioSolo;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
   setCloudTop: (c: Partial<CloudTopParams>) => void;
@@ -1658,6 +1667,7 @@ export interface SimState {
   setMapping: (m: Partial<MappingParams>) => void;
   setMesh: (m: Partial<MeshTargetParams>) => void;
   setUi: (u: Partial<UiParams>) => void;
+  setAudioSolo: (solo: AudioSolo) => void;
   addMappedLed: (dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
   moveMappedLed: (index: number, dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
   updateMappedLed: (index: number, patch: Partial<MappedLed>) => void;
@@ -1958,6 +1968,7 @@ const DEFAULTS = {
           strikesPerMinute: 2,
           strikePerMinute: 0.3,
           spritesPerMinute: 0.5,
+          spriteStrobeDutyRange: [0.3, 0.6],
           subFlashes: 0.25,
           spanScale: 0.7,
           minSpanScale: 0.4,
@@ -1977,6 +1988,7 @@ const DEFAULTS = {
           strikesPerMinute: 8,
           strikePerMinute: 1,
           spritesPerMinute: 2,
+          spriteStrobeDutyRange: [0.2, 0.55],
           subFlashes: 0.4,
           spanScale: 0.85,
           minSpanScale: 0.5,
@@ -1996,6 +2008,7 @@ const DEFAULTS = {
           strikesPerMinute: 2,
           strikePerMinute: 0.3,
           spritesPerMinute: 0.5,
+          spriteStrobeDutyRange: [0.3, 0.6],
           subFlashes: 0.25,
           spanScale: 0.7,
           minSpanScale: 0.4,
@@ -2030,6 +2043,8 @@ const DEFAULTS = {
     spriteStrobeDuty: 0.45,
     boltGain: 0.8,
     spriteGain: 1.4,
+    spriteAudioGain: 1,
+    spriteAudioReactiveBrightness: true,
     backgroundGain: 0.35,
     boltPitchJitterCents: 200,
     thunderDelayMs: 800,
@@ -2197,6 +2212,7 @@ const DEFAULTS = {
     showCloud: false,
     showStream: false,
   } as UiParams,
+  audioSolo: null as AudioSolo,
 };
 
 function normalizeLedViewMode(mode: unknown): LedViewMode {
@@ -2945,6 +2961,10 @@ function cloneAnimParams(src: LightningAnimParams): LightningAnimParams {
     strikesPerMinute: src.strikesPerMinute,
     strikePerMinute: src.strikePerMinute,
     spritesPerMinute: src.spritesPerMinute,
+    spriteStrobeDutyRange: [
+      src.spriteStrobeDutyRange[0],
+      src.spriteStrobeDutyRange[1],
+    ],
     subFlashes: src.subFlashes,
     spanScale: src.spanScale,
     minSpanScale: src.minSpanScale,
@@ -2972,6 +2992,7 @@ function animParamsFromRoot(p: {
   strikesPerMinute: number;
   strikePerMinute: number;
   spritesPerMinute: number;
+  spriteStrobeDutyRange: [number, number];
   subFlashes: number;
   spanScale: number;
   minSpanScale: number;
@@ -3011,6 +3032,25 @@ function resolveAnimParams(
     }
     return fallback.intensityRange;
   })();
+  const spriteStrobeDutyRange = (() => {
+    const v = rec.spriteStrobeDutyRange;
+    if (
+      Array.isArray(v) &&
+      v.length === 2 &&
+      typeof v[0] === "number" &&
+      typeof v[1] === "number"
+    ) {
+      const lo = Math.max(0.05, Math.min(0.95, Math.min(v[0], v[1])));
+      const hi = Math.max(lo, Math.min(0.95, Math.max(v[0], v[1])));
+      return [lo, hi] as [number, number];
+    }
+    const legacy = rec.spriteStrobeDuty;
+    if (typeof legacy === "number" && Number.isFinite(legacy)) {
+      const duty = Math.max(0.05, Math.min(0.95, legacy));
+      return [duty, duty] as [number, number];
+    }
+    return fallback.spriteStrobeDutyRange;
+  })();
   const num = (v: unknown, fb: number) =>
     typeof v === "number" && Number.isFinite(v) ? v : fb;
   const spanScale = Math.max(0, Math.min(1, num(rec.spanScale, fallback.spanScale)));
@@ -3032,6 +3072,7 @@ function resolveAnimParams(
       0,
       Math.min(40, num(rec.spritesPerMinute, fallback.spritesPerMinute)),
     ),
+    spriteStrobeDutyRange,
     subFlashes: migrateSubFlashes(num(rec.subFlashes, fallback.subFlashes)),
     spanScale,
     minSpanScale,
@@ -3278,6 +3319,14 @@ function resolveLightning(input: unknown): LightningParams {
           typeof saved.spritesPerMinute === "number"
             ? saved.spritesPerMinute
             : d.spritesPerMinute,
+        spriteStrobeDutyRange: [
+          typeof saved.spriteStrobeDuty === "number"
+            ? Math.max(0.05, Math.min(0.95, saved.spriteStrobeDuty))
+            : d.spriteStrobeDuty,
+          typeof saved.spriteStrobeDuty === "number"
+            ? Math.max(0.05, Math.min(0.95, saved.spriteStrobeDuty))
+            : d.spriteStrobeDuty,
+        ],
         subFlashes: migrateSubFlashes(
           typeof saved.subFlashes === "number" ? saved.subFlashes : d.subFlashes,
         ),
@@ -3377,7 +3426,7 @@ function resolveLightning(input: unknown): LightningParams {
     spriteDurationMs: (() => {
       const v = (saved as Record<string, unknown>).spriteDurationMs;
       if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteDurationMs;
-      return Math.max(20, Math.min(2000, v));
+      return Math.max(20, Math.min(3000, v));
     })(),
     spriteStrobeHz: (() => {
       const v = (saved as Record<string, unknown>).spriteStrobeHz;
@@ -3394,6 +3443,21 @@ function resolveLightning(input: unknown): LightningParams {
       if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteGain;
       return Math.max(0, Math.min(3, v));
     })(),
+    spriteAudioGain: (() => {
+      const rec = saved as Record<string, unknown>;
+      const v =
+        typeof rec.spriteAudioGain === "number"
+          ? rec.spriteAudioGain
+          : rec.spriteGain;
+      if (typeof v !== "number" || !Number.isFinite(v)) return d.spriteAudioGain;
+      return Math.max(0, Math.min(3, v));
+    })(),
+    spriteAudioReactiveBrightness:
+      typeof (saved as Record<string, unknown>).spriteAudioReactiveBrightness ===
+      "boolean"
+        ? ((saved as Record<string, unknown>)
+            .spriteAudioReactiveBrightness as boolean)
+        : d.spriteAudioReactiveBrightness,
     boltPitchJitterCents: (() => {
       const v = (saved as Record<string, unknown>).boltPitchJitterCents;
       if (typeof v !== "number" || !Number.isFinite(v)) {
@@ -3661,6 +3725,7 @@ function initialState() {
     mapping: resolveMapping(saved.mapping),
     mesh: { ...DEFAULTS.mesh, ...(saved.mesh ?? {}) },
     ui: { ...DEFAULTS.ui, ...(saved.ui ?? {}) },
+    audioSolo: null,
   };
 }
 
@@ -3874,6 +3939,7 @@ export const useSimStore = create<SimState>((set) => ({
   setMapping: (m) => set((s) => ({ mapping: { ...s.mapping, ...m } })),
   setMesh: (m) => set((s) => ({ mesh: { ...s.mesh, ...m } })),
   setUi: (u) => set((s) => ({ ui: { ...s.ui, ...u } })),
+  setAudioSolo: (audioSolo) => set({ audioSolo }),
   addMappedLed: (dir, pos, normal) =>
     set((s) => ({
       mapping: {
