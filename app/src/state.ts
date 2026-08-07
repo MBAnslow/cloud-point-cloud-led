@@ -1793,6 +1793,14 @@ export interface MappingParams {
    * bead in the strand.
    */
   maxSegmentLength: number;
+  /** Show the 3D Gaussian displacement surfaces in the mapping view. */
+  showBumpSurfaces: boolean;
+  /** Mapping-only inspection light orbit angle around the mesh. */
+  mappingLightAngleDeg: number;
+  /** Mapping-only inspection light vertical orbit around the mesh, 0..360°. */
+  mappingLightElevationDeg: number;
+  /** Mapping-only inspection light brightness. */
+  mappingLightIntensity: number;
   /** Surface Gaussian bumps that lift / tilt nearby LEDs. */
   gaussians: MappingGaussian[];
 }
@@ -2193,6 +2201,10 @@ const DEFAULTS = {
     reversed: false,
     ledSize: 0.01,
     maxSegmentLength: 0.05,
+    showBumpSurfaces: false,
+    mappingLightAngleDeg: 45,
+    mappingLightElevationDeg: 45,
+    mappingLightIntensity: 1.5,
     gaussians: [],
   } as MappingParams,
   mesh: {
@@ -3623,6 +3635,33 @@ function resolveMapping(input: unknown): MappingParams {
       Number.isFinite(saved.maxSegmentLength)
         ? saved.maxSegmentLength
         : d.maxSegmentLength,
+    showBumpSurfaces:
+      typeof saved.showBumpSurfaces === "boolean"
+        ? saved.showBumpSurfaces
+        : d.showBumpSurfaces,
+    mappingLightAngleDeg:
+      typeof saved.mappingLightAngleDeg === "number"
+        ? saved.mappingLightAngleDeg
+        : d.mappingLightAngleDeg,
+    mappingLightElevationDeg:
+      typeof saved.mappingLightElevationDeg === "number"
+        ? ((saved.mappingLightElevationDeg % 360) + 360) % 360
+        : typeof (saved as Record<string, unknown>).mappingLightHeight === "number"
+          ? Math.asin(
+              Math.max(
+                -1,
+                Math.min(
+                  1,
+                  ((saved as Record<string, number>).mappingLightHeight ?? 0) / 5,
+                ),
+              ),
+            ) *
+            (180 / Math.PI)
+          : d.mappingLightElevationDeg,
+    mappingLightIntensity:
+      typeof saved.mappingLightIntensity === "number"
+        ? saved.mappingLightIntensity
+        : d.mappingLightIntensity,
     flipUpDown: typeof saved.flipUpDown === "boolean" ? saved.flipUpDown : d.flipUpDown,
     flipLeftRight:
       typeof saved.flipLeftRight === "boolean" ? saved.flipLeftRight : d.flipLeftRight,

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useThree, type ThreeEvent } from "@react-three/fiber";
+import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Billboard, Line, OrbitControls, Text } from "@react-three/drei";
 import {
   BufferGeometry,
+  DoubleSide,
   Euler,
+  Float32BufferAttribute,
   Matrix3,
   Matrix4,
   Quaternion,
@@ -15,6 +17,7 @@ import { useSimStore, type Vec3 } from "../state";
 import { applyMappingOrientationPoint } from "./geometry";
 import { displaceLed, gaussianTangentFrame, orientGaussians } from "./gaussians";
 import { loadMeshGeometry } from "./meshAsset";
+import { WledStreamClient } from "../wled/client";
 
 interface Props {
   selected: number | null;
@@ -40,6 +43,7 @@ export function MappingScene({
   setSelectedGaussianId,
 }: Props) {
   const mapping = useSimStore((s) => s.mapping);
+  const wled = useSimStore((s) => s.wled);
   const mesh = useSimStore((s) => s.mesh);
   const addMappedLed = useSimStore((s) => s.addMappedLed);
   const moveMappedLed = useSimStore((s) => s.moveMappedLed);
@@ -77,6 +81,16 @@ export function MappingScene({
   const pointerNdc = useMemo(() => new Vector2(), []);
   const [orbitEnabled, setOrbitEnabled] = useState(true);
   const [hover, setHover] = useState<{ pos: Vec3; normal: Vec3 } | null>(null);
+  const mappingLightPos = useMemo<Vec3>(() => {
+    const azimuth = (mapping.mappingLightAngleDeg * Math.PI) / 180;
+    const elevation = (mapping.mappingLightElevationDeg * Math.PI) / 180;
+    const horizontalRadius = Math.cos(elevation) * 5;
+    return [
+      Math.cos(azimuth) * horizontalRadius,
+      Math.sin(elevation) * 5,
+      Math.sin(azimuth) * horizontalRadius,
+    ];
+  }, [mapping.mappingLightAngleDeg, mapping.mappingLightElevationDeg]);
 
   const isOffsetTool = mapping.tool === "offset";
   const isGaussianTool = mapping.tool === "gaussian";
@@ -244,6 +258,47 @@ export function MappingScene({
     meshMatrix,
     meshNormalMat,
   ]);
+  const wledClient = useMemo(() => new WledStreamClient(), []);
+  const lastMappingSendRef = useRef(0);
+  useEffect(() => {
+    if (wled.enabled) wledClient.start();
+    else wledClient.stop();
+    return () => wledClient.stop();
+  }, [wled.enabled, wledClient]);
+  useEffect(() => {
+    wledClient.setTarget(wled.host, 4048);
+  }, [wled.host, wledClient]);
+  useFrame(() => {
+    if (!wled.enabled || beads.length === 0) return;
+    const now = performance.now();
+    if (now - lastMappingSendRef.current < 1000 / Math.max(1, wled.fps)) return;
+    const bytes = new Uint8Array(beads.length * 3);
+    for (let outIndex = 0; outIndex < beads.length; outIndex++) {
+      const sourceIndex = mapping.reversed
+        ? beads.length - 1 - outIndex
+        : outIndex;
+      const bead = beads[sourceIndex]!;
+      const lx = mappingLightPos[0] - bead.pos[0];
+      const ly = mappingLightPos[1] - bead.pos[1];
+      const lz = mappingLightPos[2] - bead.pos[2];
+      const ll = Math.hypot(lx, ly, lz) || 1;
+      const diffuse = Math.max(
+        0,
+        bead.normal[0] * (lx / ll) +
+          bead.normal[1] * (ly / ll) +
+          bead.normal[2] * (lz / ll),
+      );
+      const level = Math.max(
+        0,
+        Math.min(1, 0.06 + diffuse * mapping.mappingLightIntensity),
+      );
+      const value = Math.round(level * 255);
+      bytes[outIndex * 3] = value;
+      bytes[outIndex * 3 + 1] = value;
+      bytes[outIndex * 3 + 2] = value;
+    }
+    if (wledClient.send(bytes)) lastMappingSendRef.current = now;
+  });
 
   const gaussianMarkers = useMemo(() => {
     return orientedGaussians.map((g) => {
@@ -255,25 +310,94 @@ export function MappingScene({
         wp[1] + wn[1] * lift,
         wp[2] + wn[2] * lift,
       ];
-      // Elliptical ring at ~2× width/height in the tangent plane.
-      const ring: Vec3[] = [];
-      const rw = g.width * 2;
-      const rh = g.height * 2;
       const frame = gaussianTangentFrame(wn, g.rotationDeg ?? 0);
       const t1 = new Vector3(frame.tW[0], frame.tW[1], frame.tW[2]);
       const t2 = new Vector3(frame.tH[0], frame.tH[1], frame.tH[2]);
       const steps = 48;
-      for (let i = 0; i <= steps; i++) {
-        const a = (i / steps) * Math.PI * 2;
-        const c = Math.cos(a);
-        const s = Math.sin(a);
-        ring.push([
-          wp[0] + t1.x * c * rw + t2.x * s * rh + wn[0] * lift * 0.2,
-          wp[1] + t1.y * c * rw + t2.y * s * rh + wn[1] * lift * 0.2,
-          wp[2] + t1.z * c * rw + t2.z * s * rh + wn[2] * lift * 0.2,
-        ]);
+      const makeRing = (scale: number): Vec3[] => {
+        const ring: Vec3[] = [];
+        for (let i = 0; i <= steps; i++) {
+          const a = (i / steps) * Math.PI * 2;
+          const c = Math.cos(a);
+          const s = Math.sin(a);
+          ring.push([
+            wp[0] + t1.x * c * g.width * scale + t2.x * s * g.height * scale + wn[0] * lift * 0.2,
+            wp[1] + t1.y * c * g.width * scale + t2.y * s * g.height * scale + wn[1] * lift * 0.2,
+            wp[2] + t1.z * c * g.width * scale + t2.z * s * g.height * scale + wn[2] * lift * 0.2,
+          ]);
+        }
+        return ring;
+      };
+      // Actual Gaussian height field used by displaceLed:
+      // h(u,v) = amplitude * exp(-0.5 * ((u/w)^2 + (v/h)^2)).
+      // Build in mesh-local tangent space, then apply the same mesh transform.
+      const localFrame = gaussianTangentFrame(g.normal, g.rotationDeg ?? 0);
+      const radialSteps = 16;
+      const angularSteps = 48;
+      // Stop where the Gaussian falls below 4% of its peak. A radial mesh
+      // follows the elliptical falloff boundary, avoiding a square base.
+      const extent = Math.sqrt(-2 * Math.log(0.04));
+      const vertices: number[] = [];
+      const indices: number[] = [];
+      const pushVertex = (ux: number, vy: number) => {
+          const u = ux * g.width;
+          const v = vy * g.height;
+          const height =
+            g.amplitude * Math.exp(-0.5 * (ux * ux + vy * vy));
+          const local: Vec3 = [
+            g.pos[0] +
+              localFrame.tW[0] * u +
+              localFrame.tH[0] * v +
+              localFrame.n[0] * height,
+            g.pos[1] +
+              localFrame.tW[1] * u +
+              localFrame.tH[1] * v +
+              localFrame.n[1] * height,
+            g.pos[2] +
+              localFrame.tW[2] * u +
+              localFrame.tH[2] * v +
+              localFrame.n[2] * height,
+          ];
+          const world = localToWorldPos(local);
+          vertices.push(world[0], world[1], world[2]);
+      };
+      pushVertex(0, 0);
+      for (let ring = 1; ring <= radialSteps; ring++) {
+        const radius = (ring / radialSteps) * extent;
+        for (let segment = 0; segment < angularSteps; segment++) {
+          const a = (segment / angularSteps) * Math.PI * 2;
+          pushVertex(Math.cos(a) * radius, Math.sin(a) * radius);
+        }
       }
-      return { id: g.id, pos, normal: wn, ring };
+      for (let segment = 0; segment < angularSteps; segment++) {
+        indices.push(0, 1 + segment, 1 + ((segment + 1) % angularSteps));
+      }
+      for (let ring = 1; ring < radialSteps; ring++) {
+        const inner = 1 + (ring - 1) * angularSteps;
+        const outer = 1 + ring * angularSteps;
+        for (let segment = 0; segment < angularSteps; segment++) {
+          const next = (segment + 1) % angularSteps;
+          indices.push(
+            inner + segment,
+            outer + segment,
+            inner + next,
+            inner + next,
+            outer + segment,
+            outer + next,
+          );
+        }
+      }
+      const surface = new BufferGeometry();
+      surface.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+      surface.setIndex(indices);
+      surface.computeVertexNormals();
+      return {
+        id: g.id,
+        pos,
+        normal: wn,
+        ring: makeRing(2),
+        surface,
+      };
     });
   }, [
     orientedGaussians,
@@ -281,6 +405,12 @@ export function MappingScene({
     meshMatrix,
     meshNormalMat,
   ]);
+  useEffect(
+    () => () => {
+      for (const marker of gaussianMarkers) marker.surface.dispose();
+    },
+    [gaussianMarkers],
+  );
 
   const linePoints = useMemo<Vec3[]>(
     () => beads.map((b) => [...b.pos] as Vec3),
@@ -500,10 +630,20 @@ export function MappingScene({
 
   return (
     <>
-      <ambientLight intensity={1.1} />
-      <hemisphereLight args={["#ffffff", "#20242e", 0.55]} />
-      <directionalLight position={[4, 6, 4]} intensity={0.9} />
-      <directionalLight position={[-5, -2, -3]} intensity={0.35} />
+      <ambientLight intensity={0.18} />
+      <hemisphereLight args={["#b8c7e8", "#151923", 0.22]} />
+      <spotLight
+        position={mappingLightPos}
+        intensity={mapping.mappingLightIntensity}
+        angle={Math.PI / 3}
+        penumbra={0.35}
+        distance={0}
+        decay={1}
+      />
+      <mesh position={mappingLightPos}>
+        <sphereGeometry args={[0.08, 12, 8]} />
+        <meshBasicMaterial color="#fff3d0" />
+      </mesh>
 
       <CoordinateGrid />
       <axesHelper args={[0.5]} />
@@ -667,7 +807,7 @@ export function MappingScene({
         );
       })}
 
-      {gaussianMarkers.map(({ id, pos, normal, ring }) => {
+      {gaussianMarkers.map(({ id, pos, normal, ring, surface }) => {
         const isSel = id === selectedGaussianId;
         const front = facesCamera(pos, normal);
         const color = isSel ? GAUSS_SELECTED : GAUSS_COLOR;
@@ -680,6 +820,31 @@ export function MappingScene({
               transparent
               opacity={front ? 0.85 : 0.25}
             />
+            {mapping.showBumpSurfaces && (
+              <>
+                <mesh geometry={surface} raycast={() => null}>
+                  <meshStandardMaterial
+                    color={color}
+                    roughness={0.72}
+                    metalness={0}
+                    transparent
+                    opacity={isSel ? 0.58 : 0.4}
+                    side={DoubleSide}
+                    depthWrite={false}
+                  />
+                </mesh>
+                <mesh geometry={surface} raycast={() => null}>
+                  <meshBasicMaterial
+                    color="#f7fbff"
+                    transparent
+                    opacity={isSel ? 0.3 : 0.16}
+                    wireframe
+                    side={DoubleSide}
+                    depthWrite={false}
+                  />
+                </mesh>
+              </>
+            )}
             <mesh
               position={pos}
               onPointerDown={(e) => {

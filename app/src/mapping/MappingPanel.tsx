@@ -29,6 +29,8 @@ export function MappingPanel({
 }: Props) {
   const mapping = useSimStore((s) => s.mapping);
   const setMapping = useSimStore((s) => s.setMapping);
+  const wled = useSimStore((s) => s.wled);
+  const setWled = useSimStore((s) => s.setWled);
   const mesh = useSimStore((s) => s.mesh);
   const setMesh = useSimStore((s) => s.setMesh);
   const updateMappedLed = useSimStore((s) => s.updateMappedLed);
@@ -354,9 +356,29 @@ export function MappingPanel({
           </div>
         )}
         {tool === "gaussian" && (
-          <div style={{ marginBottom: 8, opacity: 0.85 }}>
-            {gaussians.length} bump{gaussians.length === 1 ? "" : "s"}
-          </div>
+          <>
+            <div style={{ marginBottom: 6, opacity: 0.85 }}>
+              {gaussians.length} bump{gaussians.length === 1 ? "" : "s"}
+            </div>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                marginBottom: 8,
+              }}
+              title="Show the actual 3D Gaussian height field used to displace LEDs"
+            >
+              <input
+                type="checkbox"
+                checked={mapping.showBumpSurfaces}
+                onChange={(e) =>
+                  setMapping({ showBumpSurfaces: e.target.checked })
+                }
+              />
+              Show 3D bump shape
+            </label>
+          </>
         )}
         {tool === "gaussian" && selectedGaussian && (
           <div
@@ -536,6 +558,71 @@ export function MappingPanel({
             setSelected(null);
             setSelectedGaussianId(null);
           }}
+        />
+      </Section>
+
+      <Section title="Mapping light">
+        <SliderRow
+          label="Orbit"
+          value={mapping.mappingLightAngleDeg}
+          min={0}
+          max={360}
+          step={1}
+          onChange={(v) => setMapping({ mappingLightAngleDeg: v })}
+          format={(v) => `${Math.round(v)}°`}
+        />
+        <SliderRow
+          label="Vertical"
+          value={mapping.mappingLightElevationDeg}
+          min={0}
+          max={360}
+          step={1}
+          onChange={(v) => setMapping({ mappingLightElevationDeg: v })}
+          format={(v) => `${Math.round(v)}°`}
+        />
+        <SliderRow
+          label="Intensity"
+          value={mapping.mappingLightIntensity}
+          min={0}
+          max={5}
+          step={0.05}
+          onChange={(v) => setMapping({ mappingLightIntensity: v })}
+          format={(v) => v.toFixed(2)}
+        />
+      </Section>
+
+      <Section title="WLED mapping stream">
+        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={wled.enabled}
+            onChange={(e) => setWled({ enabled: e.target.checked })}
+          />
+          Stream mapping light to WLED
+        </label>
+        <label style={{ display: "grid", gap: 3, marginTop: 7 }}>
+          <span style={{ opacity: 0.7 }}>Host</span>
+          <input
+            type="text"
+            value={wled.host}
+            onChange={(e) => setWled({ host: e.target.value })}
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              color: "inherit",
+              border: "1px solid rgba(255,255,255,0.18)",
+              borderRadius: 5,
+              padding: "5px 7px",
+            }}
+          />
+        </label>
+        <SliderRow
+          label="FPS"
+          value={wled.fps}
+          min={1}
+          max={60}
+          step={1}
+          onChange={(v) => setWled({ fps: v })}
+          format={(v) => `${Math.round(v)}`}
         />
       </Section>
 
