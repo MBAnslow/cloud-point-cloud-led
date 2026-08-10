@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Billboard, Line, OrbitControls, Text } from "@react-three/drei";
 import {
@@ -12,6 +12,7 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
+  Object3D,
   Quaternion,
   Raycaster,
   Vector2,
@@ -30,11 +31,23 @@ import {
 import { loadMeshGeometry } from "./meshAsset";
 import { WledStreamClient } from "../wled/client";
 import {
+  pointLightDistanceAttenuation,
+  sensorAngularResponse,
+  spotConeAttenuation,
+  spreadToSpotAngle,
+} from "../lighting/shade";
+import {
   clearBakedSurfaceGeometry,
   getBakedSurfaceGeometry,
   setBakedSurfaceGeometry,
 } from "./bakedSurface";
 import { mappingBakeSignature } from "./bakeSignature";
+import {
+  alignMarkerNormal,
+  MARKER_MATERIAL_DEFAULTS,
+  markerRadius,
+  markerSphereArgs,
+} from "./markerVisual";
 
 interface Props {
   selected: number | null;
@@ -43,9 +56,6 @@ interface Props {
   setSelectedGaussianId: (id: string | null) => void;
 }
 
-const BASE_COLOR = "#ff9a3c";
-const LAST_COLOR = "#46e16e";
-const SELECTED_COLOR = "#ffffff";
 const GAUSS_COLOR = "#7ec8ff";
 const GAUSS_SELECTED = "#ffe14d";
 const SENSOR_HEMISPHERE_SAMPLES = Array.from({ length: 32 }, (_, i) => {
@@ -68,6 +78,7 @@ export function MappingScene({
   const mapping = useSimStore((s) => s.mapping);
   const setMapping = useSimStore((s) => s.setMapping);
   const strand = useSimStore((s) => s.strand);
+  const cloud = useSimStore((s) => s.cloud);
   const wled = useSimStore((s) => s.wled);
   const mesh = useSimStore((s) => s.mesh);
   const addMappedLed = useSimStore((s) => s.addMappedLed);
@@ -106,6 +117,10 @@ export function MappingScene({
   const pointerNdc = useMemo(() => new Vector2(), []);
   const [orbitEnabled, setOrbitEnabled] = useState(true);
   const [hover, setHover] = useState<{ pos: Vec3; normal: Vec3 } | null>(null);
+  const mappingLightTarget = useMemo<Vec3>(
+    () => [0, mesh.offsetY, 0],
+    [mesh.offsetY],
+  );
   const mappingLightPos = useMemo<Vec3>(() => {
     const azimuth = (mapping.mappingLightAngleDeg * Math.PI) / 180;
     // UI sweep 0..360 maps monotonically from +90° (above) to −90° (below).
@@ -114,15 +129,21 @@ export function MappingScene({
     const radius = mapping.mappingLightRadius;
     const horizontalRadius = Math.cos(elevation) * radius;
     return [
-      Math.cos(azimuth) * horizontalRadius,
-      Math.sin(elevation) * radius,
-      Math.sin(azimuth) * horizontalRadius,
+      mappingLightTarget[0] + Math.cos(azimuth) * horizontalRadius,
+      mappingLightTarget[1] + Math.sin(elevation) * radius,
+      mappingLightTarget[2] + Math.sin(azimuth) * horizontalRadius,
     ];
   }, [
     mapping.mappingLightAngleDeg,
     mapping.mappingLightElevationDeg,
     mapping.mappingLightRadius,
+    mappingLightTarget,
   ]);
+  const mappingSpotTarget = useMemo(() => new Object3D(), []);
+  useLayoutEffect(() => {
+    mappingSpotTarget.position.set(...mappingLightTarget);
+    mappingSpotTarget.updateMatrixWorld();
+  }, [mappingLightTarget, mappingSpotTarget]);
 
   const isOffsetTool = mapping.tool === "offset";
   const isGaussianTool = mapping.tool === "gaussian";
@@ -335,10 +356,12 @@ export function MappingScene({
           0,
           mapping.bumpAdditivity,
         );
+        const displacedNormal = alignMarkerNormal(displaced.normal, ln);
+        const displaced0Normal = alignMarkerNormal(displaced0.normal, ln);
         const wp = localToWorldPos(displaced.pos);
-        const wn = localToWorldNrm(displaced.normal);
+        const wn = localToWorldNrm(displacedNormal);
         const baseWorld = localToWorldPos(displaced0.pos);
-        const baseNormal = localToWorldNrm(displaced0.normal);
+        const baseNormal = localToWorldNrm(displaced0Normal);
         const quat = new Quaternion().setFromUnitVectors(
           new Vector3(0, 1, 0),
           new Vector3(wn[0], wn[1], wn[2]),
@@ -348,7 +371,7 @@ export function MappingScene({
           pos: wp,
           normal: wn,
           localPos: displaced.pos,
-          localNormal: displaced.normal,
+          localNormal: displacedNormal,
           quat,
           baseWorld,
           baseNormal,
@@ -385,6 +408,9 @@ export function MappingScene({
   const lastMappingSendRef = useRef(0);
   const lastMappingPreviewRef = useRef(0);
   const outputMaterialRefs = useRef<Array<MeshStandardMaterial | null>>([]);
+  const outputLevelsRef = useRef<Float32Array>(
+    new Float32Array(mapping.leds.length),
+  );
   useEffect(() => {
     if (wled.enabled) wledClient.start();
     else wledClient.stop();
@@ -406,6 +432,9 @@ export function MappingScene({
     const outputR = (packedColor >> 16) & 255;
     const outputG = (packedColor >> 8) & 255;
     const outputB = packedColor & 255;
+    if (outputLevelsRef.current.length !== mapping.leds.length) {
+      outputLevelsRef.current = new Float32Array(mapping.leds.length);
+    }
     // Preserve one RGB triplet per configured strip index. Missing mapping
     // positions stay black instead of being removed and shifting later LEDs.
     const bytes = new Uint8Array(mapping.leds.length * 3);
@@ -465,10 +494,38 @@ export function MappingScene({
         }
       }
       const sensorFrame = gaussianTangentFrame(bead.normal, 0);
+      const centerLx = mappingLightPos[0] - bead.pos[0];
+      const centerLy = mappingLightPos[1] - bead.pos[1];
+      const centerLz = mappingLightPos[2] - bead.pos[2];
+      const centerDistance =
+        Math.hypot(centerLx, centerLy, centerLz) || 1e-6;
+      const centerDirX = centerLx / centerDistance;
+      const centerDirY = centerLy / centerDistance;
+      const centerDirZ = centerLz / centerDistance;
+      const distanceAttenuation = pointLightDistanceAttenuation(
+        centerDistance,
+        mapping.mappingLightDecay,
+      );
+      const coneAttenuation = spotConeAttenuation(
+        mappingLightPos,
+        mappingLightTarget,
+        bead.pos,
+        spreadToSpotAngle(mapping.mappingLightSpread),
+        0.35,
+      );
+      const domeTransmission =
+        mapping.bumpLightOpacity > 0 && orientedGaussians.length > 0
+          ? gaussianRayTransmission(
+              bead.localPos,
+              lightFromPosLocal,
+              lightLenLocal,
+              orientedGaussians,
+              mapping.bumpLightOpacity,
+              bead.localNormal,
+            )
+          : 1;
       let weightedLight = 0;
       let totalWeight = 0;
-      const sampleWorld = new Vector3();
-      const sampleLocalV = new Vector3();
       for (const sample of SENSOR_HEMISPHERE_SAMPLES) {
         const sx =
           sample[0] * sensorFrame.tW[0] +
@@ -482,41 +539,24 @@ export function MappingScene({
           sample[0] * sensorFrame.tW[2] +
           sample[1] * sensorFrame.tH[2] +
           sample[2] * sensorFrame.n[2];
-        sampleWorld.set(
-          bead.pos[0] + sx * strand.ledSize,
-          bead.pos[1] + sy * strand.ledSize,
-          bead.pos[2] + sz * strand.ledSize,
-        );
-        const lx = mappingLightPos[0] - sampleWorld.x;
-        const ly = mappingLightPos[1] - sampleWorld.y;
-        const lz = mappingLightPos[2] - sampleWorld.z;
-        const ll = Math.hypot(lx, ly, lz) || 1;
-        const diffuse = Math.max(0, sx * (lx / ll) + sy * (ly / ll) + sz * (lz / ll));
-        sampleLocalV.copy(sampleWorld).applyMatrix4(meshInverse);
-        const sampleLocal: Vec3 = [
-          sampleLocalV.x,
-          sampleLocalV.y,
-          sampleLocalV.z,
-        ];
-        const localLight: Vec3 = [
-          mappingLightLocal[0] - sampleLocal[0],
-          mappingLightLocal[1] - sampleLocal[1],
-          mappingLightLocal[2] - sampleLocal[2],
-        ];
-        const localLightDistance = Math.hypot(...localLight);
-        const transmission = gaussianRayTransmission(
-          sampleLocal,
-          localLight,
-          localLightDistance,
-          orientedGaussians,
-          mapping.bumpLightOpacity,
-          bead.localNormal,
+        const cosine =
+          sx * centerDirX + sy * centerDirY + sz * centerDirZ;
+        const response = sensorAngularResponse(
+          cosine,
+          mapping.mappingLightSpread,
+          cloud.opacity,
         );
         const weight =
           strand.sensorHemisphereFocus > 0
             ? Math.pow(sample[2], strand.sensorHemisphereFocus)
             : 1;
-        weightedLight += diffuse * transmission * meshTransmission * weight;
+        weightedLight +=
+          response *
+          distanceAttenuation *
+          coneAttenuation *
+          domeTransmission *
+          meshTransmission *
+          weight;
         totalWeight += weight;
       }
       const averagedLight = weightedLight / Math.max(1e-6, totalWeight);
@@ -527,6 +567,7 @@ export function MappingScene({
           averagedLight * mapping.mappingLightIntensity,
         ),
       );
+      outputLevelsRef.current[physicalIndex] = level;
       bytes[outIndex * 3] = Math.round(level * outputR);
       bytes[outIndex * 3 + 1] = Math.round(level * outputG);
       bytes[outIndex * 3 + 2] = Math.round(level * outputB);
@@ -856,14 +897,16 @@ export function MappingScene({
     <>
       <ambientLight intensity={0.18} />
       <hemisphereLight args={["#b8c7e8", "#151923", 0.22]} />
+      <primitive object={mappingSpotTarget} />
       <spotLight
         position={mappingLightPos}
         color={mapping.mappingLightColor}
         intensity={mapping.mappingLightIntensity}
-        angle={Math.PI / 3}
+        angle={spreadToSpotAngle(mapping.mappingLightSpread)}
         penumbra={0.35}
         distance={0}
-        decay={1}
+        decay={mapping.mappingLightDecay}
+        target={mappingSpotTarget}
       />
       <mesh position={mappingLightPos}>
         <sphereGeometry args={[0.08, 12, 8]} />
@@ -968,32 +1011,11 @@ export function MappingScene({
         );
       })()}
 
-      {beads.map(({ pos, normal, localPos, quat, baseWorld, baseNormal, physicalIndex }, i) => {
+      {beads.map(({ pos, normal, quat, baseWorld, baseNormal, physicalIndex }, i) => {
         const count = beads.length;
-        const isLast = i === count - 1;
         const isSelected = i === selected;
         const front = facesCamera(pos, normal);
         const displayNumber = mapping.reversed ? count - i : i + 1;
-        const color = isSelected
-          ? SELECTED_COLOR
-          : isLast
-            ? LAST_COLOR
-            : BASE_COLOR;
-        const localLight: Vec3 = [
-          mappingLightLocal[0] - localPos[0],
-          mappingLightLocal[1] - localPos[1],
-          mappingLightLocal[2] - localPos[2],
-        ];
-        const transmission = gaussianRayTransmission(
-          localPos,
-          localLight,
-          Math.hypot(...localLight),
-          orientedGaussians,
-          mapping.bumpLightOpacity,
-        );
-        const shadedColor = new Color(color).multiplyScalar(
-          0.15 + transmission * 0.85,
-        );
         const labelPos: Vec3 = [
           pos[0] +
             normal[0] *
@@ -1046,33 +1068,32 @@ export function MappingScene({
                 setSelectedGaussianId(null);
               }}
             >
-              {mapping.showBallSensors ? (
-                <sphereGeometry
-                  args={[
+              <sphereGeometry
+                args={markerSphereArgs(
+                  markerRadius(
+                    mapping.showBallSensors ? "sensor" : "led",
+                    mapping.ledSize,
                     strand.ledSize,
-                    20,
-                    14,
-                    0,
-                    Math.PI * 2,
-                    0,
-                    Math.PI / 2,
-                  ]}
-                />
-              ) : (
-                <sphereGeometry
-                  args={[mapping.ledSize, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2]}
-                />
-              )}
+                  ),
+                  mapping.showBallSensors ? "sensor" : "led",
+                )}
+              />
               <meshStandardMaterial
+                {...MARKER_MATERIAL_DEFAULTS}
                 ref={(material) => {
                   outputMaterialRefs.current[physicalIndex] = material;
+                  if (!material) return;
+                  const level = outputLevelsRef.current[physicalIndex] ?? 0;
+                  const outputColor = new Color(
+                    mapping.mappingLightColor,
+                  ).multiplyScalar(level);
+                  material.color.copy(outputColor);
+                  material.emissive.copy(outputColor);
+                  material.emissiveIntensity = 1;
                 }}
-                color={shadedColor}
-                emissive={shadedColor}
-                emissiveIntensity={(isSelected ? 0.6 : 0.25) * transmission}
-                roughness={0.5}
-                toneMapped={false}
-                transparent
+                color="#000000"
+                emissive="#000000"
+                emissiveIntensity={1}
                 opacity={front ? 1 : 0.25}
               />
             </mesh>
@@ -1096,7 +1117,6 @@ export function MappingScene({
 
       {gaussianMarkers.map(({ id, pos, normal, surface }) => {
         const isSel = id === selectedGaussianId;
-        const front = facesCamera(pos, normal);
         const color = isSel ? GAUSS_SELECTED : GAUSS_COLOR;
         return (
           <group key={id}>
@@ -1113,35 +1133,35 @@ export function MappingScene({
                 />
               </mesh>
             )}
-            <mesh
-              position={pos}
-              onPointerDown={(e) => {
-                if (!isGaussianTool) return;
-                if (!facesCamera(pos, normal)) return;
-                e.stopPropagation();
-                setSelectedGaussianId(id);
-                setSelected(null);
-                setOrbitEnabled(false);
-                gaussianDragIdRef.current = id;
-              }}
-              onClick={(e) => {
-                if (!isGaussianTool) return;
-                if (!facesCamera(pos, normal)) return;
-                e.stopPropagation();
-                setSelectedGaussianId(id);
-                setSelected(null);
-              }}
-            >
-              <sphereGeometry args={[mapping.ledSize * 1.4, 16, 12]} />
-              <meshStandardMaterial
-                color={color}
-                emissive={color}
-                emissiveIntensity={isSel ? 0.7 : 0.35}
-                roughness={0.4}
-                transparent
-                opacity={front ? 0.95 : 0.3}
-              />
-            </mesh>
+            <Billboard position={pos}>
+              <mesh
+                renderOrder={20}
+                onPointerDown={(e) => {
+                  if (!isGaussianTool) return;
+                  e.stopPropagation();
+                  setSelectedGaussianId(id);
+                  setSelected(null);
+                  setOrbitEnabled(false);
+                  gaussianDragIdRef.current = id;
+                }}
+                onClick={(e) => {
+                  if (!isGaussianTool) return;
+                  e.stopPropagation();
+                  setSelectedGaussianId(id);
+                  setSelected(null);
+                }}
+              >
+                <circleGeometry args={[mapping.ledSize * 1.8, 20]} />
+                <meshBasicMaterial
+                  color={color}
+                  transparent
+                  opacity={isSel ? 0.98 : 0.85}
+                  toneMapped={false}
+                  depthWrite={false}
+                  depthTest={false}
+                />
+              </mesh>
+            </Billboard>
           </group>
         );
       })}

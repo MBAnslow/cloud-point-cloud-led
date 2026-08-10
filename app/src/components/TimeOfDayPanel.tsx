@@ -106,6 +106,50 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           onChange={(v) => upd({ moonSpread: v })}
           formatValue={(v) => v.toFixed(2)}
         />
+        <SliderRow
+          label="Distance falloff"
+          value={sky.lightDecay ?? 1}
+          min={0}
+          max={2}
+          step={0.05}
+          onChange={(v) => upd({ lightDecay: v })}
+          formatValue={(v) => (v === 0 ? "off" : `d^-${v.toFixed(2)}`)}
+        />
+        <SliderRow
+          label="Orbit X"
+          value={sky.orbitRadiusX ?? sky.orbitRadius ?? 12}
+          min={0}
+          max={6}
+          step={0.25}
+          onChange={(v) => upd({ orbitRadiusX: v })}
+          formatValue={(v) => `${v.toFixed(2)}m`}
+        />
+        <SliderRow
+          label="Orbit Y"
+          value={sky.orbitRadiusY ?? sky.orbitRadius ?? 12}
+          min={0}
+          max={6}
+          step={0.25}
+          onChange={(v) => upd({ orbitRadiusY: v })}
+          formatValue={(v) => `${v.toFixed(2)}m`}
+        />
+        <SliderRow
+          label="Orbit Z"
+          value={sky.orbitRadiusZ ?? sky.orbitRadius ?? 12}
+          min={0}
+          max={6}
+          step={0.25}
+          onChange={(v) => upd({ orbitRadiusZ: v })}
+          formatValue={(v) => `${v.toFixed(2)}m`}
+        />
+        <label style={inlineLabel}>
+          <input
+            type="checkbox"
+            checked={!!sky.showSpreadCones}
+            onChange={(e) => upd({ showSpreadCones: e.target.checked })}
+          />
+          show spread cones
+        </label>
         <div style={sectionLabel}>Altitude response</div>
         <div
           style={{ fontSize: 10, opacity: 0.72, marginBottom: 3 }}

@@ -20,6 +20,8 @@ import { useDraggable } from "./useDraggable";
 export function CloudPanel({ visible = true }: { visible?: boolean }) {
   const cloud = useSimStore((s) => s.cloud);
   const setCloud = useSimStore((s) => s.setCloud);
+  const mapping = useSimStore((s) => s.mapping);
+  const setMapping = useSimStore((s) => s.setMapping);
   const cloudTop = useSimStore((s) => s.cloudTop);
   const setCloudTop = useSimStore((s) => s.setCloudTop);
   const strand = useSimStore((s) => s.strand);
@@ -52,6 +54,16 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
         <label style={inlineLabel}>
           <input
             type="checkbox"
+            checked={mapping.showBakedSurface}
+            onChange={(e) =>
+              setMapping({ showBakedSurface: e.target.checked })
+            }
+          />
+          show baked dome
+        </label>
+        <label style={inlineLabel}>
+          <input
+            type="checkbox"
             checked={cloud.applyLedOffset ?? true}
             onChange={(e) => upd({ applyLedOffset: e.target.checked })}
           />
@@ -60,13 +72,22 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
         <SliderRow
-          label="Opacity"
-          value={cloud.opacity}
+          label="Dome block"
+          value={mapping.bumpLightOpacity}
           min={0}
           max={1}
           step={0.01}
-          onChange={(v) => upd({ opacity: v })}
-          formatValue={(v) => v.toFixed(2)}
+          onChange={(v) => setMapping({ bumpLightOpacity: v })}
+          formatValue={(v) => `${Math.round(v * 100)}%`}
+        />
+        <SliderRow
+          label="Pyr block"
+          value={mapping.pyramidLightOpacity}
+          min={0}
+          max={1}
+          step={0.01}
+          onChange={(v) => setMapping({ pyramidLightOpacity: v })}
+          formatValue={(v) => `${Math.round(v * 100)}%`}
         />
         <SliderRow
           label="Yaw"

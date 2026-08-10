@@ -512,6 +512,16 @@ export interface SkyParams {
   sunSpread: number;
   /** Angular spread of moon light (0 = tight hotspot, 1 = broad sky-like). */
   moonSpread: number;
+  /** Point-light distance falloff exponent shared by sun and moon. */
+  lightDecay: number;
+  /** Show visual cone overlays for sun/moon spread. */
+  showSpreadCones: boolean;
+  /** Legacy spherical orbit radius (metres), retained for compatibility. */
+  orbitRadius: number;
+  /** Ellipsoidal orbit radii for simulated sun/moon point lights (metres). */
+  orbitRadiusX: number;
+  orbitRadiusY: number;
+  orbitRadiusZ: number;
   /** Legacy shared horizon controls retained for snapshot compatibility. */
   horizonCutoffDeg?: number;
   horizonSoftnessDeg?: number;
@@ -1824,6 +1834,10 @@ export interface MappingParams {
   mappingLightRadius: number;
   /** Mapping-only inspection light brightness. */
   mappingLightIntensity: number;
+  /** Mapping-light angular response (same model as simulation sun/moon). */
+  mappingLightSpread: number;
+  /** Mapping-light distance falloff exponent. */
+  mappingLightDecay: number;
   /** Mapping-only inspection light and streamed output colour. */
   mappingLightColor: string;
   /** Surface domes that lift / tilt nearby LEDs (legacy persisted name). */
@@ -1939,6 +1953,12 @@ const DEFAULTS = {
     moonScale: 1,
     sunSpread: 0.9,
     moonSpread: 0.9,
+    lightDecay: 1,
+    showSpreadCones: false,
+    orbitRadius: 12,
+    orbitRadiusX: 12,
+    orbitRadiusY: 12,
+    orbitRadiusZ: 12,
     sunHorizonStartDeg: -8,
     sunHorizonFullDeg: 3,
     moonHorizonStartDeg: -8,
@@ -2241,6 +2261,8 @@ const DEFAULTS = {
     mappingLightElevationDeg: 0,
     mappingLightRadius: 5,
     mappingLightIntensity: 1.5,
+    mappingLightSpread: 0.9,
+    mappingLightDecay: 1,
     mappingLightColor: "#fff3d0",
     gaussians: [],
   } as MappingParams,
@@ -3746,6 +3768,14 @@ function resolveMapping(input: unknown): MappingParams {
       typeof saved.mappingLightIntensity === "number"
         ? saved.mappingLightIntensity
         : d.mappingLightIntensity,
+    mappingLightSpread:
+      typeof saved.mappingLightSpread === "number"
+        ? Math.max(0, Math.min(1, saved.mappingLightSpread))
+        : d.mappingLightSpread,
+    mappingLightDecay:
+      typeof saved.mappingLightDecay === "number"
+        ? Math.max(0, Math.min(2, saved.mappingLightDecay))
+        : d.mappingLightDecay,
     mappingLightColor:
       typeof saved.mappingLightColor === "string" &&
       /^#[0-9a-f]{6}$/i.test(saved.mappingLightColor)

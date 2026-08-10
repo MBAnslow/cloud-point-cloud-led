@@ -26,15 +26,15 @@ const MODES: Array<{ id: LedViewMode; label: string; help: string }> = [
 const DISPLAY_MODES: Array<{ id: LedDisplayMode; label: string; help: string }> = [
   {
     id: "sensors",
-    label: "Ball sensors",
+    label: "Sensor hemispheres",
     help:
-      "Matte spheres that sample lighting at their surface position. Represents the rendering pipeline's sampling side.",
+      "Outward hemispheres sized like the LED Mapping sensors, colored with each sensor's computed output.",
   },
   {
     id: "leds",
     label: "LEDs (streamed)",
     help:
-      "Narrow oriented hemispheres that emit their per-LED stream color. Shows what actually gets sent to WLED.",
+      "Outward hemispheres sized like LED Mapping and colored with the stream output sent to WLED.",
   },
 ];
 

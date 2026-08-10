@@ -194,7 +194,9 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
   const moonIntensity = clamp01(moonBase * sky.moonScale) * 0.95 * vis;
 
   const ambientColorFinal = saturateHex(rawAmbientColor, 1.08 + twilight * 0.25);
-  const sunColorFinal = saturateHex(rawSunColor, 1.18 * sunsetBoost);
+  // Preserve user-selected sun/moon hue in LED output; intensity already
+  // handles day/night dynamics so extra color boosting causes drift.
+  const sunColorFinal = rawSunColor;
   // Ground tint: neutral cool at midday/night, biases toward the warm
   // sun color as the sun approaches the horizon. `twilight` already
   // peaks near sunrise/sunset, so it drives the mix directly.
@@ -209,7 +211,7 @@ export function computeSkyLighting(sky: SkyParams): SkyLighting {
     sunColor: sunColorFinal,
     sunIntensity,
     sunDirection,
-    moonColor: saturateHex(rawMoonColor, 1.1),
+    moonColor: rawMoonColor,
     moonIntensity,
     moonDirection,
   };

@@ -97,7 +97,11 @@ export class MasterFxBus {
     const lpHz = p.lpEnabled ? Math.max(20, Math.min(20000, p.lpHz)) : 20000;
     this.lp.frequency.rampTo(lpHz, 0.08);
     this.lp.Q.rampTo(p.lpEnabled ? Math.max(0.1, p.lpQ) : 0.7, 0.08);
-    const out = Math.max(0, Math.min(1.5, Number(p.outputGain) || 1));
+    const rawOutput = Number(p.outputGain);
+    const out = Math.max(
+      0,
+      Math.min(1.5, Number.isFinite(rawOutput) ? rawOutput : 1),
+    );
     this.sumGain.gain.rampTo(out, 0.05);
   }
 }

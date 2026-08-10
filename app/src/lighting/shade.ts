@@ -40,6 +40,14 @@ export interface ShadeLightPoint {
   distance: number;
   /** Same semantics as the directional light's `spread`. */
   spread: number;
+  /** Optional spotlight target. Omit for an omnidirectional point source. */
+  target?: Vec3;
+  /** Spotlight outer half-angle in radians. */
+  coneAngle?: number;
+  /** Fraction of the cone edge used for smooth falloff, in [0, 1]. */
+  penumbra?: number;
+  /** Optional per-LED direct-light transmission, indexed by LED. */
+  transmission?: Float32Array;
 }
 
 export interface ShadeLightHemisphere {
@@ -66,7 +74,7 @@ export type ShadeLight =
  *   N =  ≈11 (β = 0.5) → ~23°   (clearly focused but still wide)
  *   N = 128 (β = 0)   → ~6°    (laser-tight spotlight)
  */
-const NARROW_EXPONENT = 128;
+const NARROW_EXPONENT = 24;
 
 /**
  * Per-LED irradiance from a single light, parameterised by the light's
@@ -102,13 +110,65 @@ const NARROW_EXPONENT = 128;
  * So setting `β = 1` recovers the previous model exactly — existing
  * presets are visually unchanged.
  */
-function shade(c: number, spread: number, alpha: number): number {
+export function sensorAngularResponse(
+  c: number,
+  spread: number,
+  alpha: number,
+): number {
   const cPos = c > 0 ? c : 0;
   const n = spread >= 1 ? 1 : Math.pow(NARROW_EXPONENT, 1 - spread);
-  const direct = n === 1 ? cPos : Math.pow(cPos, n);
+  // Keep emitted energy roughly stable as spread narrows: a tighter lobe
+  // should redistribute where light lands, not globally dim the source.
+  const energyNorm = (n + 1) * 0.5;
+  const direct = (n === 1 ? cPos : Math.pow(cPos, n)) * energyNorm;
   const wrap = (1 + c) * 0.5 - cPos;
   const v = direct + spread * (1 - alpha) * wrap;
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+export function spreadToSpotAngle(spread: number): number {
+  const s = Math.max(0, Math.min(1, spread));
+  return 0.08 + s * (Math.PI / 2 - 0.08);
+}
+
+export function pointLightDistanceAttenuation(
+  distance: number,
+  decay: number,
+  cutoffDistance = 0,
+): number {
+  const dist = Math.max(1e-6, distance);
+  const distFall = 1 / Math.max(Math.pow(dist, Math.max(0, decay)), 0.01);
+  if (cutoffDistance <= 0) return distFall;
+  const t = dist / cutoffDistance;
+  const s = 1 - Math.min(1, t * t * t * t);
+  return distFall * s * s;
+}
+
+export function spotConeAttenuation(
+  source: Vec3,
+  target: Vec3,
+  sample: Vec3,
+  angle: number,
+  penumbra: number,
+): number {
+  const ax = target[0] - source[0];
+  const ay = target[1] - source[1];
+  const az = target[2] - source[2];
+  const al = Math.hypot(ax, ay, az) || 1;
+  const sx = sample[0] - source[0];
+  const sy = sample[1] - source[1];
+  const sz = sample[2] - source[2];
+  const sl = Math.hypot(sx, sy, sz) || 1;
+  const cosine = (ax * sx + ay * sy + az * sz) / (al * sl);
+  const outer = Math.cos(Math.max(0, Math.min(Math.PI / 2, angle)));
+  const inner = Math.cos(
+    Math.max(0, Math.min(Math.PI / 2, angle)) *
+      (1 - Math.max(0, Math.min(1, penumbra))),
+  );
+  if (cosine <= outer) return 0;
+  if (cosine >= inner || inner <= outer) return 1;
+  const t = (cosine - outer) / (inner - outer);
+  return t * t * (3 - 2 * t);
 }
 
 function clamp01(v: number) {
@@ -225,7 +285,7 @@ export function shadeLeds(
         if (!hemisphereAverage) {
           const c =
             nx * L.direction[0] + ny * L.direction[1] + nz * L.direction[2];
-          k = L.intensity * shade(c, L.spread, cloudOpacity);
+          k = L.intensity * sensorAngularResponse(c, L.spread, cloudOpacity);
         } else {
           let accum = 0;
           let wsum = 0;
@@ -237,7 +297,7 @@ export function shadeLeds(
             const sy = s[0] * ty + s[1] * by + s[2] * ny;
             const sz = s[0] * tz + s[1] * bz + s[2] * nz;
             const c = sx * L.direction[0] + sy * L.direction[1] + sz * L.direction[2];
-            accum += shade(c, L.spread, cloudOpacity) * w;
+            accum += sensorAngularResponse(c, L.spread, cloudOpacity) * w;
             wsum += w;
           }
           k = L.intensity * accum / Math.max(wsum, 1e-6);
@@ -258,18 +318,25 @@ export function shadeLeds(
         // Match three.js physically-correct point-light attenuation:
         //   distanceFalloff = 1 / max(d^decay, 0.01)
         //   if (cutoff > 0) *= pow2(saturate(1 - pow4(d / cutoff)))
-        const distFall = 1 / Math.max(Math.pow(dist, L.decay), 0.01);
-        let window = 1;
-        if (L.distance > 0) {
-          const t = dist / L.distance;
-          const s = 1 - Math.min(1, t * t * t * t);
-          window = s * s;
-        }
-        const atten = distFall * window;
+        const atten = pointLightDistanceAttenuation(dist, L.decay, L.distance);
+        const coneAtten =
+          L.target && L.coneAngle !== undefined
+            ? spotConeAttenuation(
+                L.position,
+                L.target,
+                [px, py, pz],
+                L.coneAngle,
+                L.penumbra ?? 0,
+              )
+            : 1;
         let k: number;
         if (!hemisphereAverage) {
           const c = nx * lx + ny * ly + nz * lz;
-          k = L.intensity * shade(c, L.spread, cloudOpacity) * atten;
+          k =
+            L.intensity *
+            sensorAngularResponse(c, L.spread, cloudOpacity) *
+            atten *
+            coneAtten;
         } else {
           let accum = 0;
           let wsum = 0;
@@ -280,11 +347,17 @@ export function shadeLeds(
             const sy = s[0] * ty + s[1] * by + s[2] * ny;
             const sz = s[0] * tz + s[1] * bz + s[2] * nz;
             const c = sx * lx + sy * ly + sz * lz;
-            accum += shade(c, L.spread, cloudOpacity) * w;
+            accum += sensorAngularResponse(c, L.spread, cloudOpacity) * w;
             wsum += w;
           }
-          k = L.intensity * (accum / Math.max(wsum, 1e-6)) * atten;
+          k =
+            L.intensity *
+            (accum / Math.max(wsum, 1e-6)) *
+            atten *
+            coneAtten;
         }
+        const t = L.transmission?.[i] ?? 1;
+        k *= t;
         r += L.color[0] * k;
         g += L.color[1] * k;
         b += L.color[2] * k;

@@ -715,6 +715,24 @@ export function MappingPanel({
           onChange={(v) => setMapping({ mappingLightIntensity: v })}
           format={(v) => v.toFixed(2)}
         />
+        <SliderRow
+          label="Spread"
+          value={mapping.mappingLightSpread}
+          min={0}
+          max={1}
+          step={0.01}
+          onChange={(v) => setMapping({ mappingLightSpread: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="Distance falloff"
+          value={mapping.mappingLightDecay}
+          min={0}
+          max={2}
+          step={0.05}
+          onChange={(v) => setMapping({ mappingLightDecay: v })}
+          format={(v) => (v === 0 ? "off" : `d^-${v.toFixed(2)}`)}
+        />
       </Section>
 
       <Section title="Sensor hemisphere">

@@ -1,19 +1,18 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import {
-  AdditiveBlending,
+  BufferGeometry,
   Color,
   Euler,
-  FrontSide,
   DynamicDrawUsage,
   InstancedBufferAttribute,
   InstancedMesh,
   Matrix3,
   Matrix4,
-  MeshBasicMaterial,
-  NormalBlending,
+  Mesh,
   Object3D,
   Quaternion,
+  Raycaster,
   Vector3,
 } from "three";
 import { applyMappingOrientationPoint } from "../mapping/geometry";
@@ -27,6 +26,13 @@ import {
   loadMeshGeometry,
   sampleMeshSurfacePoint,
 } from "../mapping/meshAsset";
+import {
+  alignMarkerNormal,
+  applyMarkerInstanceEmissive,
+  MARKER_MATERIAL_DEFAULTS,
+  markerRadius,
+  markerSphereArgs,
+} from "../mapping/markerVisual";
 import {
   breathFilterGate,
   buildCooldownRates,
@@ -44,6 +50,7 @@ import { tickBreathClock } from "../lighting/breath";
 import {
   hexToVec3,
   shadeLeds,
+  spreadToSpotAngle,
   type ShadeLight,
 } from "../lighting/shade";
 import { activeWindowProgress, hourInRange, isBreathActive, useSimStore } from "../state";
@@ -58,13 +65,6 @@ function clamp01(v: number): number {
   return v;
 }
 const STREAM_BYTE_DEADBAND = 1;
-
-function ensureOutwardNormal(position: [number, number, number], normal: [number, number, number]): [number, number, number] {
-  // If a normal ever comes in flipped (inward), invert it so lighting stays
-  // physically intuitive: lights above brighten the upper hemisphere.
-  const d = position[0] * normal[0] + position[1] * normal[1] + position[2] * normal[2];
-  return d >= 0 ? normal : [-normal[0], -normal[1], -normal[2]];
-}
 
 function rotateY(v: [number, number, number], radians: number): [number, number, number] {
   const c = Math.cos(radians);
@@ -184,16 +184,13 @@ export function Leds() {
   );
   const orientedGaussians = useMemo(
     () =>
-      cloud.applyLedOffset
-        ? orientGaussians(
-            mapping.gaussians ?? [],
-            mapping.flipUpDown,
-            mapping.flipLeftRight,
-            applyMappingOrientationPoint,
-          )
-        : [],
+      orientGaussians(
+        mapping.gaussians ?? [],
+        mapping.flipUpDown,
+        mapping.flipLeftRight,
+        applyMappingOrientationPoint,
+      ),
     [
-      cloud.applyLedOffset,
       mapping.gaussians,
       mapping.flipUpDown,
       mapping.flipLeftRight,
@@ -239,23 +236,24 @@ export function Leds() {
         mapping.flipUpDown,
         mapping.flipLeftRight,
       );
-      let ln = applyMappingOrientationPoint(
+      const baseLn = applyMappingOrientationPoint(
         rawNrm,
         mapping.flipUpDown,
         mapping.flipLeftRight,
       );
-      // Gaussian bumps + optional per-LED offset (mesh-local), then world.
-      if (cloud.applyLedOffset) {
-        const displaced = displaceLed(
-          lp,
-          ln,
-          orientedGaussians,
-          led.offset ?? 0,
-          mapping.bumpAdditivity,
-        );
-        lp = displaced.pos;
-        ln = displaced.normal;
-      }
+      // Match LED Mapping: orientation first, then dome/per-LED displacement.
+      const displaced = displaceLed(
+        lp,
+        baseLn,
+        orientedGaussians,
+        led.offset ?? 0,
+        mapping.bumpAdditivity,
+      );
+      lp = displaced.pos;
+      let ln = displaced.normal;
+      // Keep displaced normals on the same hemisphere as the mapped surface
+      // normal rather than inferring "outward" from world origin.
+      ln = alignMarkerNormal(ln, baseLn);
       // Transform the stored mesh-local point + normal by the current
       // mesh transform so LEDs stay attached to the surface as the
       // scale/rotation/offset sliders change.
@@ -264,7 +262,7 @@ export function Leds() {
         .applyMatrix3(meshNormalMat)
         .normalize();
       const pos: [number, number, number] = [wpV.x, wpV.y, wpV.z];
-      const nrm = ensureOutwardNormal(pos, [wnV.x, wnV.y, wnV.z]);
+      const nrm = [wnV.x, wnV.y, wnV.z] as [number, number, number];
       const rPos = offsetXZ(
         rotateCloud(pos, cloudTiltRad, cloudYawRad),
         cloud.offsetX,
@@ -288,18 +286,12 @@ export function Leds() {
 
     const mesh = meshRef.current;
     if (mesh) {
-      // In "sensors" mode the bead is a full sphere pushed one bead
-      // radius above the surface so it sits on top. In "leds" mode the
-      // primitive is a hemisphere whose flat side is at the surface, so
-      // we set no additional normal offset and just rotate the primitive
-      // to align its pole with the LED's outward normal.
-      const isLeds = ledDisplayMode === "leds";
-      // Keep both cap types off the exact cloud surface to avoid depth
-      // fighting shimmer. Streamed LED emitters sit a bit further out so
-      // additive blending reads as emission rather than shell acne.
-      const sensorOffset = Math.max(0.0015, strand.ledSize * 0.06);
-      const ledOffset = Math.max(0.003, strand.ledSize * 0.18);
-      const offset = isLeds ? ledOffset : sensorOffset;
+      const markerKind = ledDisplayMode === "sensors" ? "sensor" : "led";
+      const radius = markerRadius(
+        markerKind,
+        mapping.ledSize,
+        strand.ledSize,
+      );
       const yAxis = new Vector3(0, 1, 0);
       const normalVec = new Vector3();
       for (let i = 0; i < buffers.n; i++) {
@@ -316,15 +308,15 @@ export function Leds() {
         const ny = buffers.normals[i3 + 1];
         const nz = buffers.normals[i3 + 2];
         dummy.position.set(
-          buffers.positions[i3] + nx * offset,
-          buffers.positions[i3 + 1] + ny * offset,
-          buffers.positions[i3 + 2] + nz * offset,
+          buffers.positions[i3],
+          buffers.positions[i3 + 1],
+          buffers.positions[i3 + 2],
         );
         {
           normalVec.set(nx, ny, nz);
           dummy.quaternion.setFromUnitVectors(yAxis, normalVec);
         }
-        dummy.scale.setScalar(strand.ledSize);
+        dummy.scale.setScalar(radius);
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);
       }
@@ -343,13 +335,13 @@ export function Leds() {
     ellipsoid.ry,
     ellipsoid.rz,
     strand.ledSize,
+    mapping.ledSize,
     mapping.leds,
     mapping.gaussians,
     mapping.bumpAdditivity,
     mapping.flipUpDown,
     mapping.flipLeftRight,
     mapping.reversed,
-    cloud.applyLedOffset,
     orientedGaussians,
     cloudTiltRad,
     cloudYawRad,
@@ -368,26 +360,33 @@ export function Leds() {
   // ellipsoid params (which no longer describe the visible cloud once a
   // user mesh is loaded).
   const meshHalfExtentsRef = useRef<{ hx: number; hy: number; hz: number } | null>(null);
+  const [meshGeom, setMeshGeom] = useState<BufferGeometry | null>(null);
   useEffect(() => {
     const id = meshTarget.id;
     if (!id) {
       meshHalfExtentsRef.current = null;
+      setMeshGeom(null);
       return;
     }
     const cached = getMeshHalfExtents(id);
     if (cached) {
       meshHalfExtentsRef.current = cached;
-      return;
     }
     let cancelled = false;
-    loadMeshGeometry(id).then(() => {
+    loadMeshGeometry(id).then((g) => {
       if (cancelled) return;
+      setMeshGeom(g);
       meshHalfExtentsRef.current = getMeshHalfExtents(id);
     });
     return () => {
       cancelled = true;
     };
   }, [meshTarget.id]);
+  const meshOccluder = useMemo(() => (meshGeom ? new Mesh(meshGeom) : null), [meshGeom]);
+  const pyramidRaycaster = useMemo(() => new Raycaster(), []);
+  const pyramidRayOrigin = useMemo(() => new Vector3(), []);
+  const pyramidRayDir = useMemo(() => new Vector3(), []);
+  const pyramidHitsRef = useRef<any[]>([]);
 
   // Long-lived WLED streaming client. Lightning uses a shared controller
   // so the 3D bolt visualisation sees the same active strikes.
@@ -423,24 +422,41 @@ export function Leds() {
 
     const skyLighting = computeSkyLighting(sky);
     if (
-      cloud.applyLedOffset &&
-      mapping.bumpLightOpacity > 0 &&
-      orientedGaussians.length > 0
+      (mapping.bumpLightOpacity > 0 && orientedGaussians.length > 0) ||
+      mapping.pyramidLightOpacity > 0
     ) {
-      const sunLocalV = new Vector3(...skyLighting.sunDirection)
-        .transformDirection(worldToBumpLocal);
-      const moonLocalV = new Vector3(...skyLighting.moonDirection)
-        .transformDirection(worldToBumpLocal);
-      const sunLocal: [number, number, number] = [
-        sunLocalV.x,
-        sunLocalV.y,
-        sunLocalV.z,
+      const orbitRadiusX = Math.max(0, sky.orbitRadiusX ?? sky.orbitRadius ?? 12);
+      const orbitRadiusY = Math.max(0, sky.orbitRadiusY ?? sky.orbitRadius ?? 12);
+      const orbitRadiusZ = Math.max(0, sky.orbitRadiusZ ?? sky.orbitRadius ?? 12);
+      const cloudCenterWorld: [number, number, number] = [
+        cloud.offsetX,
+        cloud.offsetY + meshTarget.offsetY,
+        cloud.offsetZ,
       ];
-      const moonLocal: [number, number, number] = [
-        moonLocalV.x,
-        moonLocalV.y,
-        moonLocalV.z,
+      const sunWorld: [number, number, number] = [
+        cloudCenterWorld[0] + skyLighting.sunDirection[0] * orbitRadiusX,
+        cloudCenterWorld[1] + skyLighting.sunDirection[1] * orbitRadiusY,
+        cloudCenterWorld[2] + skyLighting.sunDirection[2] * orbitRadiusZ,
       ];
+      const moonWorld: [number, number, number] = [
+        cloudCenterWorld[0] + skyLighting.moonDirection[0] * orbitRadiusX,
+        cloudCenterWorld[1] + skyLighting.moonDirection[1] * orbitRadiusY,
+        cloudCenterWorld[2] + skyLighting.moonDirection[2] * orbitRadiusZ,
+      ];
+      const sunLocalPointV = new Vector3(...sunWorld).applyMatrix4(worldToBumpLocal);
+      const moonLocalPointV = new Vector3(...moonWorld).applyMatrix4(worldToBumpLocal);
+      const sunLocalPoint: [number, number, number] = [
+        sunLocalPointV.x,
+        sunLocalPointV.y,
+        sunLocalPointV.z,
+      ];
+      const moonLocalPoint: [number, number, number] = [
+        moonLocalPointV.x,
+        moonLocalPointV.y,
+        moonLocalPointV.z,
+      ];
+      const pyramidBlocked =
+        1 - Math.max(0, Math.min(1, mapping.pyramidLightOpacity));
       for (let i = 0; i < buffers.n; i++) {
         if (!buffers.validPositions[i]) {
           buffers.sunTransmission[i] = 1;
@@ -458,22 +474,83 @@ export function Leds() {
           buffers.localNormals[i3 + 1],
           buffers.localNormals[i3 + 2],
         ];
-        buffers.sunTransmission[i] = gaussianRayTransmission(
-          origin,
-          sunLocal,
-          Number.POSITIVE_INFINITY,
-          orientedGaussians,
-          mapping.bumpLightOpacity,
-          originNormal,
-        );
-        buffers.moonTransmission[i] = gaussianRayTransmission(
-          origin,
-          moonLocal,
-          Number.POSITIVE_INFINITY,
-          orientedGaussians,
-          mapping.bumpLightOpacity,
-          originNormal,
-        );
+        const sunToLight: [number, number, number] = [
+          sunLocalPoint[0] - origin[0],
+          sunLocalPoint[1] - origin[1],
+          sunLocalPoint[2] - origin[2],
+        ];
+        const moonToLight: [number, number, number] = [
+          moonLocalPoint[0] - origin[0],
+          moonLocalPoint[1] - origin[1],
+          moonLocalPoint[2] - origin[2],
+        ];
+        let sunPyramidTransmission = 1;
+        let moonPyramidTransmission = 1;
+        const sunFacing =
+          originNormal[0] * sunToLight[0] +
+            originNormal[1] * sunToLight[1] +
+            originNormal[2] * sunToLight[2] >
+          0;
+        const moonFacing =
+          originNormal[0] * moonToLight[0] +
+            originNormal[1] * moonToLight[1] +
+            originNormal[2] * moonToLight[2] >
+          0;
+        if (!sunFacing) sunPyramidTransmission = pyramidBlocked;
+        if (!moonFacing) moonPyramidTransmission = pyramidBlocked;
+        if (mapping.pyramidLightOpacity > 0 && meshOccluder) {
+          const localSensorRadius =
+            strand.ledSize / Math.max(1e-6, Math.abs(meshTarget.scale));
+          const rayOrigin = pyramidRayOrigin.set(
+            origin[0] + originNormal[0] * localSensorRadius,
+            origin[1] + originNormal[1] * localSensorRadius,
+            origin[2] + originNormal[2] * localSensorRadius,
+          );
+          const hits = pyramidHitsRef.current;
+          pyramidRaycaster.near = 0;
+          pyramidRayDir.set(sunToLight[0], sunToLight[1], sunToLight[2]);
+          const sunDistance = pyramidRayDir.length();
+          pyramidRaycaster.far = Math.max(1e-4, sunDistance - 1e-4);
+          pyramidRayDir.normalize();
+          pyramidRaycaster.set(rayOrigin, pyramidRayDir);
+          hits.length = 0;
+          if (pyramidRaycaster.intersectObject(meshOccluder, false, hits).length > 0) {
+            sunPyramidTransmission = Math.min(sunPyramidTransmission, pyramidBlocked);
+          }
+          pyramidRayDir.set(moonToLight[0], moonToLight[1], moonToLight[2]);
+          const moonDistance = pyramidRayDir.length();
+          pyramidRaycaster.far = Math.max(1e-4, moonDistance - 1e-4);
+          pyramidRayDir.normalize();
+          pyramidRaycaster.set(rayOrigin, pyramidRayDir);
+          hits.length = 0;
+          if (pyramidRaycaster.intersectObject(meshOccluder, false, hits).length > 0) {
+            moonPyramidTransmission = Math.min(moonPyramidTransmission, pyramidBlocked);
+          }
+        }
+        const sunDomeTransmission =
+          mapping.bumpLightOpacity > 0 && orientedGaussians.length > 0
+            ? gaussianRayTransmission(
+                origin,
+                sunToLight,
+                Math.hypot(...sunToLight),
+                orientedGaussians,
+                mapping.bumpLightOpacity,
+                originNormal,
+              )
+            : 1;
+        const moonDomeTransmission =
+          mapping.bumpLightOpacity > 0 && orientedGaussians.length > 0
+            ? gaussianRayTransmission(
+                origin,
+                moonToLight,
+                Math.hypot(...moonToLight),
+                orientedGaussians,
+                mapping.bumpLightOpacity,
+                originNormal,
+              )
+            : 1;
+        buffers.sunTransmission[i] = sunDomeTransmission * sunPyramidTransmission;
+        buffers.moonTransmission[i] = moonDomeTransmission * moonPyramidTransmission;
       }
     } else {
       buffers.sunTransmission.fill(1);
@@ -497,6 +574,14 @@ export function Leds() {
         },
       ];
       if (sky.enabled) {
+        const orbitRadiusX = Math.max(0, sky.orbitRadiusX ?? sky.orbitRadius ?? 12);
+        const orbitRadiusY = Math.max(0, sky.orbitRadiusY ?? sky.orbitRadius ?? 12);
+        const orbitRadiusZ = Math.max(0, sky.orbitRadiusZ ?? sky.orbitRadius ?? 12);
+        const cloudCenter: [number, number, number] = [
+          cloud.offsetX,
+          cloud.offsetY + meshTarget.offsetY,
+          cloud.offsetZ,
+        ];
         timeLights.push(
           {
             type: "hemisphere",
@@ -505,19 +590,37 @@ export function Leds() {
             intensity: skyLighting.hemiIntensity,
           },
           {
-            type: "directional",
-            direction: skyLighting.sunDirection,
+            type: "point",
+            position: [
+              cloudCenter[0] + skyLighting.sunDirection[0] * orbitRadiusX,
+              cloudCenter[1] + skyLighting.sunDirection[1] * orbitRadiusY,
+              cloudCenter[2] + skyLighting.sunDirection[2] * orbitRadiusZ,
+            ],
             color: hexToVec3(skyLighting.sunColor),
             intensity: skyLighting.sunIntensity,
+            decay: Math.max(0, sky.lightDecay ?? 1),
+            distance: 0,
             spread: clamp01(sky.sunSpread ?? 0.9),
+            target: cloudCenter,
+            coneAngle: spreadToSpotAngle(sky.sunSpread ?? 0.9),
+            penumbra: 0.35,
             transmission: buffers.sunTransmission,
           },
           {
-            type: "directional",
-            direction: skyLighting.moonDirection,
+            type: "point",
+            position: [
+              cloudCenter[0] + skyLighting.moonDirection[0] * orbitRadiusX,
+              cloudCenter[1] + skyLighting.moonDirection[1] * orbitRadiusY,
+              cloudCenter[2] + skyLighting.moonDirection[2] * orbitRadiusZ,
+            ],
             color: hexToVec3(skyLighting.moonColor),
             intensity: skyLighting.moonIntensity,
+            decay: Math.max(0, sky.lightDecay ?? 1),
+            distance: 0,
             spread: clamp01(sky.moonSpread ?? 0.9),
+            target: cloudCenter,
+            coneAngle: spreadToSpotAngle(sky.moonSpread ?? 0.9),
+            penumbra: 0.35,
             transmission: buffers.moonTransmission,
           },
         );
@@ -918,74 +1021,34 @@ export function Leds() {
       }
     }
 
-    // Noise preview needs normal blending so mid-greys are visible; additive
-    // emission mode makes anything near black disappear.
-    if (ledDisplayMode === "leds" && mesh) {
-      const mat = mesh.material as MeshBasicMaterial;
-      if (showNoise) {
-        mat.blending = NormalBlending;
-        mat.transparent = false;
-        mat.depthTest = true;
-        mat.depthWrite = true;
-      } else {
-        mat.blending = AdditiveBlending;
-        mat.transparent = true;
-        mat.depthTest = false;
-        mat.depthWrite = false;
-      }
-    }
-
     const locatorColor = hexToVec3(ledLocator.color);
-    if (ledDisplayMode === "leds") {
-      for (let i = 0; i < buffers.n; i++) {
-        const i3 = i * 3;
-        if (
-          !showNoise &&
-          ledStreamPipeline.locatorOverrideStage &&
-          ledLocator.enabled &&
-          locatedSet.has(i)
-        ) {
-          // Hard output override: bypass all prior processing and force this LED
-          // to locator yellow both in the 3D view and in streamed byte output.
-          buffers.colorFloats[i3] = locatorColor[0];
-          buffers.colorFloats[i3 + 1] = locatorColor[1];
-          buffers.colorFloats[i3 + 2] = locatorColor[2];
-          buffers.colorBytes[i3] = (locatorColor[0] * 255 + 0.5) | 0;
-          buffers.colorBytes[i3 + 1] = (locatorColor[1] * 255 + 0.5) | 0;
-          buffers.colorBytes[i3 + 2] = (locatorColor[2] * 255 + 0.5) | 0;
-          tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
-        } else {
-          tmpColor.setRGB(
-            buffers.colorFloats[i3],
-            buffers.colorFloats[i3 + 1],
-            buffers.colorFloats[i3 + 2],
-          );
-        }
-        mesh.setColorAt(i, tmpColor);
+    for (let i = 0; i < buffers.n; i++) {
+      const i3 = i * 3;
+      if (
+        !showNoise &&
+        ledStreamPipeline.locatorOverrideStage &&
+        ledLocator.enabled &&
+        locatedSet.has(i)
+      ) {
+        // Hard output override: bypass all prior processing and force this LED
+        // to locator yellow both in the 3D view and in streamed byte output.
+        buffers.colorFloats[i3] = locatorColor[0];
+        buffers.colorFloats[i3 + 1] = locatorColor[1];
+        buffers.colorFloats[i3 + 2] = locatorColor[2];
+        buffers.colorBytes[i3] = (locatorColor[0] * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 1] = (locatorColor[1] * 255 + 0.5) | 0;
+        buffers.colorBytes[i3 + 2] = (locatorColor[2] * 255 + 0.5) | 0;
+        tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
+      } else {
+        tmpColor.setRGB(
+          buffers.colorFloats[i3],
+          buffers.colorFloats[i3 + 1],
+          buffers.colorFloats[i3 + 2],
+        );
       }
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    } else {
-      // Sensor display is physically-lit white geometry. InstancedMesh still
-      // multiplies by instanceColor when present, so explicitly write white
-      // every frame (with optional locator highlights) to avoid stale/zero
-      // instance colors making sensors appear black.
-      for (let i = 0; i < buffers.n; i++) {
-        const i3 = i * 3;
-        if (showNoise) {
-          tmpColor.setRGB(
-            buffers.colorFloats[i3],
-            buffers.colorFloats[i3 + 1],
-            buffers.colorFloats[i3 + 2],
-          );
-        } else if (ledLocator.enabled && locatedSet.has(i)) {
-          tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
-        } else {
-          tmpColor.setRGB(1, 1, 1);
-        }
-        mesh.setColorAt(i, tmpColor);
-      }
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.setColorAt(i, tmpColor);
     }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 
     // Unmapped strand slots retain their physical indices but must not emit
     // from the origin or contribute to the cloud-top diffuser.
@@ -1053,50 +1116,27 @@ export function Leds() {
   // every default instance at the origin as one large overlapping cap.
   const showDirectLeds = !(cloudTop.id && cloudTop.visible);
 
-  if (ledDisplayMode === "leds") {
-    return (
-      <instancedMesh
-        key="leds-emitters"
-        ref={meshRef}
-        args={[undefined, undefined, buffers.n]}
-        frustumCulled={false}
-        visible={showDirectLeds}
-        onPointerDown={onPointerDown}
-        renderOrder={5}
-      >
-        {/*
-          Narrow half-hemisphere: only the top ~π/3 of the sphere along
-          the pole. Renders as a small forward-facing cap oriented along
-          each LED's outward normal, with additive blending so the color
-          reads as light emission rather than a matte surface.
-        */}
-        <sphereGeometry args={[1, 20, 12, 0, Math.PI * 2, 0, Math.PI / 3]} />
-        <meshBasicMaterial
-          color="#ffffff"
-          toneMapped={false}
-          transparent
-          opacity={1}
-          side={FrontSide}
-          blending={AdditiveBlending}
-          depthTest
-          depthWrite={false}
-        />
-      </instancedMesh>
-    );
-  }
-
+  const markerKind = ledDisplayMode === "sensors" ? "sensor" : "led";
   return (
     <instancedMesh
-      key="leds-sensors"
+      key={`led-markers-${markerKind}`}
       ref={meshRef}
       args={[undefined, undefined, buffers.n]}
       frustumCulled={false}
       visible={showDirectLeds}
       onPointerDown={onPointerDown}
+      renderOrder={5}
     >
-      {/* Sensor cap: outward hemisphere embedded in the cloud surface. */}
-      <sphereGeometry args={[1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
-      <meshStandardMaterial color="#ffffff" roughness={1} metalness={0} />
+      <sphereGeometry args={markerSphereArgs(1, markerKind)} />
+      <meshStandardMaterial
+        {...MARKER_MATERIAL_DEFAULTS}
+        color="#ffffff"
+        emissive="#ffffff"
+        emissiveIntensity={1}
+        opacity={1}
+        onBeforeCompile={applyMarkerInstanceEmissive}
+        customProgramCacheKey={() => "marker-instance-emissive-v1"}
+      />
     </instancedMesh>
   );
 }

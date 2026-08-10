@@ -7,7 +7,7 @@ export interface DisplacedLed {
 }
 
 /** Minimum normal alignment used for ridge-aware dome wrapping. */
-const RIDGE_WRAP_DOT_MIN = 0.55;
+const RIDGE_WRAP_DOT_MIN = 0.35;
 /**
  * Preserve the footprint of existing saved bumps: their width/height values
  * previously reached this radius at the clipped Gaussian boundary.
