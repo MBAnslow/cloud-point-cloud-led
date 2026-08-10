@@ -136,6 +136,7 @@ export function Leds() {
       positions: new Float32Array(n * 3),
       normals: new Float32Array(n * 3),
       localPositions: new Float32Array(n * 3),
+      localNormals: new Float32Array(n * 3),
       sunTransmission: new Float32Array(n),
       moonTransmission: new Float32Array(n),
       validPositions: new Uint8Array(n),
@@ -250,6 +251,7 @@ export function Leds() {
           ln,
           orientedGaussians,
           led.offset ?? 0,
+          mapping.bumpAdditivity,
         );
         lp = displaced.pos;
         ln = displaced.normal;
@@ -273,6 +275,9 @@ export function Leds() {
       buffers.localPositions[i3] = lp[0];
       buffers.localPositions[i3 + 1] = lp[1];
       buffers.localPositions[i3 + 2] = lp[2];
+      buffers.localNormals[i3] = ln[0];
+      buffers.localNormals[i3 + 1] = ln[1];
+      buffers.localNormals[i3 + 2] = ln[2];
       buffers.positions[i3] = rPos[0];
       buffers.positions[i3 + 1] = rPos[1] + cloud.offsetY;
       buffers.positions[i3 + 2] = rPos[2];
@@ -340,6 +345,7 @@ export function Leds() {
     strand.ledSize,
     mapping.leds,
     mapping.gaussians,
+    mapping.bumpAdditivity,
     mapping.flipUpDown,
     mapping.flipLeftRight,
     mapping.reversed,
@@ -447,12 +453,18 @@ export function Leds() {
           buffers.localPositions[i3 + 1],
           buffers.localPositions[i3 + 2],
         ];
+        const originNormal: [number, number, number] = [
+          buffers.localNormals[i3],
+          buffers.localNormals[i3 + 1],
+          buffers.localNormals[i3 + 2],
+        ];
         buffers.sunTransmission[i] = gaussianRayTransmission(
           origin,
           sunLocal,
           Number.POSITIVE_INFINITY,
           orientedGaussians,
           mapping.bumpLightOpacity,
+          originNormal,
         );
         buffers.moonTransmission[i] = gaussianRayTransmission(
           origin,
@@ -460,6 +472,7 @@ export function Leds() {
           Number.POSITIVE_INFINITY,
           orientedGaussians,
           mapping.bumpLightOpacity,
+          originNormal,
         );
       }
     } else {

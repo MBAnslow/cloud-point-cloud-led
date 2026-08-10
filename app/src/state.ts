@@ -1731,8 +1731,9 @@ export type MappingMode = "ellipsoid" | "mesh";
 export type MappingTool = "place" | "offset" | "gaussian";
 
 /**
- * A Gaussian bump on the mesh surface. Lifts nearby LEDs along their
- * surface normals and tilts normals from the bump slope.
+ * A compact smooth dome on the mesh surface. Legacy names are retained so
+ * existing configuration files continue to load unchanged. It lifts nearby
+ * LEDs and tilts normals from the dome slope.
  */
 export interface MappingGaussian {
   id: string;
@@ -1793,12 +1794,28 @@ export interface MappingParams {
    * bead in the strand.
    */
   maxSegmentLength: number;
-  /** Show the 3D Gaussian displacement surfaces in the mapping view. */
+  /** Show the 3D smooth-dome displacement surfaces in the mapping view. */
   showBumpSurfaces: boolean;
   /** Show mapped LEDs as full-size outward sensor hemispheres. */
   showBallSensors: boolean;
-  /** Fraction of direct light blocked by Gaussian bump surfaces, 0..1. */
+  /** Fraction of direct light blocked by smooth-dome surfaces, 0..1. */
   bumpLightOpacity: number;
+  /** Fraction of direct light blocked by the pyramid mesh, 0..1. */
+  pyramidLightOpacity: number;
+  /** Blend from smooth max-union (0) to additive overlapping dome heights (1). */
+  bumpAdditivity: number;
+  /** Visual opacity of the mapping pyramid mesh. */
+  meshSurfaceOpacity: number;
+  /** Visual opacity of dome surfaces in mapping. */
+  bumpSurfaceOpacity: number;
+  /** Render the baked iso-surface preview in mapping. */
+  showBakedSurface: boolean;
+  /** Use baked iso-surface for bump occlusion in mapping/simulation. */
+  useBakedSurface: boolean;
+  /** Signature of the dome parameters used for the latest bake. */
+  bakedSurfaceSignature: string | null;
+  /** Increment to request a new baked surface build. */
+  bakeSurfaceRequestNonce: number;
   /** Mapping-only inspection light orbit angle around the mesh. */
   mappingLightAngleDeg: number;
   /** Mapping-light vertical sweep: 0° above, 180° level, 360° below. */
@@ -1809,7 +1826,7 @@ export interface MappingParams {
   mappingLightIntensity: number;
   /** Mapping-only inspection light and streamed output colour. */
   mappingLightColor: string;
-  /** Surface Gaussian bumps that lift / tilt nearby LEDs. */
+  /** Surface domes that lift / tilt nearby LEDs (legacy persisted name). */
   gaussians: MappingGaussian[];
 }
 
@@ -2212,6 +2229,14 @@ const DEFAULTS = {
     showBumpSurfaces: false,
     showBallSensors: false,
     bumpLightOpacity: 1,
+    pyramidLightOpacity: 1,
+    bumpAdditivity: 0.2,
+    meshSurfaceOpacity: 0.65,
+    bumpSurfaceOpacity: 0.62,
+    showBakedSurface: false,
+    useBakedSurface: false,
+    bakedSurfaceSignature: null,
+    bakeSurfaceRequestNonce: 0,
     mappingLightAngleDeg: 45,
     mappingLightElevationDeg: 0,
     mappingLightRadius: 5,
@@ -3660,6 +3685,39 @@ function resolveMapping(input: unknown): MappingParams {
       Number.isFinite(saved.bumpLightOpacity)
         ? Math.max(0, Math.min(1, saved.bumpLightOpacity))
         : d.bumpLightOpacity,
+    pyramidLightOpacity:
+      typeof saved.pyramidLightOpacity === "number" &&
+      Number.isFinite(saved.pyramidLightOpacity)
+        ? Math.max(0, Math.min(1, saved.pyramidLightOpacity))
+        : d.pyramidLightOpacity,
+    bumpAdditivity:
+      typeof saved.bumpAdditivity === "number" &&
+      Number.isFinite(saved.bumpAdditivity)
+        ? Math.max(0, Math.min(1, saved.bumpAdditivity))
+        : d.bumpAdditivity,
+    meshSurfaceOpacity:
+      typeof saved.meshSurfaceOpacity === "number" &&
+      Number.isFinite(saved.meshSurfaceOpacity)
+        ? Math.max(0, Math.min(1, saved.meshSurfaceOpacity))
+        : d.meshSurfaceOpacity,
+    bumpSurfaceOpacity:
+      typeof saved.bumpSurfaceOpacity === "number" &&
+      Number.isFinite(saved.bumpSurfaceOpacity)
+        ? Math.max(0, Math.min(1, saved.bumpSurfaceOpacity))
+        : d.bumpSurfaceOpacity,
+    showBakedSurface:
+      typeof saved.showBakedSurface === "boolean"
+        ? saved.showBakedSurface
+        : d.showBakedSurface,
+    useBakedSurface:
+      typeof saved.useBakedSurface === "boolean"
+        ? saved.useBakedSurface
+        : d.useBakedSurface,
+    bakedSurfaceSignature:
+      typeof saved.bakedSurfaceSignature === "string"
+        ? saved.bakedSurfaceSignature
+        : null,
+    bakeSurfaceRequestNonce: 0,
     mappingLightAngleDeg:
       typeof saved.mappingLightAngleDeg === "number"
         ? saved.mappingLightAngleDeg

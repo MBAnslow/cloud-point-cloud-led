@@ -9,6 +9,8 @@ import {
   Float32BufferAttribute,
   Matrix3,
   Matrix4,
+  Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Quaternion,
   Raycaster,
@@ -18,6 +20,8 @@ import {
 import { useSimStore, type Vec3 } from "../state";
 import { applyMappingOrientationPoint } from "./geometry";
 import {
+  buildBakedDomeSurface,
+  DOME_FOOTPRINT_SCALE,
   displaceLed,
   gaussianRayTransmission,
   gaussianTangentFrame,
@@ -25,6 +29,12 @@ import {
 } from "./gaussians";
 import { loadMeshGeometry } from "./meshAsset";
 import { WledStreamClient } from "../wled/client";
+import {
+  clearBakedSurfaceGeometry,
+  getBakedSurfaceGeometry,
+  setBakedSurfaceGeometry,
+} from "./bakedSurface";
+import { mappingBakeSignature } from "./bakeSignature";
 
 interface Props {
   selected: number | null;
@@ -56,6 +66,7 @@ export function MappingScene({
   setSelectedGaussianId,
 }: Props) {
   const mapping = useSimStore((s) => s.mapping);
+  const setMapping = useSimStore((s) => s.setMapping);
   const strand = useSimStore((s) => s.strand);
   const wled = useSimStore((s) => s.wled);
   const mesh = useSimStore((s) => s.mesh);
@@ -196,6 +207,20 @@ export function MappingScene({
     [meshMatrix],
   );
   const meshInverse = useMemo(() => meshMatrix.clone().invert(), [meshMatrix]);
+  const meshOccluder = useMemo(
+    () =>
+      meshGeom
+        ? new Mesh(meshGeom, new MeshBasicMaterial({ side: DoubleSide }))
+        : null,
+    [meshGeom],
+  );
+  useEffect(
+    () => () => {
+      meshOccluder?.material.dispose();
+    },
+    [meshOccluder],
+  );
+  const meshOcclusionRaycaster = useMemo(() => new Raycaster(), []);
   const mappingLightLocal = useMemo<Vec3>(() => {
     const p = new Vector3(...mappingLightPos).applyMatrix4(meshInverse);
     return [p.x, p.y, p.z];
@@ -222,6 +247,60 @@ export function MappingScene({
       ),
     [mapping.gaussians, mapping.flipUpDown, mapping.flipLeftRight],
   );
+  const currentBakeSignature = useMemo(
+    () => mappingBakeSignature(mapping),
+    [mapping],
+  );
+  const bakedSurface = getBakedSurfaceGeometry();
+  useEffect(() => {
+    if (mapping.useBakedSurface) setMapping({ useBakedSurface: false });
+  }, [mapping.useBakedSurface, setMapping]);
+  useEffect(() => {
+    if (mapping.bakeSurfaceRequestNonce <= 0) return;
+    const bakedRender = buildBakedDomeSurface(
+      orientedGaussians,
+      mapping.bumpAdditivity,
+      { radialSteps: 16, angularSteps: 48 },
+    );
+    const bakedOccluder = buildBakedDomeSurface(
+      orientedGaussians,
+      mapping.bumpAdditivity,
+      { radialSteps: 8, angularSteps: 20 },
+    );
+    setBakedSurfaceGeometry(bakedRender, bakedOccluder);
+    setMapping({
+      bakedSurfaceSignature: currentBakeSignature,
+      showBakedSurface: bakedRender !== null,
+      bakeSurfaceRequestNonce: 0,
+    });
+  }, [
+    mapping.bakeSurfaceRequestNonce,
+    orientedGaussians,
+    mapping.bumpAdditivity,
+    currentBakeSignature,
+    setMapping,
+  ]);
+  useEffect(() => {
+    if ((mapping.gaussians?.length ?? 0) > 0) return;
+    clearBakedSurfaceGeometry();
+    if (
+      mapping.bakedSurfaceSignature !== null ||
+      mapping.showBakedSurface ||
+      mapping.useBakedSurface
+    ) {
+      setMapping({
+        bakedSurfaceSignature: null,
+        showBakedSurface: false,
+        useBakedSurface: false,
+      });
+    }
+  }, [
+    mapping.gaussians,
+    mapping.bakedSurfaceSignature,
+    mapping.showBakedSurface,
+    mapping.useBakedSurface,
+    setMapping,
+  ]);
 
   const beads = useMemo(() => {
     // LEDs without a mesh-mode surface record (pos+normal) can't be
@@ -247,8 +326,15 @@ export function MappingScene({
           ln,
           orientedGaussians,
           led.offset ?? 0,
+          mapping.bumpAdditivity,
         );
-        const displaced0 = displaceLed(lp, ln, orientedGaussians, 0);
+        const displaced0 = displaceLed(
+          lp,
+          ln,
+          orientedGaussians,
+          0,
+          mapping.bumpAdditivity,
+        );
         const wp = localToWorldPos(displaced.pos);
         const wn = localToWorldNrm(displaced.normal);
         const baseWorld = localToWorldPos(displaced0.pos);
@@ -262,6 +348,7 @@ export function MappingScene({
           pos: wp,
           normal: wn,
           localPos: displaced.pos,
+          localNormal: displaced.normal,
           quat,
           baseWorld,
           baseNormal,
@@ -275,6 +362,7 @@ export function MappingScene({
           pos: Vec3;
           normal: Vec3;
           localPos: Vec3;
+          localNormal: Vec3;
           quat: Quaternion;
           baseWorld: Vec3;
           baseNormal: Vec3;
@@ -285,6 +373,7 @@ export function MappingScene({
     mapping.flipUpDown,
     mapping.flipLeftRight,
     orientedGaussians,
+    mapping.bumpAdditivity,
     meshMatrix,
     meshNormalMat,
   ]);
@@ -326,6 +415,55 @@ export function MappingScene({
         : outIndex;
       const bead = beadByPhysicalIndex.get(physicalIndex);
       if (!bead) continue;
+      let meshTransmission = 1;
+      const pyramidBlocked = 1 - Math.max(0, Math.min(1, mapping.pyramidLightOpacity));
+      const lightFromPosLocal: Vec3 = [
+        mappingLightLocal[0] - bead.localPos[0],
+        mappingLightLocal[1] - bead.localPos[1],
+        mappingLightLocal[2] - bead.localPos[2],
+      ];
+      const lightLenLocal = Math.hypot(...lightFromPosLocal) || 1e-6;
+      const lightDirLocal: Vec3 = [
+        lightFromPosLocal[0] / lightLenLocal,
+        lightFromPosLocal[1] / lightLenLocal,
+        lightFromPosLocal[2] / lightLenLocal,
+      ];
+      // If a sensor sees light from behind its outward surface normal, that
+      // path necessarily goes through the pyramid body and should be blocked.
+      const normalFacingLight =
+        bead.localNormal[0] * lightDirLocal[0] +
+        bead.localNormal[1] * lightDirLocal[1] +
+        bead.localNormal[2] * lightDirLocal[2];
+      if (normalFacingLight <= 0) meshTransmission = pyramidBlocked;
+      if (meshOccluder) {
+        // Start at the outward tip of the physical sensor hemisphere. This
+        // avoids a self-hit on its own mounting face while still catching
+        // an opposite pyramid wall before the ray reaches the light.
+        const localSensorRadius =
+          strand.ledSize / Math.max(1e-6, Math.abs(mesh.scale));
+        const meshRayOrigin = new Vector3(
+          bead.localPos[0] + bead.localNormal[0] * localSensorRadius,
+          bead.localPos[1] + bead.localNormal[1] * localSensorRadius,
+          bead.localPos[2] + bead.localNormal[2] * localSensorRadius,
+        );
+        const meshRayDirection = new Vector3(
+          mappingLightLocal[0] - meshRayOrigin.x,
+          mappingLightLocal[1] - meshRayOrigin.y,
+          mappingLightLocal[2] - meshRayOrigin.z,
+        );
+        const meshRayDistance = meshRayDirection.length();
+        if (meshRayDistance > 1e-5) {
+          meshOcclusionRaycaster.near = 0;
+          meshOcclusionRaycaster.far = Math.max(1e-4, meshRayDistance - 1e-4);
+          meshOcclusionRaycaster.set(
+            meshRayOrigin,
+            meshRayDirection.multiplyScalar(1 / meshRayDistance),
+          );
+          if (meshOcclusionRaycaster.intersectObject(meshOccluder, false).length > 0) {
+            meshTransmission = Math.min(meshTransmission, pyramidBlocked);
+          }
+        }
+      }
       const sensorFrame = gaussianTangentFrame(bead.normal, 0);
       let weightedLight = 0;
       let totalWeight = 0;
@@ -365,18 +503,20 @@ export function MappingScene({
           mappingLightLocal[1] - sampleLocal[1],
           mappingLightLocal[2] - sampleLocal[2],
         ];
+        const localLightDistance = Math.hypot(...localLight);
         const transmission = gaussianRayTransmission(
           sampleLocal,
           localLight,
-          Math.hypot(...localLight),
+          localLightDistance,
           orientedGaussians,
           mapping.bumpLightOpacity,
+          bead.localNormal,
         );
         const weight =
           strand.sensorHemisphereFocus > 0
             ? Math.pow(sample[2], strand.sensorHemisphereFocus)
             : 1;
-        weightedLight += diffuse * transmission * weight;
+        weightedLight += diffuse * transmission * meshTransmission * weight;
         totalWeight += weight;
       }
       const averagedLight = weightedLight / Math.max(1e-6, totalWeight);
@@ -384,7 +524,7 @@ export function MappingScene({
         0,
         Math.min(
           1,
-          0.06 + averagedLight * mapping.mappingLightIntensity,
+          averagedLight * mapping.mappingLightIntensity,
         ),
       );
       bytes[outIndex * 3] = Math.round(level * outputR);
@@ -411,54 +551,36 @@ export function MappingScene({
         wp[1] + wn[1] * lift,
         wp[2] + wn[2] * lift,
       ];
-      const frame = gaussianTangentFrame(wn, g.rotationDeg ?? 0);
-      const t1 = new Vector3(frame.tW[0], frame.tW[1], frame.tW[2]);
-      const t2 = new Vector3(frame.tH[0], frame.tH[1], frame.tH[2]);
-      const steps = 48;
-      const makeRing = (scale: number): Vec3[] => {
-        const ring: Vec3[] = [];
-        for (let i = 0; i <= steps; i++) {
-          const a = (i / steps) * Math.PI * 2;
-          const c = Math.cos(a);
-          const s = Math.sin(a);
-          ring.push([
-            wp[0] + t1.x * c * g.width * scale + t2.x * s * g.height * scale + wn[0] * lift * 0.2,
-            wp[1] + t1.y * c * g.width * scale + t2.y * s * g.height * scale + wn[1] * lift * 0.2,
-            wp[2] + t1.z * c * g.width * scale + t2.z * s * g.height * scale + wn[2] * lift * 0.2,
-          ]);
-        }
-        return ring;
-      };
-      // Actual Gaussian height field used by displaceLed:
-      // h(u,v) = amplitude * exp(-0.5 * ((u/w)^2 + (v/h)^2)).
-      // Build in mesh-local tangent space, then apply the same mesh transform.
+      // Compact smooth dome used by displaceLed. It has the footprint of the
+      // former clipped Gaussian, but reaches zero height and slope at its edge.
       const localFrame = gaussianTangentFrame(g.normal, g.rotationDeg ?? 0);
       const radialSteps = 16;
       const angularSteps = 48;
-      // Stop where the Gaussian falls below 4% of its peak. A radial mesh
-      // follows the elliptical falloff boundary, avoiding a square base.
-      const extent = Math.sqrt(-2 * Math.log(0.04));
+      // A radial mesh follows the exact elliptical support boundary.
+      const extent = DOME_FOOTPRINT_SCALE;
       const vertices: number[] = [];
       const indices: number[] = [];
       const pushVertex = (ux: number, vy: number) => {
           const u = ux * g.width;
           const v = vy * g.height;
-          const height =
-            g.amplitude * Math.exp(-0.5 * (ux * ux + vy * vy));
-          const local: Vec3 = [
+          const base: Vec3 = [
             g.pos[0] +
               localFrame.tW[0] * u +
-              localFrame.tH[0] * v +
-              localFrame.n[0] * height,
+              localFrame.tH[0] * v,
             g.pos[1] +
               localFrame.tW[1] * u +
-              localFrame.tH[1] * v +
-              localFrame.n[1] * height,
+              localFrame.tH[1] * v,
             g.pos[2] +
               localFrame.tW[2] * u +
-              localFrame.tH[2] * v +
-              localFrame.n[2] * height,
+              localFrame.tH[2] * v,
           ];
+          const local = displaceLed(
+            base,
+            g.normal,
+            orientedGaussians,
+            0,
+            mapping.bumpAdditivity,
+          ).pos;
           const world = localToWorldPos(local);
           vertices.push(world[0], world[1], world[2]);
       };
@@ -496,12 +618,12 @@ export function MappingScene({
         id: g.id,
         pos,
         normal: wn,
-        ring: makeRing(2),
         surface,
       };
     });
   }, [
     orientedGaussians,
+    mapping.bumpAdditivity,
     mapping.ledSize,
     meshMatrix,
     meshNormalMat,
@@ -710,6 +832,7 @@ export function MappingScene({
         ln,
         orientedGaussians,
         led?.offset ?? 0,
+        mapping.bumpAdditivity,
       );
       const candidateWorld = localToWorldPos(displaced.pos);
       const prev = idx > 0 ? beads[idx - 1] : null;
@@ -776,6 +899,29 @@ export function MappingScene({
             opacity={0.65}
             roughness={0.9}
             metalness={0}
+          />
+        </mesh>
+      )}
+      {mapping.showBakedSurface && bakedSurface && (
+        <mesh
+          geometry={bakedSurface}
+          scale={mesh.scale}
+          position={[0, mesh.offsetY, 0]}
+          rotation={[
+            (mesh.tiltDeg * Math.PI) / 180,
+            (mesh.yawDeg * Math.PI) / 180,
+            0,
+          ]}
+          raycast={() => null}
+        >
+          <meshStandardMaterial
+            color={GAUSS_COLOR}
+            roughness={0.72}
+            metalness={0}
+            transparent
+            opacity={0.62}
+            side={DoubleSide}
+            depthWrite
           />
         </mesh>
       )}
@@ -948,46 +1094,24 @@ export function MappingScene({
         );
       })}
 
-      {gaussianMarkers.map(({ id, pos, normal, ring, surface }) => {
+      {gaussianMarkers.map(({ id, pos, normal, surface }) => {
         const isSel = id === selectedGaussianId;
         const front = facesCamera(pos, normal);
         const color = isSel ? GAUSS_SELECTED : GAUSS_COLOR;
         return (
           <group key={id}>
-            <Line
-              points={ring}
-              color={color}
-              lineWidth={isSel ? 2 : 1.2}
-              transparent
-              opacity={front ? 0.85 : 0.25}
-            />
-            {mapping.showBumpSurfaces && (
-              <>
-                <mesh geometry={surface} raycast={() => null}>
-                  <meshStandardMaterial
-                    color={color}
-                    roughness={0.72}
-                    metalness={0}
-                    transparent
-                    opacity={
-                      (isSel ? 0.22 : 0.14) +
-                      mapping.bumpLightOpacity * (isSel ? 0.58 : 0.46)
-                    }
-                    side={DoubleSide}
-                    depthWrite={false}
-                  />
-                </mesh>
-                <mesh geometry={surface} raycast={() => null}>
-                  <meshBasicMaterial
-                    color="#f7fbff"
-                    transparent
-                    opacity={isSel ? 0.3 : 0.16}
-                    wireframe
-                    side={DoubleSide}
-                    depthWrite={false}
-                  />
-                </mesh>
-              </>
+            {mapping.showBumpSurfaces && !mapping.showBakedSurface && (
+              <mesh geometry={surface} raycast={() => null}>
+                <meshStandardMaterial
+                  color={color}
+                  roughness={0.72}
+                  metalness={0}
+                  transparent
+                  opacity={0.62 * (isSel ? 1 : 0.82)}
+                  side={DoubleSide}
+                  depthWrite
+                />
+              </mesh>
             )}
             <mesh
               position={pos}

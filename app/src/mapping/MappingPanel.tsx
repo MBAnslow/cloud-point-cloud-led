@@ -8,6 +8,9 @@ import {
   summariseMissing,
 } from "../state/fileIO";
 import { applyMappingOrientation, azElToDir, dirToAzEl } from "./geometry";
+import { DOME_FOOTPRINT_SCALE } from "./gaussians";
+import { clearBakedSurfaceGeometry } from "./bakedSurface";
+import { mappingBakeSignature } from "./bakeSignature";
 import { deleteMeshBlob, invalidateMeshGeometry, putMeshBlob } from "./meshAsset";
 import { confirmDestructiveClear } from "../components/confirmDestructiveClear";
 
@@ -51,6 +54,10 @@ export function MappingPanel({
     selectedGaussianId == null
       ? null
       : gaussians.find((g) => g.id === selectedGaussianId) ?? null;
+  const bakeSignature = mappingBakeSignature(mapping);
+  const bakeUpToDate =
+    !!mapping.bakedSurfaceSignature &&
+    mapping.bakedSurfaceSignature === bakeSignature;
   // Display number for a placement index, honoring the reverse toggle.
   const displayNumber = (i: number) => (reversed ? count - i : i + 1);
   // The physical threading end (where add/delete happen) shown as its number.
@@ -332,7 +339,7 @@ export function MappingPanel({
             active={tool === "gaussian"}
             onClick={() => setMapping({ tool: "gaussian" })}
           >
-            Gaussian
+            Dome
           </ToolButton>
         </div>
         <div style={{ opacity: 0.7, lineHeight: 1.4, marginBottom: 8 }}>
@@ -340,7 +347,7 @@ export function MappingPanel({
             ? "Click the cloud surface to place the next LED. Drag a bead to slide it on the surface. You can only add or delete at the end of the string."
             : tool === "offset"
               ? "Drag a bead along its surface normal to offset it without changing the hand-placed position."
-              : "Click the surface to place a Gaussian bump. Drag its marker to move the centre. Edit height and width below."}
+              : "Click the surface to place a smooth dome. Drag its marker to move the centre, then shape its peak and footprint below."}
         </div>
         {tool === "offset" && selected !== null && mapping.leds[selected] && (
           <div style={{ marginBottom: 8, opacity: 0.85 }}>
@@ -351,7 +358,7 @@ export function MappingPanel({
         {tool === "gaussian" && (
           <>
             <div style={{ marginBottom: 6, opacity: 0.85 }}>
-              {gaussians.length} bump{gaussians.length === 1 ? "" : "s"}
+              {gaussians.length} dome{gaussians.length === 1 ? "" : "s"}
             </div>
             <label
               style={{
@@ -360,7 +367,7 @@ export function MappingPanel({
                 gap: 6,
                 marginBottom: 8,
               }}
-              title="Show the actual 3D Gaussian height field used to displace LEDs"
+              title="Show the compact 3D dome surface used to displace and orient LEDs"
             >
               <input
                 type="checkbox"
@@ -369,10 +376,10 @@ export function MappingPanel({
                   setMapping({ showBumpSurfaces: e.target.checked })
                 }
               />
-              Show 3D bump shape
+              Show 3D dome shape
             </label>
             <SliderRow
-              label="Opacity"
+              label="Dome block"
               value={mapping.bumpLightOpacity}
               min={0}
               max={1}
@@ -380,6 +387,94 @@ export function MappingPanel({
               onChange={(v) => setMapping({ bumpLightOpacity: v })}
               format={(v) => `${Math.round(v * 100)}%`}
             />
+            <SliderRow
+              label="Pyr block"
+              value={mapping.pyramidLightOpacity}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(v) => setMapping({ pyramidLightOpacity: v })}
+              format={(v) => `${Math.round(v * 100)}%`}
+            />
+            <SliderRow
+              label="Additive"
+              value={mapping.bumpAdditivity}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(v) => setMapping({ bumpAdditivity: v })}
+              format={(v) => `${Math.round(v * 100)}%`}
+            />
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+              <Button
+                onClick={() =>
+                  setMapping({
+                    bakeSurfaceRequestNonce: mapping.bakeSurfaceRequestNonce + 1,
+                  })
+                }
+                disabled={gaussians.length === 0}
+              >
+                Bake surface
+              </Button>
+              <Button
+                danger
+                onClick={() => {
+                  clearBakedSurfaceGeometry();
+                  setMapping({
+                    bakedSurfaceSignature: null,
+                    showBakedSurface: false,
+                    useBakedSurface: false,
+                  });
+                }}
+                disabled={!mapping.bakedSurfaceSignature}
+              >
+                Clear bake
+              </Button>
+            </div>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginTop: 8,
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={mapping.showBakedSurface}
+                disabled={!mapping.bakedSurfaceSignature}
+                onChange={(e) => setMapping({ showBakedSurface: e.target.checked })}
+              />
+              <span>Show baked surface</span>
+            </label>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginTop: 4,
+                cursor: "not-allowed",
+                opacity: 0.7,
+              }}
+              title="Disabled: baked occlusion is slower than realtime domes."
+            >
+              <input
+                type="checkbox"
+                checked={false}
+                disabled
+                onChange={() => {}}
+              />
+              <span>Use baked surface for occlusion (disabled)</span>
+            </label>
+            <div style={{ marginTop: 5, opacity: 0.72, fontSize: 10 }}>
+              Bake status:{" "}
+              {mapping.bakedSurfaceSignature
+                ? bakeUpToDate
+                  ? "up to date"
+                  : "stale (rebake recommended)"
+                : "not baked"}
+            </div>
           </>
         )}
         {tool === "gaussian" && selectedGaussian && (
@@ -396,7 +491,7 @@ export function MappingPanel({
           >
             <label style={{ display: "grid", gap: 4 }}>
               <span style={{ opacity: 0.75 }}>
-                amplitude {(selectedGaussian.amplitude * 100).toFixed(1)} cm
+                peak height {(selectedGaussian.amplitude * 100).toFixed(1)} cm
               </span>
               <input
                 type="range"
@@ -413,34 +508,36 @@ export function MappingPanel({
             </label>
             <label style={{ display: "grid", gap: 4 }}>
               <span style={{ opacity: 0.75 }}>
-                width {(selectedGaussian.width * 100).toFixed(1)} cm
+                horizontal radius{" "}
+                {(selectedGaussian.width * DOME_FOOTPRINT_SCALE * 100).toFixed(1)} cm
               </span>
               <input
                 type="range"
-                min={0.005}
-                max={0.5}
+                min={0.01}
+                max={1.25}
                 step={0.005}
-                value={selectedGaussian.width}
+                value={selectedGaussian.width * DOME_FOOTPRINT_SCALE}
                 onChange={(e) =>
                   updateMappingGaussian(selectedGaussian.id, {
-                    width: Number(e.target.value),
+                    width: Number(e.target.value) / DOME_FOOTPRINT_SCALE,
                   })
                 }
               />
             </label>
             <label style={{ display: "grid", gap: 4 }}>
               <span style={{ opacity: 0.75 }}>
-                height {(selectedGaussian.height * 100).toFixed(1)} cm
+                vertical radius{" "}
+                {(selectedGaussian.height * DOME_FOOTPRINT_SCALE * 100).toFixed(1)} cm
               </span>
               <input
                 type="range"
-                min={0.005}
-                max={0.5}
+                min={0.01}
+                max={1.25}
                 step={0.005}
-                value={selectedGaussian.height}
+                value={selectedGaussian.height * DOME_FOOTPRINT_SCALE}
                 onChange={(e) =>
                   updateMappingGaussian(selectedGaussian.id, {
-                    height: Number(e.target.value),
+                    height: Number(e.target.value) / DOME_FOOTPRINT_SCALE,
                   })
                 }
               />
@@ -469,7 +566,7 @@ export function MappingPanel({
                 setSelectedGaussianId(null);
               }}
             >
-              Delete bump
+              Delete dome
             </Button>
           </div>
         )}
@@ -511,7 +608,7 @@ export function MappingPanel({
             onClick={() => {
               if (
                 confirmDestructiveClear(
-                  `all ${gaussians.length} mapping bumps and LED offsets`,
+                  `all ${gaussians.length} mapping domes and LED offsets`,
                 )
               ) {
                 clearMappingBumps();
@@ -524,7 +621,7 @@ export function MappingPanel({
             }
             danger
           >
-            Clear bumps
+            Clear domes
           </Button>
         </div>
       </Section>

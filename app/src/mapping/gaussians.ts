@@ -1,15 +1,36 @@
 import type { MappingGaussian, Vec3 } from "../state";
+import { BufferGeometry, Float32BufferAttribute } from "three";
 
 export interface DisplacedLed {
   pos: Vec3;
   normal: Vec3;
 }
 
-/** Minimum normal alignment to receive a bump (same surface side). */
-const SAME_SIDE_DOT = 0.25;
-/** Shared visual/physical cutoff: ignore Gaussian tails below 4% of peak. */
+/** Minimum normal alignment used for ridge-aware dome wrapping. */
+const RIDGE_WRAP_DOT_MIN = 0.55;
+/**
+ * Preserve the footprint of existing saved bumps: their width/height values
+ * previously reached this radius at the clipped Gaussian boundary.
+ */
 export const GAUSSIAN_CUTOFF_RATIO = 0.04;
 const GAUSSIAN_CUTOFF_Q = -2 * Math.log(GAUSSIAN_CUTOFF_RATIO);
+export const DOME_FOOTPRINT_SCALE = Math.sqrt(GAUSSIAN_CUTOFF_Q);
+const SMOOTH_UNION_POWER = 6;
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}
+
+function ridgeWrapWeight(surfaceNormal: Vec3, domeNormal: Vec3): number {
+  const sn = Math.hypot(surfaceNormal[0], surfaceNormal[1], surfaceNormal[2]) || 1;
+  const dn = Math.hypot(domeNormal[0], domeNormal[1], domeNormal[2]) || 1;
+  const dot =
+    (surfaceNormal[0] / sn) * (domeNormal[0] / dn) +
+    (surfaceNormal[1] / sn) * (domeNormal[1] / dn) +
+    (surfaceNormal[2] / sn) * (domeNormal[2] / dn);
+  const t = clamp01((dot - RIDGE_WRAP_DOT_MIN) / (1 - RIDGE_WRAP_DOT_MIN));
+  return t * t;
+}
 
 /**
  * Orthonormal tangent frame for a surface normal: width axis (tW) and
@@ -90,21 +111,49 @@ export function gaussianTangentFrame(
   };
 }
 
+/** Height contributed by one compact dome at a mesh-local surface point. */
+export function domeHeightAtPoint(
+  pos: Vec3,
+  dome: MappingGaussian,
+  surfaceNormal?: Vec3,
+): number {
+  const amplitude = Math.max(0, dome.amplitude);
+  if (amplitude <= 1e-8) return 0;
+  const frame = gaussianTangentFrame(dome.normal, dome.rotationDeg ?? 0);
+  const dx = pos[0] - dome.pos[0];
+  const dy = pos[1] - dome.pos[1];
+  const dz = pos[2] - dome.pos[2];
+  const u = dx * frame.tW[0] + dy * frame.tW[1] + dz * frame.tW[2];
+  const v = dx * frame.tH[0] + dy * frame.tH[1] + dz * frame.tH[2];
+  const sw = Math.max(1e-6, dome.width);
+  const sh = Math.max(1e-6, dome.height);
+  const ridgeWeight = surfaceNormal
+    ? ridgeWrapWeight(surfaceNormal, dome.normal)
+    : 1;
+  if (ridgeWeight <= 1e-5) return 0;
+  const ridgeStretch = 0.15 + ridgeWeight * 0.85;
+  const q = (u * u) / (sw * sw * ridgeStretch) + (v * v) / (sh * sh * ridgeStretch);
+  if (q >= GAUSSIAN_CUTOFF_Q) return 0;
+  const edge = 1 - q / GAUSSIAN_CUTOFF_Q;
+  return amplitude * ridgeWeight * edge * edge;
+}
+
 /**
- * Lift an LED along its base normal by the strongest elliptical Gaussian
- * bump plus an optional per-LED offset. Overlapping physical bumps form a
- * union rather than adding their heights. The normal follows the slope of
- * the winning bump.
+ * Lift an LED along its base normal by compact elliptical domes plus an
+ * optional per-LED offset. Each dome reaches exactly zero height and slope
+ * at its boundary. Overlaps use a p-norm smooth maximum: close to max-union,
+ * but without abrupt normal seams where similarly-sized domes meet.
  *
  * Influence is limited to LEDs whose surface normal faces roughly the
- * same way as the Gaussian (so the far side of a thin mesh is ignored).
- * Falloff uses tangent-plane width/height axes at the Gaussian centre.
+ * same way as the dome (so the far side of a thin mesh is ignored).
+ * Width/height retain the footprint of previously saved Gaussian bumps.
  */
 export function displaceLed(
   pos: Vec3,
   normal: Vec3,
   gaussians: MappingGaussian[],
   perLedOffset = 0,
+  additivity = 0,
 ): DisplacedLed {
   const nx = normal[0];
   const ny = normal[1];
@@ -115,23 +164,21 @@ export function displaceLed(
   const n0z = nz / nLen;
 
   const manualOffset = Math.max(0, perLedOffset);
-  let bumpHeight = 0;
-  let gx = 0;
-  let gy = 0;
-  let gz = 0;
+  let sumHeightP = 0;
+  let sumGradientX = 0;
+  let sumGradientY = 0;
+  let sumGradientZ = 0;
+  let additiveHeight = 0;
+  let additiveGradientX = 0;
+  let additiveGradientY = 0;
+  let additiveGradientZ = 0;
 
   for (const g of gaussians) {
     const A = Math.max(0, g.amplitude);
     if (A <= 1e-8) continue;
 
-    const gn = g.normal;
-    const gnLen = Math.hypot(gn[0], gn[1], gn[2]) || 1;
-    const gnx = gn[0] / gnLen;
-    const gny = gn[1] / gnLen;
-    const gnz = gn[2] / gnLen;
-    // Same-side gate: skip LEDs on the opposite face of the mesh.
-    const side = n0x * gnx + n0y * gny + n0z * gnz;
-    if (side < SAME_SIDE_DOT) continue;
+    const ridgeWeight = ridgeWrapWeight([n0x, n0y, n0z], g.normal);
+    if (ridgeWeight <= 1e-5) continue;
 
     const sw = Math.max(1e-6, g.width);
     const sh = Math.max(1e-6, g.height);
@@ -141,20 +188,50 @@ export function displaceLed(
     const dz = pos[2] - g.pos[2];
     const u = dx * frame.tW[0] + dy * frame.tW[1] + dz * frame.tW[2];
     const v = dx * frame.tH[0] + dy * frame.tH[1] + dz * frame.tH[2];
-    const q = (u * u) / (sw * sw) + (v * v) / (sh * sh);
-    const hi = A * Math.exp(-0.5 * q);
+    const ridgeStretch = 0.15 + ridgeWeight * 0.85;
+    const q = (u * u) / (sw * sw * ridgeStretch) + (v * v) / (sh * sh * ridgeStretch);
+    if (q >= GAUSSIAN_CUTOFF_Q) continue;
+    const edge = 1 - q / GAUSSIAN_CUTOFF_Q;
+    const hi = A * ridgeWeight * edge * edge;
     if (hi <= 1e-10) continue;
-    if (hi > bumpHeight) {
-      bumpHeight = hi;
-      // Tangential gradient of the winning height field (∂h/∂u, ∂h/∂v).
-      const dhu = hi * (-u / (sw * sw));
-      const dhv = hi * (-v / (sh * sh));
-      gx = dhu * frame.tW[0] + dhv * frame.tH[0];
-      gy = dhu * frame.tW[1] + dhv * frame.tH[1];
-      gz = dhu * frame.tW[2] + dhv * frame.tH[2];
-    }
+    const dhu =
+      (-4 * A * ridgeWeight * edge * u) /
+      (GAUSSIAN_CUTOFF_Q * sw * sw * ridgeStretch);
+    const dhv =
+      (-4 * A * ridgeWeight * edge * v) /
+      (GAUSSIAN_CUTOFF_Q * sh * sh * ridgeStretch);
+    const weight = Math.pow(hi, SMOOTH_UNION_POWER - 1);
+    sumHeightP += weight * hi;
+    const gradientX = dhu * frame.tW[0] + dhv * frame.tH[0];
+    const gradientY = dhu * frame.tW[1] + dhv * frame.tH[1];
+    const gradientZ = dhu * frame.tW[2] + dhv * frame.tH[2];
+    sumGradientX += weight * gradientX;
+    sumGradientY += weight * gradientY;
+    sumGradientZ += weight * gradientZ;
+    additiveHeight += hi;
+    additiveGradientX += gradientX;
+    additiveGradientY += gradientY;
+    additiveGradientZ += gradientZ;
   }
 
+  const smoothUnionHeight =
+    sumHeightP > 0 ? Math.pow(sumHeightP, 1 / SMOOTH_UNION_POWER) : 0;
+  const smoothGradientScale =
+    sumHeightP > 0
+      ? Math.pow(sumHeightP, 1 / SMOOTH_UNION_POWER - 1)
+      : 0;
+  const blend = Math.max(0, Math.min(1, additivity));
+  const bumpHeight =
+    smoothUnionHeight + (additiveHeight - smoothUnionHeight) * blend;
+  const gx =
+    sumGradientX * smoothGradientScale * (1 - blend) +
+    additiveGradientX * blend;
+  const gy =
+    sumGradientY * smoothGradientScale * (1 - blend) +
+    additiveGradientY * blend;
+  const gz =
+    sumGradientZ * smoothGradientScale * (1 - blend) +
+    additiveGradientZ * blend;
   const h = manualOffset + bumpHeight;
   const outPos: Vec3 = [
     pos[0] + n0x * h,
@@ -171,9 +248,74 @@ export function displaceLed(
   return { pos: outPos, normal: [nnx, nny, nnz] };
 }
 
+/** Build a single mesh-local surface from all domes. */
+export function buildBakedDomeSurface(
+  gaussians: MappingGaussian[],
+  additivity: number,
+  detail?: { radialSteps?: number; angularSteps?: number },
+): BufferGeometry | null {
+  if (!gaussians.length) return null;
+  const radialSteps = Math.max(4, Math.floor(detail?.radialSteps ?? 16));
+  const angularSteps = Math.max(12, Math.floor(detail?.angularSteps ?? 48));
+  const extent = DOME_FOOTPRINT_SCALE;
+  const vertices: number[] = [];
+  const indices: number[] = [];
+  for (const g of gaussians) {
+    const frame = gaussianTangentFrame(g.normal, g.rotationDeg ?? 0);
+    const domeStart = vertices.length / 3;
+    const pushVertex = (ux: number, vy: number) => {
+      const u = ux * g.width;
+      const v = vy * g.height;
+      const base: Vec3 = [
+        g.pos[0] + frame.tW[0] * u + frame.tH[0] * v,
+        g.pos[1] + frame.tW[1] * u + frame.tH[1] * v,
+        g.pos[2] + frame.tW[2] * u + frame.tH[2] * v,
+      ];
+      const displaced = displaceLed(base, g.normal, gaussians, 0, additivity).pos;
+      vertices.push(displaced[0], displaced[1], displaced[2]);
+    };
+    pushVertex(0, 0);
+    for (let ring = 1; ring <= radialSteps; ring++) {
+      const radius = (ring / radialSteps) * extent;
+      for (let segment = 0; segment < angularSteps; segment++) {
+        const a = (segment / angularSteps) * Math.PI * 2;
+        pushVertex(Math.cos(a) * radius, Math.sin(a) * radius);
+      }
+    }
+    for (let segment = 0; segment < angularSteps; segment++) {
+      indices.push(
+        domeStart,
+        domeStart + 1 + segment,
+        domeStart + 1 + ((segment + 1) % angularSteps),
+      );
+    }
+    for (let ring = 1; ring < radialSteps; ring++) {
+      const inner = domeStart + 1 + (ring - 1) * angularSteps;
+      const outer = domeStart + 1 + ring * angularSteps;
+      for (let segment = 0; segment < angularSteps; segment++) {
+        const next = (segment + 1) % angularSteps;
+        indices.push(
+          inner + segment,
+          outer + segment,
+          inner + next,
+          inner + next,
+          outer + segment,
+          outer + next,
+        );
+      }
+    }
+  }
+  if (!indices.length || !vertices.length) return null;
+  const surface = new BufferGeometry();
+  surface.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+  surface.setIndex(indices);
+  surface.computeVertexNormals();
+  return surface;
+}
+
 /**
- * Return direct-light transmission from a ray through the clipped Gaussian
- * surfaces. Inputs and Gaussians must be in the same coordinate space.
+ * Return direct-light transmission from a ray through the compact dome
+ * surfaces. Inputs and domes must be in the same coordinate space.
  * `maxDistance` is finite for a point light and Infinity for sun/moon rays.
  */
 export function gaussianRayTransmission(
@@ -182,6 +324,7 @@ export function gaussianRayTransmission(
   maxDistance: number,
   gaussians: MappingGaussian[],
   opacity: number,
+  originNormal?: Vec3,
 ): number {
   const blocked = Math.max(0, Math.min(1, opacity));
   if (blocked <= 0 || gaussians.length === 0) return 1;
@@ -196,6 +339,10 @@ export function gaussianRayTransmission(
 
   for (const g of gaussians) {
     if (g.amplitude <= 1e-8) continue;
+    const ridgeWeight = originNormal
+      ? ridgeWrapWeight(originNormal, g.normal)
+      : 1;
+    if (ridgeWeight <= 1e-5) continue;
     const frame = gaussianTangentFrame(g.normal, g.rotationDeg ?? 0);
     const ox = origin[0] - g.pos[0];
     const oy = origin[1] - g.pos[1];
@@ -228,14 +375,17 @@ export function gaussianRayTransmission(
       const v =
         px * frame.tH[0] + py * frame.tH[1] + pz * frame.tH[2];
       const q =
-        (u * u) / Math.max(1e-12, g.width * g.width) +
-        (v * v) / Math.max(1e-12, g.height * g.height);
+        (u * u) /
+          Math.max(1e-12, g.width * g.width * (0.15 + ridgeWeight * 0.85)) +
+        (v * v) /
+          Math.max(1e-12, g.height * g.height * (0.15 + ridgeWeight * 0.85));
       if (q > GAUSSIAN_CUTOFF_Q) {
         previous = null;
         continue;
       }
       const n = px * frame.n[0] + py * frame.n[1] + pz * frame.n[2];
-      const surface = g.amplitude * Math.exp(-0.5 * q);
+      const edge = 1 - q / GAUSSIAN_CUTOFF_Q;
+      const surface = g.amplitude * ridgeWeight * edge * edge;
       const signed = n - surface;
       if (
         previous !== null &&
