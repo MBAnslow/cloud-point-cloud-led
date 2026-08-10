@@ -7,6 +7,9 @@ export interface DisplacedLed {
 
 /** Minimum normal alignment to receive a bump (same surface side). */
 const SAME_SIDE_DOT = 0.25;
+/** Shared visual/physical cutoff: ignore Gaussian tails below 4% of peak. */
+export const GAUSSIAN_CUTOFF_RATIO = 0.04;
+const GAUSSIAN_CUTOFF_Q = -2 * Math.log(GAUSSIAN_CUTOFF_RATIO);
 
 /**
  * Orthonormal tangent frame for a surface normal: width axis (tW) and
@@ -88,9 +91,10 @@ export function gaussianTangentFrame(
 }
 
 /**
- * Lift an LED along its base normal by the sum of elliptical Gaussian
- * bumps plus an optional per-LED offset, and tilt the normal from the
- * bump slope.
+ * Lift an LED along its base normal by the strongest elliptical Gaussian
+ * bump plus an optional per-LED offset. Overlapping physical bumps form a
+ * union rather than adding their heights. The normal follows the slope of
+ * the winning bump.
  *
  * Influence is limited to LEDs whose surface normal faces roughly the
  * same way as the Gaussian (so the far side of a thin mesh is ignored).
@@ -110,7 +114,8 @@ export function displaceLed(
   const n0y = ny / nLen;
   const n0z = nz / nLen;
 
-  let h = Math.max(0, perLedOffset);
+  const manualOffset = Math.max(0, perLedOffset);
+  let bumpHeight = 0;
   let gx = 0;
   let gy = 0;
   let gz = 0;
@@ -139,15 +144,18 @@ export function displaceLed(
     const q = (u * u) / (sw * sw) + (v * v) / (sh * sh);
     const hi = A * Math.exp(-0.5 * q);
     if (hi <= 1e-10) continue;
-    h += hi;
-    // Tangential gradient of the height field (∂h/∂u, ∂h/∂v).
-    const dhu = hi * (-u / (sw * sw));
-    const dhv = hi * (-v / (sh * sh));
-    gx += dhu * frame.tW[0] + dhv * frame.tH[0];
-    gy += dhu * frame.tW[1] + dhv * frame.tH[1];
-    gz += dhu * frame.tW[2] + dhv * frame.tH[2];
+    if (hi > bumpHeight) {
+      bumpHeight = hi;
+      // Tangential gradient of the winning height field (∂h/∂u, ∂h/∂v).
+      const dhu = hi * (-u / (sw * sw));
+      const dhv = hi * (-v / (sh * sh));
+      gx = dhu * frame.tW[0] + dhv * frame.tH[0];
+      gy = dhu * frame.tW[1] + dhv * frame.tH[1];
+      gz = dhu * frame.tW[2] + dhv * frame.tH[2];
+    }
   }
 
+  const h = manualOffset + bumpHeight;
   const outPos: Vec3 = [
     pos[0] + n0x * h,
     pos[1] + n0y * h,
@@ -161,6 +169,84 @@ export function displaceLed(
   nny /= nl;
   nnz /= nl;
   return { pos: outPos, normal: [nnx, nny, nnz] };
+}
+
+/**
+ * Return direct-light transmission from a ray through the clipped Gaussian
+ * surfaces. Inputs and Gaussians must be in the same coordinate space.
+ * `maxDistance` is finite for a point light and Infinity for sun/moon rays.
+ */
+export function gaussianRayTransmission(
+  origin: Vec3,
+  direction: Vec3,
+  maxDistance: number,
+  gaussians: MappingGaussian[],
+  opacity: number,
+): number {
+  const blocked = Math.max(0, Math.min(1, opacity));
+  if (blocked <= 0 || gaussians.length === 0) return 1;
+  const dl = Math.hypot(direction[0], direction[1], direction[2]) || 1;
+  const dx = direction[0] / dl;
+  const dy = direction[1] / dl;
+  const dz = direction[2] / dl;
+  const rayMax = Number.isFinite(maxDistance)
+    ? Math.max(0, maxDistance)
+    : Number.POSITIVE_INFINITY;
+  const originEpsilon = 1e-3;
+
+  for (const g of gaussians) {
+    if (g.amplitude <= 1e-8) continue;
+    const frame = gaussianTangentFrame(g.normal, g.rotationDeg ?? 0);
+    const ox = origin[0] - g.pos[0];
+    const oy = origin[1] - g.pos[1];
+    const oz = origin[2] - g.pos[2];
+    const radius = Math.hypot(
+      Math.max(g.width, g.height) * Math.sqrt(GAUSSIAN_CUTOFF_Q),
+      g.amplitude,
+    );
+    const along = -(ox * dx + oy * dy + oz * dz);
+    const closestX = ox + dx * along;
+    const closestY = oy + dy * along;
+    const closestZ = oz + dz * along;
+    const closestSq =
+      closestX * closestX + closestY * closestY + closestZ * closestZ;
+    if (closestSq > radius * radius) continue;
+    const half = Math.sqrt(Math.max(0, radius * radius - closestSq));
+    const start = Math.max(originEpsilon, along - half);
+    const end = Math.min(rayMax, along + half);
+    if (!(end > start)) continue;
+
+    let previous: number | null = null;
+    const samples = 36;
+    for (let i = 0; i <= samples; i++) {
+      const t = start + ((end - start) * i) / samples;
+      const px = ox + dx * t;
+      const py = oy + dy * t;
+      const pz = oz + dz * t;
+      const u =
+        px * frame.tW[0] + py * frame.tW[1] + pz * frame.tW[2];
+      const v =
+        px * frame.tH[0] + py * frame.tH[1] + pz * frame.tH[2];
+      const q =
+        (u * u) / Math.max(1e-12, g.width * g.width) +
+        (v * v) / Math.max(1e-12, g.height * g.height);
+      if (q > GAUSSIAN_CUTOFF_Q) {
+        previous = null;
+        continue;
+      }
+      const n = px * frame.n[0] + py * frame.n[1] + pz * frame.n[2];
+      const surface = g.amplitude * Math.exp(-0.5 * q);
+      const signed = n - surface;
+      if (
+        previous !== null &&
+        ((previous < 0 && signed >= 0) || (previous > 0 && signed <= 0))
+      ) {
+        return 1 - blocked;
+      }
+      previous = signed;
+    }
+  }
+  return 1;
 }
 
 /** Apply orientation flips to a Gaussian list (same space as LED pos/normal). */

@@ -1795,12 +1795,20 @@ export interface MappingParams {
   maxSegmentLength: number;
   /** Show the 3D Gaussian displacement surfaces in the mapping view. */
   showBumpSurfaces: boolean;
+  /** Show mapped LEDs as full-size outward sensor hemispheres. */
+  showBallSensors: boolean;
+  /** Fraction of direct light blocked by Gaussian bump surfaces, 0..1. */
+  bumpLightOpacity: number;
   /** Mapping-only inspection light orbit angle around the mesh. */
   mappingLightAngleDeg: number;
-  /** Mapping-only inspection light vertical orbit around the mesh, 0..360°. */
+  /** Mapping-light vertical sweep: 0° above, 180° level, 360° below. */
   mappingLightElevationDeg: number;
+  /** Mapping-only inspection light distance from the mesh centre. */
+  mappingLightRadius: number;
   /** Mapping-only inspection light brightness. */
   mappingLightIntensity: number;
+  /** Mapping-only inspection light and streamed output colour. */
+  mappingLightColor: string;
   /** Surface Gaussian bumps that lift / tilt nearby LEDs. */
   gaussians: MappingGaussian[];
 }
@@ -2202,9 +2210,13 @@ const DEFAULTS = {
     ledSize: 0.01,
     maxSegmentLength: 0.05,
     showBumpSurfaces: false,
+    showBallSensors: false,
+    bumpLightOpacity: 1,
     mappingLightAngleDeg: 45,
-    mappingLightElevationDeg: 45,
+    mappingLightElevationDeg: 0,
+    mappingLightRadius: 5,
     mappingLightIntensity: 1.5,
+    mappingLightColor: "#fff3d0",
     gaussians: [],
   } as MappingParams,
   mesh: {
@@ -3639,6 +3651,15 @@ function resolveMapping(input: unknown): MappingParams {
       typeof saved.showBumpSurfaces === "boolean"
         ? saved.showBumpSurfaces
         : d.showBumpSurfaces,
+    showBallSensors:
+      typeof saved.showBallSensors === "boolean"
+        ? saved.showBallSensors
+        : d.showBallSensors,
+    bumpLightOpacity:
+      typeof saved.bumpLightOpacity === "number" &&
+      Number.isFinite(saved.bumpLightOpacity)
+        ? Math.max(0, Math.min(1, saved.bumpLightOpacity))
+        : d.bumpLightOpacity,
     mappingLightAngleDeg:
       typeof saved.mappingLightAngleDeg === "number"
         ? saved.mappingLightAngleDeg
@@ -3658,10 +3679,20 @@ function resolveMapping(input: unknown): MappingParams {
             ) *
             (180 / Math.PI)
           : d.mappingLightElevationDeg,
+    mappingLightRadius:
+      typeof saved.mappingLightRadius === "number" &&
+      Number.isFinite(saved.mappingLightRadius)
+        ? Math.max(0.25, Math.min(20, saved.mappingLightRadius))
+        : d.mappingLightRadius,
     mappingLightIntensity:
       typeof saved.mappingLightIntensity === "number"
         ? saved.mappingLightIntensity
         : d.mappingLightIntensity,
+    mappingLightColor:
+      typeof saved.mappingLightColor === "string" &&
+      /^#[0-9a-f]{6}$/i.test(saved.mappingLightColor)
+        ? saved.mappingLightColor
+        : d.mappingLightColor,
     flipUpDown: typeof saved.flipUpDown === "boolean" ? saved.flipUpDown : d.flipUpDown,
     flipLeftRight:
       typeof saved.flipLeftRight === "boolean" ? saved.flipLeftRight : d.flipLeftRight,

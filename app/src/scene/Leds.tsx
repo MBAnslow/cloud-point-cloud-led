@@ -17,7 +17,11 @@ import {
   Vector3,
 } from "three";
 import { applyMappingOrientationPoint } from "../mapping/geometry";
-import { displaceLed, orientGaussians } from "../mapping/gaussians";
+import {
+  displaceLed,
+  gaussianRayTransmission,
+  orientGaussians,
+} from "../mapping/gaussians";
 import {
   getMeshHalfExtents,
   loadMeshGeometry,
@@ -131,6 +135,9 @@ export function Leds() {
       n,
       positions: new Float32Array(n * 3),
       normals: new Float32Array(n * 3),
+      localPositions: new Float32Array(n * 3),
+      sunTransmission: new Float32Array(n),
+      moonTransmission: new Float32Array(n),
       validPositions: new Uint8Array(n),
       colorFloats: new Float32Array(n * 3),
       timeColorFloats: new Float32Array(n * 3),
@@ -174,16 +181,43 @@ export function Leds() {
     () => new Matrix3().getNormalMatrix(meshMatrix),
     [meshMatrix],
   );
+  const orientedGaussians = useMemo(
+    () =>
+      cloud.applyLedOffset
+        ? orientGaussians(
+            mapping.gaussians ?? [],
+            mapping.flipUpDown,
+            mapping.flipLeftRight,
+            applyMappingOrientationPoint,
+          )
+        : [],
+    [
+      cloud.applyLedOffset,
+      mapping.gaussians,
+      mapping.flipUpDown,
+      mapping.flipLeftRight,
+    ],
+  );
+  const worldToBumpLocal = useMemo(() => {
+    const cloudQ = new Quaternion().setFromEuler(
+      new Euler(cloudTiltRad, cloudYawRad, 0, "XYZ"),
+    );
+    const cloudMatrix = new Matrix4().compose(
+      new Vector3(cloud.offsetX, cloud.offsetY, cloud.offsetZ),
+      cloudQ,
+      new Vector3(1, 1, 1),
+    );
+    return cloudMatrix.multiply(meshMatrix.clone()).invert();
+  }, [
+    cloudTiltRad,
+    cloudYawRad,
+    cloud.offsetX,
+    cloud.offsetY,
+    cloud.offsetZ,
+    meshMatrix,
+  ]);
 
   useEffect(() => {
-    const orientedGauss = cloud.applyLedOffset
-      ? orientGaussians(
-          mapping.gaussians ?? [],
-          mapping.flipUpDown,
-          mapping.flipLeftRight,
-          applyMappingOrientationPoint,
-        )
-      : [];
     for (let i = 0; i < buffers.n; i++) {
       // `i` is the logical strand index; map it to the placement index so
       // the reverse toggle flips which physical end is LED #0.
@@ -214,7 +248,7 @@ export function Leds() {
         const displaced = displaceLed(
           lp,
           ln,
-          orientedGauss,
+          orientedGaussians,
           led.offset ?? 0,
         );
         lp = displaced.pos;
@@ -236,6 +270,9 @@ export function Leds() {
       );
       const rNrm = rotateCloud(nrm, cloudTiltRad, cloudYawRad);
       const i3 = i * 3;
+      buffers.localPositions[i3] = lp[0];
+      buffers.localPositions[i3 + 1] = lp[1];
+      buffers.localPositions[i3 + 2] = lp[2];
       buffers.positions[i3] = rPos[0];
       buffers.positions[i3 + 1] = rPos[1] + cloud.offsetY;
       buffers.positions[i3 + 2] = rPos[2];
@@ -307,6 +344,7 @@ export function Leds() {
     mapping.flipLeftRight,
     mapping.reversed,
     cloud.applyLedOffset,
+    orientedGaussians,
     cloudTiltRad,
     cloudYawRad,
     cloud.offsetX,
@@ -378,6 +416,56 @@ export function Leds() {
     if (!mesh) return;
 
     const skyLighting = computeSkyLighting(sky);
+    if (
+      cloud.applyLedOffset &&
+      mapping.bumpLightOpacity > 0 &&
+      orientedGaussians.length > 0
+    ) {
+      const sunLocalV = new Vector3(...skyLighting.sunDirection)
+        .transformDirection(worldToBumpLocal);
+      const moonLocalV = new Vector3(...skyLighting.moonDirection)
+        .transformDirection(worldToBumpLocal);
+      const sunLocal: [number, number, number] = [
+        sunLocalV.x,
+        sunLocalV.y,
+        sunLocalV.z,
+      ];
+      const moonLocal: [number, number, number] = [
+        moonLocalV.x,
+        moonLocalV.y,
+        moonLocalV.z,
+      ];
+      for (let i = 0; i < buffers.n; i++) {
+        if (!buffers.validPositions[i]) {
+          buffers.sunTransmission[i] = 1;
+          buffers.moonTransmission[i] = 1;
+          continue;
+        }
+        const i3 = i * 3;
+        const origin: [number, number, number] = [
+          buffers.localPositions[i3],
+          buffers.localPositions[i3 + 1],
+          buffers.localPositions[i3 + 2],
+        ];
+        buffers.sunTransmission[i] = gaussianRayTransmission(
+          origin,
+          sunLocal,
+          Number.POSITIVE_INFINITY,
+          orientedGaussians,
+          mapping.bumpLightOpacity,
+        );
+        buffers.moonTransmission[i] = gaussianRayTransmission(
+          origin,
+          moonLocal,
+          Number.POSITIVE_INFINITY,
+          orientedGaussians,
+          mapping.bumpLightOpacity,
+        );
+      }
+    } else {
+      buffers.sunTransmission.fill(1);
+      buffers.moonTransmission.fill(1);
+    }
     const skyAmount = clamp01(sky.visualizationAmount ?? 1);
     const manualBlend = sky.enabled
       ? 1 - (1 - MANUAL_BLEND_WHEN_SKY) * skyAmount
@@ -409,6 +497,7 @@ export function Leds() {
             color: hexToVec3(skyLighting.sunColor),
             intensity: skyLighting.sunIntensity,
             spread: clamp01(sky.sunSpread ?? 0.9),
+            transmission: buffers.sunTransmission,
           },
           {
             type: "directional",
@@ -416,6 +505,7 @@ export function Leds() {
             color: hexToVec3(skyLighting.moonColor),
             intensity: skyLighting.moonIntensity,
             spread: clamp01(sky.moonSpread ?? 0.9),
+            transmission: buffers.moonTransmission,
           },
         );
       }

@@ -17,6 +17,8 @@ export interface ShadeLightDirectional {
    * for semantics. 0 = narrow / flat Lambert, 1 = broad / half-Lambert wrap.
    */
   spread: number;
+  /** Optional per-LED direct-light transmission, indexed by LED. */
+  transmission?: Float32Array;
 }
 
 export interface ShadeLightPoint {
@@ -240,6 +242,7 @@ export function shadeLeds(
           }
           k = L.intensity * accum / Math.max(wsum, 1e-6);
         }
+        if (L.transmission) k *= L.transmission[i] ?? 1;
         r += L.color[0] * k;
         g += L.color[1] * k;
         b += L.color[2] * k;

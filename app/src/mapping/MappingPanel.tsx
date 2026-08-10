@@ -31,6 +31,8 @@ export function MappingPanel({
   const setMapping = useSimStore((s) => s.setMapping);
   const wled = useSimStore((s) => s.wled);
   const setWled = useSimStore((s) => s.setWled);
+  const strand = useSimStore((s) => s.strand);
+  const setStrand = useSimStore((s) => s.setStrand);
   const mesh = useSimStore((s) => s.mesh);
   const setMesh = useSimStore((s) => s.setMesh);
   const updateMappedLed = useSimStore((s) => s.updateMappedLed);
@@ -90,28 +92,19 @@ export function MappingPanel({
     <div
       style={{
         position: "fixed",
-        top: 12,
-        left: 12,
-        width: 300,
-        maxHeight: "calc(100vh - 24px)",
-        overflowY: "auto",
+        inset: 12,
         zIndex: 10,
-        background: "rgba(10, 12, 20, 0.82)",
-        backdropFilter: "blur(8px)",
-        borderRadius: 12,
-        boxShadow: "0 1px 0 rgba(255,255,255,0.05) inset",
-        color: "rgba(207,214,230,0.95)",
-        padding: "12px 12px 14px",
-        fontFamily:
-          "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-        fontSize: 12,
+        pointerEvents: "none",
       }}
     >
+      <Panel side="left">
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: 6,
           marginBottom: 10,
         }}
       >
@@ -155,7 +148,7 @@ export function MappingPanel({
         </Link>
       </div>
 
-      <Section title="Surface">
+      <Section title="Surface & orientation">
         <div
           style={{
             display: "flex",
@@ -315,7 +308,7 @@ export function MappingPanel({
         </label>
       </Section>
 
-      <Section title={`Sequence — ${count} LED${count === 1 ? "" : "s"}`}>
+      <Section title={`Place & shape — ${count} LED${count === 1 ? "" : "s"}`}>
         <div
           style={{
             display: "flex",
@@ -378,6 +371,15 @@ export function MappingPanel({
               />
               Show 3D bump shape
             </label>
+            <SliderRow
+              label="Opacity"
+              value={mapping.bumpLightOpacity}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(v) => setMapping({ bumpLightOpacity: v })}
+              format={(v) => `${Math.round(v * 100)}%`}
+            />
           </>
         )}
         {tool === "gaussian" && selectedGaussian && (
@@ -527,7 +529,7 @@ export function MappingPanel({
         </div>
       </Section>
 
-      <Section title="Move selected">
+      <Section title="Selected LED">
         {selected === null ? (
           <div style={{ opacity: 0.6 }}>Select an LED to nudge it.</div>
         ) : (
@@ -552,7 +554,7 @@ export function MappingPanel({
         )}
       </Section>
 
-      <Section title="Configuration">
+      <Section title="Configuration" defaultOpen={false}>
         <ConfigButtons
           onLoaded={() => {
             setSelected(null);
@@ -560,8 +562,26 @@ export function MappingPanel({
           }}
         />
       </Section>
+      </Panel>
 
+      <Panel side="right" title="Preview & output">
       <Section title="Mapping light">
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 7,
+          }}
+        >
+          <span style={{ opacity: 0.75 }}>Colour</span>
+          <input
+            type="color"
+            value={mapping.mappingLightColor}
+            onChange={(e) => setMapping({ mappingLightColor: e.target.value })}
+            style={{ width: 52, height: 24, padding: 1, cursor: "pointer" }}
+          />
+        </label>
         <SliderRow
           label="Orbit"
           value={mapping.mappingLightAngleDeg}
@@ -581,6 +601,15 @@ export function MappingPanel({
           format={(v) => `${Math.round(v)}°`}
         />
         <SliderRow
+          label="Distance"
+          value={mapping.mappingLightRadius}
+          min={0.25}
+          max={20}
+          step={0.05}
+          onChange={(v) => setMapping({ mappingLightRadius: v })}
+          format={(v) => `${v.toFixed(2)}m`}
+        />
+        <SliderRow
           label="Intensity"
           value={mapping.mappingLightIntensity}
           min={0}
@@ -591,7 +620,50 @@ export function MappingPanel({
         />
       </Section>
 
-      <Section title="WLED mapping stream">
+      <Section title="Sensor hemisphere">
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginBottom: 6,
+            cursor: "pointer",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={mapping.showBallSensors}
+            onChange={(e) =>
+              setMapping({ showBallSensors: e.target.checked })
+            }
+          />
+          <span>Show sensor hemispheres</span>
+        </label>
+        <SliderRow
+          label="Size"
+          value={strand.ledSize}
+          min={0.005}
+          max={0.2}
+          step={0.005}
+          onChange={(v) => setStrand({ ledSize: v })}
+          format={(v) => `${(v * 100).toFixed(1)}cm`}
+        />
+        <SliderRow
+          label="Focus"
+          value={strand.sensorHemisphereFocus}
+          min={0}
+          max={12}
+          step={0.1}
+          onChange={(v) => setStrand({ sensorHemisphereFocus: v })}
+          format={(v) => v.toFixed(1)}
+        />
+        <div style={{ fontSize: 10, opacity: 0.62, lineHeight: 1.35 }}>
+          Shared with the simulator. Size controls the physical area sampled;
+          focus biases averaging toward the outward normal.
+        </div>
+      </Section>
+
+      <Section title="WLED output">
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <input
             type="checkbox"
@@ -626,7 +698,7 @@ export function MappingPanel({
         />
       </Section>
 
-      <Section title="LEDs">
+      <Section title={`LED list — ${count}`} defaultOpen={false}>
         <div style={{ display: "grid", gap: 3 }}>
           {count === 0 && <div style={{ opacity: 0.6 }}>No LEDs placed yet.</div>}
           {mapping.leds.map((_, k) => {
@@ -666,6 +738,56 @@ export function MappingPanel({
           })}
         </div>
       </Section>
+      </Panel>
+    </div>
+  );
+}
+
+function Panel({
+  side,
+  title,
+  children,
+}: {
+  side: "left" | "right";
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 0,
+        bottom: 0,
+        [side]: 0,
+        width: "min(300px, calc(50vw - 24px))",
+        overflowY: "auto",
+        pointerEvents: "auto",
+        background: "rgba(10, 12, 20, 0.82)",
+        backdropFilter: "blur(8px)",
+        borderRadius: 12,
+        boxShadow: "0 1px 0 rgba(255,255,255,0.05) inset",
+        color: "rgba(207,214,230,0.95)",
+        padding: "12px 12px 14px",
+        boxSizing: "border-box",
+        fontFamily:
+          "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        fontSize: 12,
+      }}
+    >
+      {title && (
+        <div
+          style={{
+            textTransform: "uppercase",
+            letterSpacing: 0.6,
+            opacity: 0.75,
+            fontSize: 11,
+            marginBottom: 10,
+          }}
+        >
+          {title}
+        </div>
+      )}
+      {children}
     </div>
   );
 }
@@ -673,10 +795,13 @@ export function MappingPanel({
 function Section({
   title,
   children,
+  defaultOpen = true,
 }: {
   title: string;
   children: React.ReactNode;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <div
       style={{
@@ -685,18 +810,34 @@ function Section({
         borderBottom: "1px solid rgba(255,255,255,0.08)",
       }}
     >
-      <div
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
         style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          width: "100%",
+          padding: 0,
+          border: 0,
+          background: "transparent",
+          color: "inherit",
+          cursor: "pointer",
           fontSize: 10,
           textTransform: "uppercase",
           letterSpacing: 0.45,
           opacity: 0.65,
-          marginBottom: 8,
+          marginBottom: open ? 8 : 0,
+          textAlign: "left",
         }}
       >
-        {title}
-      </div>
-      {children}
+        <span>{title}</span>
+        <span aria-hidden="true" style={{ fontSize: 11 }}>
+          {open ? "−" : "+"}
+        </span>
+      </button>
+      {open && children}
     </div>
   );
 }
@@ -722,7 +863,8 @@ function SliderRow({
     <label
       style={{
         display: "grid",
-        gridTemplateColumns: "44px 1fr 60px",
+        gridTemplateColumns:
+          "minmax(38px, 44px) minmax(40px, 1fr) minmax(44px, 60px)",
         alignItems: "center",
         gap: 8,
         marginBottom: 6,
