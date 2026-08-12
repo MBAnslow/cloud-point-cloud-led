@@ -13,6 +13,7 @@ import { clearBakedSurfaceGeometry } from "./bakedSurface";
 import { mappingBakeSignature } from "./bakeSignature";
 import { deleteMeshBlob, invalidateMeshGeometry, putMeshBlob } from "./meshAsset";
 import { confirmDestructiveClear } from "../components/confirmDestructiveClear";
+import { ColorInput } from "../components/ColorInput";
 
 interface Props {
   selected: number | null;
@@ -672,11 +673,10 @@ export function MappingPanel({
           }}
         >
           <span style={{ opacity: 0.75 }}>Colour</span>
-          <input
-            type="color"
-            value={mapping.mappingLightColor}
-            onChange={(e) => setMapping({ mappingLightColor: e.target.value })}
-            style={{ width: 52, height: 24, padding: 1, cursor: "pointer" }}
+          <ColorInput
+            color={mapping.mappingLightColor}
+            onChange={(color) => setMapping({ mappingLightColor: color })}
+            compact
           />
         </label>
         <SliderRow
@@ -722,6 +722,15 @@ export function MappingPanel({
           max={1}
           step={0.01}
           onChange={(v) => setMapping({ mappingLightSpread: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="Beam focus"
+          value={mapping.mappingLightFocus}
+          min={0}
+          max={1}
+          step={0.01}
+          onChange={(v) => setMapping({ mappingLightFocus: v })}
           format={(v) => v.toFixed(2)}
         />
         <SliderRow
@@ -771,6 +780,22 @@ export function MappingPanel({
           step={0.1}
           onChange={(v) => setStrand({ sensorHemisphereFocus: v })}
           format={(v) => v.toFixed(1)}
+        />
+        <SliderRow
+          label="Output gamma"
+          value={strand.colorProfile.brightnessGamma}
+          min={0.25}
+          max={3}
+          step={0.05}
+          onChange={(value) =>
+            setStrand({
+              colorProfile: {
+                ...strand.colorProfile,
+                brightnessGamma: value,
+              },
+            })
+          }
+          format={(value) => value.toFixed(2)}
         />
         <div style={{ fontSize: 10, opacity: 0.62, lineHeight: 1.35 }}>
           Shared with the simulator. Size controls the physical area sampled;

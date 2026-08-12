@@ -129,6 +129,7 @@ interface Voice {
  */
 export class DroneEngine {
   private started = false;
+  private startPromise: Promise<void> | null = null;
   private master: Tone.Gain | null = null;
   private hp: Tone.Filter | null = null;
   private lp: Tone.Filter | null = null;
@@ -187,7 +188,18 @@ export class DroneEngine {
 
   async start(): Promise<void> {
     if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     await Tone.start();
+    if (this.started) return;
     // Master output is intentionally left disconnected here; the shared
     // MasterFxBus decides whether to route it through the EQ chain or
     // directly to destination via `setRouting`.

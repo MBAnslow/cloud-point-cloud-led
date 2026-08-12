@@ -125,7 +125,7 @@ export function Lights() {
             intensity={skyLighting.sunIntensity}
             position={sunPos}
             angle={sunAngle}
-            penumbra={0.35}
+            penumbra={clamp01(sky.sunBeamFocus ?? 0.65)}
             distance={0}
             decay={Math.max(0, sky.lightDecay ?? 1)}
             target={cloudTarget}
@@ -135,7 +135,7 @@ export function Lights() {
             intensity={skyLighting.moonIntensity}
             position={moonPos}
             angle={moonAngle}
-            penumbra={0.35}
+            penumbra={clamp01(sky.moonBeamFocus ?? 0.65)}
             distance={0}
             decay={Math.max(0, sky.lightDecay ?? 1)}
             target={cloudTarget}

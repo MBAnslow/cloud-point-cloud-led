@@ -5,6 +5,7 @@ import {
   type SkyParams,
 } from "../state";
 import { useDraggable } from "./useDraggable";
+import { ColorInput } from "./ColorInput";
 
 /**
  * Hideable time-of-day visualization + ambient light controls.
@@ -89,6 +90,24 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           formatValue={(v) => v.toFixed(2)}
         />
         <SliderRow
+          label="Sun beam focus"
+          value={sky.sunBeamFocus ?? 0.65}
+          min={0}
+          max={1}
+          step={0.01}
+          onChange={(v) => upd({ sunBeamFocus: v })}
+          formatValue={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="Low-sun crown boost"
+          value={sky.sunTopHighlightBoost ?? 0}
+          min={0}
+          max={8}
+          step={0.05}
+          onChange={(v) => upd({ sunTopHighlightBoost: v })}
+          formatValue={(v) => `${v.toFixed(2)}×`}
+        />
+        <SliderRow
           label="Moon scale"
           value={sky.moonScale}
           min={0}
@@ -107,6 +126,15 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           formatValue={(v) => v.toFixed(2)}
         />
         <SliderRow
+          label="Moon beam focus"
+          value={sky.moonBeamFocus ?? 0.65}
+          min={0}
+          max={1}
+          step={0.01}
+          onChange={(v) => upd({ moonBeamFocus: v })}
+          formatValue={(v) => v.toFixed(2)}
+        />
+        <SliderRow
           label="Distance falloff"
           value={sky.lightDecay ?? 1}
           min={0}
@@ -119,7 +147,7 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           label="Orbit X"
           value={sky.orbitRadiusX ?? sky.orbitRadius ?? 12}
           min={0}
-          max={6}
+          max={12}
           step={0.25}
           onChange={(v) => upd({ orbitRadiusX: v })}
           formatValue={(v) => `${v.toFixed(2)}m`}
@@ -128,7 +156,7 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           label="Orbit Y"
           value={sky.orbitRadiusY ?? sky.orbitRadius ?? 12}
           min={0}
-          max={6}
+          max={12}
           step={0.25}
           onChange={(v) => upd({ orbitRadiusY: v })}
           formatValue={(v) => `${v.toFixed(2)}m`}
@@ -137,7 +165,7 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           label="Orbit Z"
           value={sky.orbitRadiusZ ?? sky.orbitRadius ?? 12}
           min={0}
-          max={6}
+          max={12}
           step={0.25}
           onChange={(v) => upd({ orbitRadiusZ: v })}
           formatValue={(v) => `${v.toFixed(2)}m`}
@@ -217,19 +245,10 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
         <div style={sectionLabel}>Lights</div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
           <span style={{ width: 88, opacity: 0.85 }}>Ambient</span>
-          <input
-            type="color"
-            value={ambient.color}
-            onChange={(e) => updAmbient({ color: e.target.value })}
-            style={{
-              width: 28,
-              height: 20,
-              padding: 0,
-              border: "1px solid rgba(255,255,255,0.15)",
-              borderRadius: 3,
-              background: "transparent",
-              cursor: "pointer",
-            }}
+          <ColorInput
+            color={ambient.color}
+            onChange={(color) => updAmbient({ color })}
+            compact
           />
           <span style={{ flex: 1 }} />
         </div>
@@ -240,6 +259,15 @@ export function TimeOfDayPanel({ visible = true }: { visible?: boolean }) {
           max={2}
           step={0.01}
           onChange={(v) => updAmbient({ intensity: v })}
+          formatValue={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="Ambient ducking"
+          value={ambient.ducking ?? 0.75}
+          min={0}
+          max={1}
+          step={0.01}
+          onChange={(v) => updAmbient({ ducking: v })}
           formatValue={(v) => v.toFixed(2)}
         />
       </div>

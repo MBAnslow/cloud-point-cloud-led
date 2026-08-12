@@ -58,6 +58,10 @@ import { computeSkyLighting } from "../lighting/skyCycle";
 import { sharedLightningController } from "../lighting/lightning";
 import { WledStreamClient } from "../wled/client";
 import { publishFrame, publishLedPositions } from "../stream/frameBuffer";
+import {
+  encodeLedRgb,
+  srgbByteToLinear,
+} from "../lighting/ledColor";
 
 function clamp01(v: number): number {
   if (v <= 0) return 0;
@@ -603,7 +607,11 @@ export function Leds() {
             spread: clamp01(sky.sunSpread ?? 0.9),
             target: cloudCenter,
             coneAngle: spreadToSpotAngle(sky.sunSpread ?? 0.9),
-            penumbra: 0.35,
+            penumbra: clamp01(sky.sunBeamFocus ?? 0.65),
+            topHighlightBoost: Math.max(0, sky.sunTopHighlightBoost ?? 0),
+            topHighlightFactor: clamp01(
+              1 - Math.abs(skyLighting.sunDirection[1]) / 0.65,
+            ),
             transmission: buffers.sunTransmission,
           },
           {
@@ -620,7 +628,7 @@ export function Leds() {
             spread: clamp01(sky.moonSpread ?? 0.9),
             target: cloudCenter,
             coneAngle: spreadToSpotAngle(sky.moonSpread ?? 0.9),
-            penumbra: 0.35,
+            penumbra: clamp01(sky.moonBeamFocus ?? 0.65),
             transmission: buffers.moonTransmission,
           },
         );
@@ -636,6 +644,7 @@ export function Leds() {
         {
           hemisphereAverage: true,
           hemisphereFocusExponent: Math.max(0, strand.sensorHemisphereFocus),
+          ambientDucking: ambient.ducking ?? 0.75,
         },
       );
     } else {
@@ -877,7 +886,6 @@ export function Leds() {
         boltEllipsoid,
         cloudXform,
         keyframeU,
-        breath.participants,
         sampleBoltSurface,
       );
       const useLightning =
@@ -1038,14 +1046,18 @@ export function Leds() {
         buffers.colorBytes[i3] = (locatorColor[0] * 255 + 0.5) | 0;
         buffers.colorBytes[i3 + 1] = (locatorColor[1] * 255 + 0.5) | 0;
         buffers.colorBytes[i3 + 2] = (locatorColor[2] * 255 + 0.5) | 0;
-        tmpColor.setRGB(locatorColor[0], locatorColor[1], locatorColor[2]);
-      } else {
-        tmpColor.setRGB(
-          buffers.colorFloats[i3],
-          buffers.colorFloats[i3 + 1],
-          buffers.colorFloats[i3 + 2],
-        );
       }
+      const [red, green, blue] = encodeLedRgb(
+        buffers.colorFloats[i3],
+        buffers.colorFloats[i3 + 1],
+        buffers.colorFloats[i3 + 2],
+        strand.colorProfile,
+      );
+      tmpColor.setRGB(
+        srgbByteToLinear(red),
+        srgbByteToLinear(green),
+        srgbByteToLinear(blue),
+      );
       mesh.setColorAt(i, tmpColor);
     }
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
@@ -1061,6 +1073,20 @@ export function Leds() {
       buffers.colorBytes[i3] = 0;
       buffers.colorBytes[i3 + 1] = 0;
       buffers.colorBytes[i3 + 2] = 0;
+    }
+
+    // Apply one hue-preserving brightness curve to the final LED signal.
+    for (let i = 0; i < buffers.n; i++) {
+      const i3 = i * 3;
+      const [red, green, blue] = encodeLedRgb(
+        buffers.colorFloats[i3],
+        buffers.colorFloats[i3 + 1],
+        buffers.colorFloats[i3 + 2],
+        strand.colorProfile,
+      );
+      buffers.colorBytes[i3] = red;
+      buffers.colorBytes[i3 + 1] = green;
+      buffers.colorBytes[i3 + 2] = blue;
     }
 
     // Suppress 1-LSB chatter in streamed bytes. This removes tiny histogram

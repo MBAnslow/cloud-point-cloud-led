@@ -25,7 +25,13 @@ export function startPersistence(): void {
     const arrangementChanged =
       state.drone.notes !== previous.drone.notes ||
       state.pad.notes !== previous.pad.notes;
-    if (arrangementChanged) {
+    const colorAuthoringChanged =
+      state.sky.sunStops !== previous.sky.sunStops ||
+      state.sky.moonStops !== previous.sky.moonStops ||
+      state.sky.ambientStops !== previous.sky.ambientStops ||
+      state.ambient !== previous.ambient ||
+      state.strand.colorProfile !== previous.strand.colorProfile;
+    if (arrangementChanged || colorAuthoringChanged) {
       saveSnapshot(currentSnapshot());
     }
     if (timer) clearTimeout(timer);

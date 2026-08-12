@@ -46,6 +46,10 @@ export interface ShadeLightPoint {
   coneAngle?: number;
   /** Fraction of the cone edge used for smooth falloff, in [0, 1]. */
   penumbra?: number;
+  /** Optional multiplier for LEDs near the top of the mapped cloud. */
+  topHighlightBoost?: number;
+  /** Strength of that multiplier for the current light angle. */
+  topHighlightFactor?: number;
   /** Optional per-LED direct-light transmission, indexed by LED. */
   transmission?: Float32Array;
 }
@@ -166,9 +170,22 @@ export function spotConeAttenuation(
       (1 - Math.max(0, Math.min(1, penumbra))),
   );
   if (cosine <= outer) return 0;
-  if (cosine >= inner || inner <= outer) return 1;
-  const t = (cosine - outer) / (inner - outer);
-  return t * t * (3 - 2 * t);
+  const focus = Math.max(0, Math.min(1, penumbra));
+  const edge =
+    cosine >= inner || inner <= outer
+      ? 1
+      : (() => {
+          const t = (cosine - outer) / (inner - outer);
+          return t * t * (3 - 2 * t);
+        })();
+  // At maximum focus, create a genuinely tight central hotspot while
+  // retaining the configured outer spread as the beam boundary.
+  const radial = Math.max(
+    0,
+    Math.min(1, (cosine - outer) / Math.max(1e-6, 1 - outer)),
+  );
+  const hotspot = Math.pow(radial, 1 + focus * 15);
+  return edge * ((1 - focus) + focus * hotspot);
 }
 
 function clamp01(v: number) {
@@ -220,13 +237,26 @@ export function shadeLeds(
   cloudOpacity: number,
   outBytes: Uint8Array,
   outFloats?: Float32Array,
-  options?: { hemisphereAverage?: boolean; hemisphereFocusExponent?: number },
+  options?: {
+    hemisphereAverage?: boolean;
+    hemisphereFocusExponent?: number;
+    ambientDucking?: number;
+  },
 ): void {
   const hemisphereAverage = options?.hemisphereAverage ?? false;
   const focusExp = Math.max(0, options?.hemisphereFocusExponent ?? 0);
+  const ambientDucking = clamp01(options?.ambientDucking ?? 0);
   // Deterministic, near-uniform-area local +Z hemisphere samples
   // (camera-independent). This avoids pole-biased averages.
   const HEMI_SAMPLES = buildUniformHemisphereSamples(32);
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < n; i++) {
+    const y = positions[i * 3 + 1];
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const heightRange = Math.max(1e-6, maxY - minY);
 
   for (let i = 0; i < n; i++) {
     const i3 = i * 3;
@@ -240,6 +270,10 @@ export function shadeLeds(
     let r = 0;
     let g = 0;
     let b = 0;
+    let fillR = 0;
+    let fillG = 0;
+    let fillB = 0;
+    let directCoverage = 0;
 
     // Build an orthonormal basis around the sensor axis `n` when averaging.
     let tx = 1;
@@ -267,9 +301,9 @@ export function shadeLeds(
     for (let li = 0; li < lights.length; li++) {
       const L = lights[li];
       if (L.type === "ambient") {
-        r += L.color[0] * L.intensity;
-        g += L.color[1] * L.intensity;
-        b += L.color[2] * L.intensity;
+        fillR += L.color[0] * L.intensity;
+        fillG += L.color[1] * L.intensity;
+        fillB += L.color[2] * L.intensity;
       } else if (L.type === "hemisphere") {
         // three.js HemisphereLight: linear blend between sky and ground
         // tints based on the surface normal's Y component. `ny` here is
@@ -277,9 +311,9 @@ export function shadeLeds(
         // pick up the sky tint and downward-facing ones pick up ground.
         const t = ny * 0.5 + 0.5;
         const one = 1 - t;
-        r += (L.groundColor[0] * one + L.skyColor[0] * t) * L.intensity;
-        g += (L.groundColor[1] * one + L.skyColor[1] * t) * L.intensity;
-        b += (L.groundColor[2] * one + L.skyColor[2] * t) * L.intensity;
+        fillR += (L.groundColor[0] * one + L.skyColor[0] * t) * L.intensity;
+        fillG += (L.groundColor[1] * one + L.skyColor[1] * t) * L.intensity;
+        fillB += (L.groundColor[2] * one + L.skyColor[2] * t) * L.intensity;
       } else if (L.type === "directional") {
         let k: number;
         if (!hemisphereAverage) {
@@ -303,6 +337,7 @@ export function shadeLeds(
           k = L.intensity * accum / Math.max(wsum, 1e-6);
         }
         if (L.transmission) k *= L.transmission[i] ?? 1;
+        directCoverage = Math.max(directCoverage, clamp01(k));
         r += L.color[0] * k;
         g += L.color[1] * k;
         b += L.color[2] * k;
@@ -358,11 +393,35 @@ export function shadeLeds(
         }
         const t = L.transmission?.[i] ?? 1;
         k *= t;
+        if ((L.topHighlightBoost ?? 0) > 0) {
+          const height = clamp01((py - minY) / heightRange);
+          // Cover the upper region rather than only the highest tip. The
+          // smooth ramp begins around the upper two-thirds and approaches a
+          // broad full-strength crown near the top.
+          const upper = clamp01((height - 0.35) / 0.65);
+          const crownWeight = upper * upper * (3 - 2 * upper);
+          k *=
+            1 +
+            Math.max(0, L.topHighlightBoost ?? 0) *
+              clamp01(L.topHighlightFactor ?? 0) *
+              crownWeight;
+        }
+        directCoverage = Math.max(directCoverage, clamp01(k));
         r += L.color[0] * k;
         g += L.color[1] * k;
         b += L.color[2] * k;
       }
     }
+
+    // Treat ducking as a shadow-fill gate rather than a linear subtraction.
+    // Direct light is often numerically modest after distance attenuation, so
+    // a sensitive exponential response is needed to clear white fill from
+    // visibly highlighted areas while leaving fully shaded LEDs untouched.
+    const duckSignal = 1 - Math.exp(-8 * directCoverage);
+    const fillAmount = 1 - ambientDucking * duckSignal;
+    r += fillR * fillAmount;
+    g += fillG * fillAmount;
+    b += fillB * fillAmount;
 
     const [cr, cg, cb] = toneMapPreserveHue(r, g, b);
 

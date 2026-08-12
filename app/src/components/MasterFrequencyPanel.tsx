@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useSimStore,
+  type AudioInstrument,
   type FilterChain,
   type FilterParams,
 } from "../state";
@@ -460,7 +461,7 @@ function DroneSubmenu() {
   const filters = useSimStore((s) => s.drone.filters);
   const setDrone = useSimStore((s) => s.setDrone);
   return (
-    <Submenu label="Drone">
+    <Submenu label="Drone" actions={<ChannelButtons instrument="drone" />}>
       <VolumeWithMeter
         label="Volume"
         min={0}
@@ -515,7 +516,7 @@ function PadSubmenu() {
   const filters = useSimStore((s) => s.pad.filters);
   const setPad = useSimStore((s) => s.setPad);
   return (
-    <Submenu label="Pad">
+    <Submenu label="Pad" actions={<ChannelButtons instrument="pad" />}>
       <VolumeWithMeter
         label="Volume"
         min={0}
@@ -559,7 +560,7 @@ function SamplesSubmenu() {
   const filters = useSimStore((s) => s.samples.filters);
   const setSamples = useSimStore((s) => s.setSamples);
   return (
-    <Submenu label="Samples">
+    <Submenu label="Samples" actions={<ChannelButtons instrument="samples" />}>
       <VolumeWithMeter
         label="Volume"
         min={0}
@@ -579,7 +580,63 @@ function SamplesSubmenu() {
   );
 }
 
-function Submenu({ label, children }: { label: string; children: React.ReactNode }) {
+function ChannelButtons({ instrument }: { instrument: AudioInstrument }) {
+  const solo = useSimStore((s) => s.audioSolo);
+  const muted = useSimStore((s) => s.audioMuted[instrument]);
+  const setAudioSolo = useSimStore((s) => s.setAudioSolo);
+  const setAudioMuted = useSimStore((s) => s.setAudioMuted);
+  const soloed = solo === instrument;
+  return (
+    <span style={{ display: "inline-flex", gap: 4, marginLeft: "auto" }}>
+      <button
+        type="button"
+        aria-pressed={soloed}
+        title={`Solo ${instrument}`}
+        onClick={() => setAudioSolo(soloed ? null : instrument)}
+        style={{
+          ...pillStyle,
+          padding: "1px 6px",
+          background: soloed
+            ? "rgba(250,204,21,0.18)"
+            : "rgba(8,12,20,0.9)",
+          color: soloed ? "#fde047" : "rgba(226,232,240,0.9)",
+          borderColor: soloed ? "#facc15" : "rgba(255,255,255,0.2)",
+          fontWeight: 700,
+        }}
+      >
+        S
+      </button>
+      <button
+        type="button"
+        aria-pressed={muted}
+        title={`${muted ? "Unmute" : "Mute"} ${instrument}`}
+        onClick={() => setAudioMuted(instrument, !muted)}
+        style={{
+          ...pillStyle,
+          padding: "1px 6px",
+          background: muted
+            ? "rgba(244,63,94,0.2)"
+            : "rgba(8,12,20,0.9)",
+          color: muted ? "#fda4af" : "rgba(226,232,240,0.9)",
+          borderColor: muted ? "#fb7185" : "rgba(255,255,255,0.2)",
+          fontWeight: 700,
+        }}
+      >
+        M
+      </button>
+    </span>
+  );
+}
+
+function Submenu({
+  label,
+  actions,
+  children,
+}: {
+  label: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   const [open, setOpen] = useState(true);
   return (
     <div
@@ -589,22 +646,25 @@ function Submenu({ label, children }: { label: string; children: React.ReactNode
         paddingTop: 6,
       }}
     >
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          ...pillStyle,
-          background: "transparent",
-          borderColor: "transparent",
-          fontSize: 11,
-          padding: 0,
-          opacity: 0.9,
-          fontWeight: 600,
-          letterSpacing: 0.3,
-        }}
-        title={label}
-      >
-        {open ? "▾" : "▸"} {label}
-      </button>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            ...pillStyle,
+            background: "transparent",
+            borderColor: "transparent",
+            fontSize: 11,
+            padding: 0,
+            opacity: 0.9,
+            fontWeight: 600,
+            letterSpacing: 0.3,
+          }}
+          title={label}
+        >
+          {open ? "▾" : "▸"} {label}
+        </button>
+        {actions}
+      </div>
       {open && (
         <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
           {children}

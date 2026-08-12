@@ -12,6 +12,7 @@ import {
   type SkySwatch,
 } from "../lighting/swatches";
 import { interpolateChannel } from "../lighting/skyCycle";
+import { ColorInput } from "./ColorInput";
 
 const HOURS = 24;
 const TRACK_HEIGHT = 26;
@@ -923,51 +924,6 @@ function SwatchPicker({
           />
         ))}
       </div>
-    </div>
-  );
-}
-
-function ColorInput({
-  color,
-  onChange,
-}: {
-  color: string;
-  onChange: (color: string) => void;
-}) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <input
-        type="color"
-        value={color}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          width: 28,
-          height: 22,
-          background: "transparent",
-          border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 4,
-          padding: 0,
-          cursor: "pointer",
-        }}
-      />
-      <input
-        type="text"
-        value={color}
-        onChange={(e) => {
-          const v = e.target.value.trim();
-          if (/^#[0-9a-fA-F]{6}$/.test(v)) onChange(v);
-        }}
-        style={{
-          background: "rgba(0,0,0,0.35)",
-          color: "inherit",
-          border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 4,
-          padding: "1px 4px",
-          fontSize: 11,
-          width: 70,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        }}
-      />
     </div>
   );
 }

@@ -101,7 +101,8 @@ export function DroneRuntime(): null {
       const { drone } = modulatedEngineParams(state, now);
       engine.update(
         state.sky.timeHours,
-        state.audioSolo && state.audioSolo !== "drone"
+        state.audioMuted.drone ||
+          (state.audioSolo && state.audioSolo !== "drone")
           ? { ...drone, masterGain: 0 }
           : drone,
       );

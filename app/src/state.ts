@@ -1,5 +1,9 @@
 import { create } from "zustand";
 import { CUSTOM_SWATCH_ID, getSwatch } from "./lighting/swatches";
+import {
+  DEFAULT_LED_COLOR_PROFILE,
+  type LedColorProfile,
+} from "./lighting/ledColor";
 import { loadSnapshot, type Snapshot } from "./state/persistence";
 
 export type Vec3 = [number, number, number];
@@ -20,7 +24,9 @@ export type LedViewMode =
  */
 export type LedDisplayMode = "sensors" | "leds";
 export type BreathTimeCombineMode = "revealOnInhale" | "linearMix";
-export type AudioSolo = "drone" | "pad" | "samples" | null;
+export type AudioInstrument = "drone" | "pad" | "samples";
+export type AudioSolo = AudioInstrument | null;
+export type AudioMuted = Record<AudioInstrument, boolean>;
 
 export interface LedStreamPipeline {
   /** Enables the base time-of-day lighting stage. */
@@ -112,12 +118,6 @@ export interface LightningAnimParams {
   thunderDelayMs: number;
   /** Stereo pan for bolt/background audio, −1 = left … +1 = right. */
   pan: number;
-  /**
-   * How strongly a spawned bolt blends from the default lightning colours
-   * toward the chosen breath participant's colour, [0, 1]. 0 = pure
-   * default, 1 = fully tinted.
-   */
-  tintMix: number;
 }
 
 export interface LightningKeyframe {
@@ -258,12 +258,6 @@ export interface LightningParams {
    * Also keyframed across the active window.
    */
   pan: number;
-  /**
-   * Blend toward the chosen breath participant's colour at the live
-   * storm sample. Mirrored in keyframes; bolts freeze the mix at spawn.
-   * 0 = pure default lightning, 1 = fully participant-coloured.
-   */
-  tintMix: number;
   /**
    * Target simulation FPS for lightning updates + LED contribution.
    * Lower values create a stroboscopic, film-like flicker by
@@ -439,11 +433,15 @@ export interface StrandParams {
    * sensor normal (head-on light contributes more than grazing light).
    */
   sensorHemisphereFocus: number;
+  /** Hue-preserving brightness gamma applied to final LED output. */
+  colorProfile: LedColorProfile;
 }
 
 export interface AmbientLightParams {
   color: string;
   intensity: number;
+  /** Suppress ambient/sky fill where direct light is strong. */
+  ducking: number;
 }
 
 export interface DirectionalLightParams {
@@ -512,6 +510,12 @@ export interface SkyParams {
   sunSpread: number;
   /** Angular spread of moon light (0 = tight hotspot, 1 = broad sky-like). */
   moonSpread: number;
+  /** Radial sun beam falloff (0 = flat cone, 1 = centre-weighted). */
+  sunBeamFocus: number;
+  /** Exaggerate illumination on the cloud crown while the sun is low. */
+  sunTopHighlightBoost: number;
+  /** Radial moon beam falloff (0 = flat cone, 1 = centre-weighted). */
+  moonBeamFocus: number;
   /** Point-light distance falloff exponent shared by sun and moon. */
   lightDecay: number;
   /** Show visual cone overlays for sun/moon spread. */
@@ -1629,6 +1633,7 @@ export interface SimState {
   ui: UiParams;
   /** Transient mixer solo; intentionally not persisted. */
   audioSolo: AudioSolo;
+  audioMuted: AudioMuted;
   setEllipsoid: (e: Partial<EllipsoidParams>) => void;
   setCloud: (c: Partial<CloudParams>) => void;
   setCloudTop: (c: Partial<CloudTopParams>) => void;
@@ -1678,6 +1683,7 @@ export interface SimState {
   setMesh: (m: Partial<MeshTargetParams>) => void;
   setUi: (u: Partial<UiParams>) => void;
   setAudioSolo: (solo: AudioSolo) => void;
+  setAudioMuted: (instrument: AudioInstrument, muted: boolean) => void;
   addMappedLed: (dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
   moveMappedLed: (index: number, dir: Vec3, pos?: Vec3, normal?: Vec3) => void;
   updateMappedLed: (index: number, patch: Partial<MappedLed>) => void;
@@ -1836,6 +1842,8 @@ export interface MappingParams {
   mappingLightIntensity: number;
   /** Mapping-light angular response (same model as simulation sun/moon). */
   mappingLightSpread: number;
+  /** Mapping-light radial beam falloff. */
+  mappingLightFocus: number;
   /** Mapping-light distance falloff exponent. */
   mappingLightDecay: number;
   /** Mapping-only inspection light and streamed output colour. */
@@ -1934,8 +1942,13 @@ const DEFAULTS = {
   strand: {
     ledSize: 0.04,
     sensorHemisphereFocus: 0,
+    colorProfile: { ...DEFAULT_LED_COLOR_PROFILE },
   } as StrandParams,
-  ambient: { color: "#262830", intensity: 0.25 } as AmbientLightParams,
+  ambient: {
+    color: "#262830",
+    intensity: 0.25,
+    ducking: 0.75,
+  } as AmbientLightParams,
   directional: {
     color: "#ffffff",
     intensity: 1.0,
@@ -1953,6 +1966,9 @@ const DEFAULTS = {
     moonScale: 1,
     sunSpread: 0.9,
     moonSpread: 0.9,
+    sunBeamFocus: 0.65,
+    sunTopHighlightBoost: 0,
+    moonBeamFocus: 0.65,
     lightDecay: 1,
     showSpreadCones: false,
     orbitRadius: 12,
@@ -2030,7 +2046,6 @@ const DEFAULTS = {
           backgroundGain: 0.25,
           thunderDelayMs: 800,
           pan: 0,
-          tintMix: 0.35,
         },
       },
       {
@@ -2050,7 +2065,6 @@ const DEFAULTS = {
           backgroundGain: 0.35,
           thunderDelayMs: 800,
           pan: 0,
-          tintMix: 0.55,
         },
       },
       {
@@ -2070,7 +2084,6 @@ const DEFAULTS = {
           backgroundGain: 0.25,
           thunderDelayMs: 800,
           pan: 0,
-          tintMix: 0.35,
         },
       },
     ],
@@ -2102,7 +2115,6 @@ const DEFAULTS = {
     boltPitchJitterCents: 200,
     thunderDelayMs: 800,
     pan: 0,
-    tintMix: 0.35,
     simFps: 60,
   } as LightningParams,
   breathFilter: {
@@ -2262,6 +2274,7 @@ const DEFAULTS = {
     mappingLightRadius: 5,
     mappingLightIntensity: 1.5,
     mappingLightSpread: 0.9,
+    mappingLightFocus: 0.65,
     mappingLightDecay: 1,
     mappingLightColor: "#fff3d0",
     gaussians: [],
@@ -2284,6 +2297,11 @@ const DEFAULTS = {
     showStream: false,
   } as UiParams,
   audioSolo: null as AudioSolo,
+  audioMuted: {
+    drone: false,
+    pad: false,
+    samples: false,
+  } as AudioMuted,
 };
 
 function normalizeLedViewMode(mode: unknown): LedViewMode {
@@ -2388,33 +2406,33 @@ function resolveChannelStops(
     palette?: Record<string, unknown>;
   },
 ): Pick<SkyParams, "sunStops" | "moonStops" | "ambientStops"> {
-  const hasChannel =
-    Array.isArray(savedSky.sunStops) &&
-    savedSky.sunStops.length > 0 &&
-    Array.isArray(savedSky.moonStops) &&
-    Array.isArray(savedSky.ambientStops);
-  if (hasChannel) {
-    return {
-      sunStops: savedSky.sunStops!,
-      moonStops: savedSky.moonStops!,
-      ambientStops: savedSky.ambientStops!,
-    };
-  }
+  let fallback: Pick<SkyParams, "sunStops" | "moonStops" | "ambientStops">;
   if (Array.isArray(savedSky.stops) && savedSky.stops.length > 0) {
-    return channelsFromLegacyStops(savedSky.stops);
-  }
-  if (savedSky.palette && typeof savedSky.palette === "object") {
-    return channelsFromLegacyPalette(
+    fallback = channelsFromLegacyStops(savedSky.stops);
+  } else if (savedSky.palette && typeof savedSky.palette === "object") {
+    fallback = channelsFromLegacyPalette(
       savedSky.palette as Record<
         string,
         { ambientColor?: string; sunColor?: string; moonColor?: string }
       >,
     );
+  } else {
+    fallback = {
+      sunStops: DEFAULTS.sky.sunStops,
+      moonStops: DEFAULTS.sky.moonStops,
+      ambientStops: DEFAULTS.sky.ambientStops,
+    };
   }
   return {
-    sunStops: DEFAULTS.sky.sunStops,
-    moonStops: DEFAULTS.sky.moonStops,
-    ambientStops: DEFAULTS.sky.ambientStops,
+    sunStops: Array.isArray(savedSky.sunStops)
+      ? savedSky.sunStops
+      : fallback.sunStops,
+    moonStops: Array.isArray(savedSky.moonStops)
+      ? savedSky.moonStops
+      : fallback.moonStops,
+    ambientStops: Array.isArray(savedSky.ambientStops)
+      ? savedSky.ambientStops
+      : fallback.ambientStops,
   };
 }
 
@@ -2921,21 +2939,6 @@ export function cloneColorTracks(
   };
 }
 
-/**
- * Participant slot indices whose breath colour may tint a bolt
- * (enabled participants, clamped to MAX_BREATH_PARTICIPANTS).
- */
-export function enabledLightningTintIndices(
-  participants: BreathParticipant[],
-): number[] {
-  const out: number[] = [];
-  const n = Math.min(MAX_BREATH_PARTICIPANTS, participants.length);
-  for (let i = 0; i < n; i++) {
-    if (participants[i]?.enabled) out.push(i);
-  }
-  return out;
-}
-
 function resolveColorStops(
   input: unknown,
   fallback: LightningColorStop[],
@@ -3044,7 +3047,6 @@ function cloneAnimParams(src: LightningAnimParams): LightningAnimParams {
     backgroundGain: src.backgroundGain,
     thunderDelayMs: src.thunderDelayMs,
     pan: src.pan,
-    tintMix: src.tintMix,
   };
 }
 
@@ -3072,7 +3074,6 @@ function animParamsFromRoot(p: {
   backgroundGain: number;
   thunderDelayMs: number;
   pan: number;
-  tintMix: number;
 }): LightningAnimParams {
   return cloneAnimParams(p);
 }
@@ -3158,7 +3159,6 @@ function resolveAnimParams(
       Math.min(2000, num(rec.thunderDelayMs, fallback.thunderDelayMs)),
     ),
     pan: Math.max(-1, Math.min(1, num(rec.pan, fallback.pan))),
-    tintMix: Math.max(0, Math.min(1, num(rec.tintMix, fallback.tintMix))),
   };
 }
 
@@ -3371,11 +3371,6 @@ function resolveLightning(input: unknown): LightningParams {
         "intensity",
         d.intensityRange,
       );
-      const tintMix = (() => {
-        const v =
-          typeof saved.tintMix === "number" ? saved.tintMix : d.tintMix;
-        return Math.max(0, Math.min(1, v));
-      })();
       const rootAnim = animParamsFromRoot({
         intensityRange,
         strikesPerMinute:
@@ -3419,7 +3414,6 @@ function resolveLightning(input: unknown): LightningParams {
             ? saved.thunderDelayMs
             : d.thunderDelayMs,
         pan: typeof saved.pan === "number" ? saved.pan : d.pan,
-        tintMix,
       });
       return resolveLightningKeyframes(
         (saved as Record<string, unknown>).keyframes,
@@ -3535,11 +3529,6 @@ function resolveLightning(input: unknown): LightningParams {
         return d.boltPitchJitterCents;
       }
       return Math.max(0, Math.min(1200, v));
-    })(),
-    tintMix: (() => {
-      const v = (saved as Record<string, unknown>).tintMix;
-      if (typeof v !== "number" || !Number.isFinite(v)) return d.tintMix;
-      return Math.max(0, Math.min(1, v));
     })(),
   };
 }
@@ -3772,6 +3761,10 @@ function resolveMapping(input: unknown): MappingParams {
       typeof saved.mappingLightSpread === "number"
         ? Math.max(0, Math.min(1, saved.mappingLightSpread))
         : d.mappingLightSpread,
+    mappingLightFocus:
+      typeof saved.mappingLightFocus === "number"
+        ? Math.max(0, Math.min(1, saved.mappingLightFocus))
+        : d.mappingLightFocus,
     mappingLightDecay:
       typeof saved.mappingLightDecay === "number"
         ? Math.max(0, Math.min(2, saved.mappingLightDecay))
@@ -3814,7 +3807,14 @@ function initialState() {
     ellipsoid: { ...DEFAULTS.ellipsoid, ...saved.ellipsoid },
     cloud: { ...DEFAULTS.cloud, ...saved.cloud },
     cloudTop: { ...DEFAULTS.cloudTop, ...(saved.cloudTop ?? {}) },
-    strand: { ...DEFAULTS.strand, ...saved.strand },
+    strand: {
+      ...DEFAULTS.strand,
+      ...saved.strand,
+      colorProfile: {
+        ...DEFAULTS.strand.colorProfile,
+        ...(saved.strand?.colorProfile ?? {}),
+      },
+    },
     ambient: { ...DEFAULTS.ambient, ...saved.ambient },
     directional: { ...DEFAULTS.directional, ...saved.directional },
     sky: {
@@ -3884,6 +3884,7 @@ function initialState() {
     mesh: { ...DEFAULTS.mesh, ...(saved.mesh ?? {}) },
     ui: { ...DEFAULTS.ui, ...(saved.ui ?? {}) },
     audioSolo: null,
+    audioMuted: { ...DEFAULTS.audioMuted },
   };
 }
 
@@ -4098,6 +4099,10 @@ export const useSimStore = create<SimState>((set) => ({
   setMesh: (m) => set((s) => ({ mesh: { ...s.mesh, ...m } })),
   setUi: (u) => set((s) => ({ ui: { ...s.ui, ...u } })),
   setAudioSolo: (audioSolo) => set({ audioSolo }),
+  setAudioMuted: (instrument, muted) =>
+    set((s) => ({
+      audioMuted: { ...s.audioMuted, [instrument]: muted },
+    })),
   addMappedLed: (dir, pos, normal) =>
     set((s) => ({
       mapping: {
@@ -4200,7 +4205,13 @@ export function applySnapshot(snap: Snapshot): Snapshot {
   const s = useSimStore.getState();
   s.setEllipsoid(snap.ellipsoid);
   s.setCloud(snap.cloud);
-  s.setStrand(snap.strand);
+  s.setStrand({
+    ...snap.strand,
+    colorProfile: {
+      ...DEFAULTS.strand.colorProfile,
+      ...(snap.strand?.colorProfile ?? {}),
+    },
+  });
   s.setAmbient(snap.ambient);
   s.setDirectional(snap.directional);
   const snapSky = (snap.sky ?? {}) as Partial<SkyParams> & {
@@ -4291,6 +4302,14 @@ export function applySnapshot(snap: Snapshot): Snapshot {
 /** Snapshot of the persisted slice of the store. */
 export function currentSnapshot(): Omit<Snapshot, "version"> {
   const s = useSimStore.getState();
+  const {
+    stops: _legacyStops,
+    palette: _legacyPalette,
+    ...sky
+  } = s.sky as SkyParams & {
+    stops?: LegacyTriStop[];
+    palette?: Record<string, unknown>;
+  };
   return {
     ellipsoid: s.ellipsoid,
     cloud: s.cloud,
@@ -4298,7 +4317,7 @@ export function currentSnapshot(): Omit<Snapshot, "version"> {
     strand: s.strand,
     ambient: s.ambient,
     directional: s.directional,
-    sky: s.sky,
+    sky,
     wled: s.wled,
     breath: resolveBreath(s.breath),
     lightning: s.lightning,

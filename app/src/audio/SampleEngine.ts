@@ -32,6 +32,17 @@ const MIN_REMAINING_BUF_SEC = 0.01;
 /** Skip gain automation unless the target moved by at least this. */
 const GAIN_EPS = 0.01;
 
+function normalizedWetMixes(
+  reverb: number,
+  delay: number,
+): { dry: number; reverb: number; delay: number } {
+  const r = Number.isFinite(reverb) ? Math.max(0, Math.min(1, reverb)) : 0;
+  const d = Number.isFinite(delay) ? Math.max(0, Math.min(1, delay)) : 0;
+  const dry = Math.max(0, 1 - r - d);
+  const total = Math.max(1, dry + r + d);
+  return { dry: dry / total, reverb: r / total, delay: d / total };
+}
+
 interface Voice {
   clipId: string;
   sampleId: string;
@@ -62,6 +73,7 @@ type EnterRoll = "accepted" | "rejected";
 
 export class SampleEngine {
   private started = false;
+  private startPromise: Promise<void> | null = null;
   private master: Tone.Gain | null = null;
   private masterHp: Tone.Filter | null = null;
   private masterLp: Tone.Filter | null = null;
@@ -111,7 +123,18 @@ export class SampleEngine {
 
   async start(): Promise<void> {
     if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     await Tone.start();
+    if (this.started) return;
     this.master = new Tone.Gain(0);
     this.masterHp = new Tone.Filter({ type: "highpass", frequency: 10, Q: 0.7 });
     this.masterLp = new Tone.Filter({ type: "lowpass", frequency: 22000, Q: 0.7 });
@@ -281,16 +304,12 @@ export class SampleEngine {
     this.pitchLfoRateHz = p.pitchLfoRateHz;
     this.pitchLfoDepthCents = p.pitchLfoDepthCents;
     this.pitchLfoShape = p.pitchLfoShape;
-    const masterReverbMix = Math.max(0, Math.min(1, p.reverbMix));
-    const masterDelayMix = Math.max(0, Math.min(1, p.delayMix));
+    const masterMix = normalizedWetMixes(p.reverbMix, p.delayMix);
     if (this.busDry) {
-      this.busDry.gain.rampTo(
-        Math.max(0, 1 - masterReverbMix - masterDelayMix),
-        0.08,
-      );
+      this.busDry.gain.rampTo(masterMix.dry, 0.08);
     }
     if (this.masterReverbWet) {
-      this.masterReverbWet.gain.rampTo(masterReverbMix, 0.08);
+      this.masterReverbWet.gain.rampTo(masterMix.reverb, 0.08);
     }
     if (this.masterReverb) {
       (this.masterReverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
@@ -299,7 +318,7 @@ export class SampleEngine {
       );
     }
     if (this.masterDelayWet) {
-      this.masterDelayWet.gain.rampTo(masterDelayMix, 0.08);
+      this.masterDelayWet.gain.rampTo(masterMix.delay, 0.08);
     }
     if (this.masterDelay) {
       this.masterDelay.delayTime.rampTo(
@@ -436,11 +455,10 @@ export class SampleEngine {
       Math.max(20, Math.min(20000, a.filterHz)),
       0.05,
     );
-    const reverbMix = Math.max(0, Math.min(1, a.reverbMix));
-    const delayMix = Math.max(0, Math.min(1, a.delayMix));
-    voice.dryGain.gain.rampTo(Math.max(0, 1 - reverbMix - delayMix), 0.08);
-    voice.reverbWet.gain.rampTo(reverbMix, 0.08);
-    voice.delayWet.gain.rampTo(delayMix, 0.08);
+    const mix = normalizedWetMixes(a.reverbMix, a.delayMix);
+    voice.dryGain.gain.rampTo(mix.dry, 0.08);
+    voice.reverbWet.gain.rampTo(mix.reverb, 0.08);
+    voice.delayWet.gain.rampTo(mix.delay, 0.08);
     (voice.reverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
       Math.max(0, Math.min(0.99, a.reverbDecay)),
       0.1,

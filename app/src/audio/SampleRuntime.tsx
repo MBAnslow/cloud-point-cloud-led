@@ -31,7 +31,8 @@ export function SampleRuntime(): null {
       engine.update(
         state.sky.timeHours,
         state.sky.cycleSeconds,
-        state.audioSolo && state.audioSolo !== "samples"
+        state.audioMuted.samples ||
+          (state.audioSolo && state.audioSolo !== "samples")
           ? { ...samples, master: 0 }
           : samples,
         state.sky.autoPlay,

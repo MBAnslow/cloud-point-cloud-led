@@ -10,6 +10,7 @@ import { ensureLimitedAux } from "./MasterFxBus";
  */
 export class BreathExhaleAudioEngine {
   private started = false;
+  private startPromise: Promise<void> | null = null;
   private out: Tone.Gain | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private pendingLoads = new Set<string>();
@@ -22,7 +23,18 @@ export class BreathExhaleAudioEngine {
 
   async start(): Promise<void> {
     if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     await Tone.start();
+    if (this.started) return;
     this.out = new Tone.Gain(1);
     const aux = await ensureLimitedAux();
     this.out.connect(aux);

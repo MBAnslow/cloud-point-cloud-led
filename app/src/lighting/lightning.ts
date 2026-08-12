@@ -1,5 +1,4 @@
 import type {
-  BreathParticipant,
   EllipsoidParams,
   LightningAnimParams,
   LightningColorStop,
@@ -8,7 +7,6 @@ import type {
   LightningPalette,
   LightningParams,
 } from "../state";
-import { enabledLightningTintIndices } from "../state";
 import {
   applyCloudTransform,
   inverseCloudTransform,
@@ -55,8 +53,6 @@ export interface BoltStrike {
   ];
   /** Mean of the three palette colours, baked at spawn for tint blend. */
   paletteTint: [number, number, number];
-  /** Which palette track this bolt drew from (0–3). */
-  paletteIndex: number;
   /**
    * Frozen [0,1] draw mapped through the birth intensityRange each frame
    * so the strike keeps a stable character as the storm timeline moves.
@@ -160,22 +156,6 @@ export function sampleLightningColorTracks(
     interpolateLightningColorStops(tracks.main, u, DEFAULT_PALETTE[0]),
     interpolateLightningColorStops(tracks.highlight1, u, DEFAULT_PALETTE[1]),
     interpolateLightningColorStops(tracks.highlight2, u, DEFAULT_PALETTE[2]),
-  ];
-}
-
-/** Blend each default channel toward a participant tint colour. */
-export function applyLightningTint(
-  base: LightningPalette,
-  tintHex: string,
-  mix: number,
-): LightningPalette {
-  const m = mix < 0 ? 0 : mix > 1 ? 1 : mix;
-  if (m <= 0) return [base[0], base[1], base[2]];
-  if (m >= 1) return [tintHex, tintHex, tintHex];
-  return [
-    lerpHex(base[0], tintHex, m),
-    lerpHex(base[1], tintHex, m),
-    lerpHex(base[2], tintHex, m),
   ];
 }
 
@@ -637,7 +617,6 @@ function cloneAnim(v: LightningAnimParams): LightningAnimParams {
     backgroundGain: v.backgroundGain,
     thunderDelayMs: v.thunderDelayMs,
     pan: v.pan,
-    tintMix: typeof v.tintMix === "number" ? v.tintMix : 0.35,
   };
 }
 
@@ -651,8 +630,6 @@ function lerpAnim(
     spanScale,
     lerp(a.minSpanScale, b.minSpanScale, t),
   );
-  const tintA = typeof a.tintMix === "number" ? a.tintMix : 0.35;
-  const tintB = typeof b.tintMix === "number" ? b.tintMix : 0.35;
   const spritesA = a.spritesPerMinute ?? 0;
   const spritesB = b.spritesPerMinute ?? 0;
   const spriteGainA = a.spriteGain ?? 1;
@@ -673,7 +650,6 @@ function lerpAnim(
     backgroundGain: lerp(a.backgroundGain, b.backgroundGain, t),
     thunderDelayMs: lerp(a.thunderDelayMs, b.thunderDelayMs, t),
     pan: lerp(a.pan, b.pan, t),
-    tintMix: Math.max(0, Math.min(1, lerp(tintA, tintB, t))),
   };
 }
 
@@ -700,7 +676,6 @@ export function sampleLightningKeyframe(
       backgroundGain: 0.35,
       thunderDelayMs: 800,
       pan: 0,
-      tintMix: 0.35,
     };
   }
   const uu = u < 0 ? 0 : u > 1 ? 1 : u;
@@ -744,8 +719,7 @@ export type LightningPlotChannel =
   | "spriteGain"
   | "backgroundGain"
   | "thunderDelay"
-  | "pan"
-  | "tintMix";
+  | "pan";
 
 export function samplePlotChannel(
   keyframes: LightningKeyframe[],
@@ -777,8 +751,6 @@ export function samplePlotChannel(
     case "pan":
       // Map −1…+1 → 0…1 for the plot.
       return (live.pan + 1) * 0.5;
-    case "tintMix":
-      return live.tintMix;
     default:
       return 0;
   }
@@ -1070,8 +1042,6 @@ export class LightningController {
     transform: CloudTransform,
     /** Progress through the active window, [0, 1]. */
     keyframeU: number,
-    /** Breath participants — enabled slots drive tint track choice. */
-    participants: BreathParticipant[] = [],
     /** Optional area-uniform sampler for the actual uploaded mesh surface. */
     sampleSurfacePoint?: () => [number, number, number] | null,
   ): void {
@@ -1149,7 +1119,6 @@ export class LightningController {
         : { next: 0, n: 0 };
     this.spawnAccSprite = spriteN.next;
 
-    const tintIndices = enabledLightningTintIndices(participants);
     const segs = Math.max(2, Math.floor(params.boltSegments));
     for (let i = 0; i < cloud.n + manualCloud; i++) {
       this.pushStrike(
@@ -1160,8 +1129,6 @@ export class LightningController {
         transform,
         segs,
         "cloud",
-        participants,
-        tintIndices,
         keyframeU,
         sampleSurfacePoint,
       );
@@ -1175,8 +1142,6 @@ export class LightningController {
         transform,
         segs,
         "strike",
-        participants,
-        tintIndices,
         keyframeU,
         sampleSurfacePoint,
       );
@@ -1230,8 +1195,6 @@ export class LightningController {
     transform: CloudTransform,
     segs: number,
     kind: BoltKind,
-    participants: BreathParticipant[],
-    tintIndices: number[],
     keyframeU: number,
     sampleSurfacePoint?: () => [number, number, number] | null,
   ): void {
@@ -1278,20 +1241,7 @@ export class LightningController {
     );
     const boltGain =
       Math.max(0, live.boltGain) * (kind === "strike" ? 1.6 : 1);
-    const base = sampleLightningColorTracks(params.colors, keyframeU);
-    const paletteIndex =
-      tintIndices.length > 0
-        ? tintIndices[Math.floor(rand() * tintIndices.length)]
-        : -1;
-    const tintMix =
-      paletteIndex >= 0
-        ? Math.max(0, Math.min(1, live.tintMix))
-        : 0;
-    const tintHex =
-      paletteIndex >= 0
-        ? (participants[paletteIndex]?.color ?? base[0])
-        : base[0];
-    const palette = applyLightningTint(base, tintHex, tintMix);
+    const palette = sampleLightningColorTracks(params.colors, keyframeU);
     this.strikes.push({
       bornMs: nowMs,
       durationMs: duration,
@@ -1300,7 +1250,6 @@ export class LightningController {
       branches,
       colorStops: paletteColorStops(palette),
       paletteTint: paletteTintRgb(palette),
-      paletteIndex,
       intensity01,
       intensityRange,
       intensity,

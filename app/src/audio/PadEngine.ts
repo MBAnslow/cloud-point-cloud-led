@@ -52,6 +52,7 @@ interface PadVoice {
 
 export class PadEngine {
   private started = false;
+  private startPromise: Promise<void> | null = null;
   private master: Tone.Gain | null = null;
   private masterHp: Tone.Filter | null = null;
   private masterLp: Tone.Filter | null = null;
@@ -71,7 +72,18 @@ export class PadEngine {
   private currentWaveform: PadWaveform = "sawtooth";
   async start(): Promise<void> {
     if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     await Tone.start();
+    if (this.started) return;
     this.master = new Tone.Gain(0);
     this.masterHp = new Tone.Filter({ type: "highpass", frequency: 10, Q: 0.7 });
     this.masterLp = new Tone.Filter({ type: "lowpass", frequency: 22000, Q: 0.7 });

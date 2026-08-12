@@ -7,7 +7,6 @@ import {
   cloneColorTracks,
   BOLT_INTENSITY_TAGS,
   BOLT_LENGTH_TAGS,
-  type BreathParticipant,
   type BoltIntensityTag,
   type BoltLengthTag,
   type LightningAnimParams,
@@ -24,11 +23,9 @@ import { RangeSlider } from "./RangeSlider";
 import { putSampleBlob, deleteSampleBlob } from "../samples/sampleStorage";
 import { invalidateSpriteImage } from "../lighting/spriteImageCache";
 import {
-  applyLightningTint,
   isRangePlotChannel,
   plotChannelMax,
   sampleLightningKeyframe,
-  sampleLightningColorTracks,
   samplePlotChannel,
   samplePlotChannelRange,
   sharedLightningController,
@@ -71,7 +68,6 @@ const LIGHTNING_TOOLTIPS: Record<string, string> = {
   "Sim FPS": "Update rate for lightning LED contribution and strobing.",
   "Start hour": "Time-of-day hour when automatic lightning becomes active.",
   "End hour": "Time-of-day hour when automatic lightning stops; wrapping across midnight is supported.",
-  "Tint mix": "Amount of participant color blended into the lightning palette.",
   Phase: "Position of this keyframe within the active lightning window.",
   "Bolt gain": "Playback gain for cloud-bolt and strike audio.",
   "BG gain": "Playback gain for the looping storm background.",
@@ -93,7 +89,6 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
   const lightning = useSimStore((s) => s.lightning);
   const setLightning = useSimStore((s) => s.setLightning);
   const dayPeriods = useSimStore((s) => s.dayCycle.periods);
-  const participants = useSimStore((s) => s.breath.participants);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const { pos, handleProps } = useDraggable(panelRef);
   const dynStyle: React.CSSProperties = pos
@@ -131,7 +126,6 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
     backgroundGain: selected?.values.backgroundGain ?? lightning.backgroundGain,
     thunderDelayMs: selected?.values.thunderDelayMs ?? lightning.thunderDelayMs,
     pan: selected?.values.pan ?? lightning.pan,
-    tintMix: selected?.values.tintMix ?? lightning.tintMix ?? 0.35,
   };
   const inActiveWindow = hourInRange(
     skyTimeHours,
@@ -189,9 +183,6 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
       nextValues.spanScale = hi;
       nextValues.minSpanScale = lo;
     }
-    if (patch.tintMix !== undefined) {
-      nextValues.tintMix = Math.max(0, Math.min(1, nextValues.tintMix));
-    }
     const keyframes = lightning.keyframes.map((k) =>
       k.id === selected.id ? { ...k, values: nextValues } : k,
     );
@@ -209,7 +200,6 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
       backgroundGain: nextValues.backgroundGain,
       thunderDelayMs: nextValues.thunderDelayMs,
       pan: nextValues.pan,
-      tintMix: nextValues.tintMix,
     });
   };
 
@@ -234,9 +224,7 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
                       ? "bg gain"
                       : plotChannel === "thunderDelay"
                         ? "thunder delay"
-                        : plotChannel === "tintMix"
-                          ? "tint mix"
-                          : "pan";
+                        : "pan";
 
   return (
     <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
@@ -317,13 +305,8 @@ export function LightningPanel({ visible = true }: { visible?: boolean }) {
         </div>
         <LightningColourEditor
           colors={lightning.colors}
-          participants={participants}
-          tintMix={anim.tintMix}
           playheadU={inActiveWindow ? playheadU : null}
           onChangeColors={(colors) => upd({ colors })}
-          onChangeTintMix={(tintMix) => patchAnim({ tintMix })}
-          onPlotTintMix={() => setPlotChannel("tintMix")}
-          tintMixPlotActive={plotChannel === "tintMix"}
         />
         <div style={threeColStyle}>
           <div style={colStyle}>
@@ -621,7 +604,6 @@ function cloneAnim(v: LightningAnimParams): LightningAnimParams {
     backgroundGain: v.backgroundGain,
     thunderDelayMs: v.thunderDelayMs,
     pan: v.pan,
-    tintMix: v.tintMix,
   };
 }
 
@@ -633,22 +615,12 @@ type ColourSel = { channel: ColorChannel; id: string };
 
 function LightningColourEditor({
   colors,
-  participants,
-  tintMix,
   playheadU,
   onChangeColors,
-  onChangeTintMix,
-  onPlotTintMix,
-  tintMixPlotActive,
 }: {
   colors: LightningColorTracks;
-  participants: BreathParticipant[];
-  tintMix: number;
   playheadU: number | null;
   onChangeColors: (colors: LightningColorTracks) => void;
-  onChangeTintMix: (mix: number) => void;
-  onPlotTintMix: () => void;
-  tintMixPlotActive: boolean;
 }) {
   const [selected, setSelected] = useState<ColourSel | null>(null);
 
@@ -668,17 +640,6 @@ function LightningColourEditor({
   const selectedStop: LightningColorStop | null = selected
     ? (colors[selected.channel].find((s) => s.id === selected.id) ?? null)
     : null;
-
-  const livePreview = useMemo(() => {
-    if (playheadU == null) return null;
-    const base = sampleLightningColorTracks(colors, playheadU);
-    return participants.slice(0, 4).map((p) => ({
-      id: p.id,
-      enabled: p.enabled,
-      color: p.color,
-      tinted: applyLightningTint(base, p.color, p.enabled ? tintMix : 0),
-    }));
-  }, [colors, participants, playheadU, tintMix]);
 
   return (
     <div
@@ -727,69 +688,6 @@ function LightningColourEditor({
             }}
           />
         ),
-      )}
-
-      <SliderRow
-        label={`Tint mix${KF}`}
-        labelActive={tintMixPlotActive}
-        onLabelClick={onPlotTintMix}
-        value={tintMix}
-        min={0}
-        max={1}
-        step={0.01}
-        onChange={onChangeTintMix}
-        formatValue={(v) => `${(v * 100).toFixed(0)}%`}
-      />
-      <div style={{ fontSize: 9, opacity: 0.55 }}>
-        How much each bolt pulls toward a random enabled breath
-        participant&apos;s colour (from Breath). 0% = default lightning only.
-      </div>
-
-      {livePreview && livePreview.length > 0 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            alignItems: "center",
-          }}
-        >
-          {livePreview.map((p, i) => (
-            <span
-              key={p.id}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 3,
-                opacity: p.enabled ? 1 : 0.35,
-              }}
-              title={`P${i + 1} breath colour → tinted bolt`}
-            >
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: 8,
-                  background: p.color,
-                  border: "1px solid rgba(255,255,255,0.3)",
-                }}
-              />
-              <span style={{ fontSize: 9, opacity: 0.6 }}>P{i + 1}</span>
-              {([0, 1, 2] as const).map((s) => (
-                <span
-                  key={s}
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: 2,
-                    background: p.tinted[s],
-                    border: "1px solid rgba(255,255,255,0.25)",
-                  }}
-                />
-              ))}
-            </span>
-          ))}
-        </div>
       )}
 
       {selected && selectedStop && (

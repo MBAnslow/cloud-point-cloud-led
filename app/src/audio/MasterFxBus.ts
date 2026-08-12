@@ -15,32 +15,47 @@ import { meterAbs } from "./meterAbs";
  */
 export class MasterFxBus {
   private started = false;
+  private startPromise: Promise<void> | null = null;
   private fxIn: Tone.Gain | null = null;
   private directIn: Tone.Gain | null = null;
   private auxIn: Tone.Gain | null = null;
   private hp: Tone.Filter | null = null;
   private lp: Tone.Filter | null = null;
   private sumGain: Tone.Gain | null = null;
+  private headroom: Tone.Gain | null = null;
   private compressor: Tone.Compressor | null = null;
   private limiter: Tone.Limiter | null = null;
   private meter: Tone.Meter | null = null;
 
   async start(): Promise<void> {
     if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     await Tone.start();
+    if (this.started) return;
     this.hp = new Tone.Filter({ type: "highpass", frequency: 20, Q: 0.7 });
     this.lp = new Tone.Filter({ type: "lowpass", frequency: 20000, Q: 0.7 });
     this.fxIn = new Tone.Gain(1);
     this.directIn = new Tone.Gain(1);
     this.auxIn = new Tone.Gain(1);
     this.sumGain = new Tone.Gain(1);
-    // Soft catch of busy mixes, then a hard ceiling just under 0 dBFS.
+    // Fixed pre-dynamics headroom prevents stacked instruments and wet
+    // returns from continuously pinning the compressor/limiter.
+    this.headroom = new Tone.Gain(0.65);
     this.compressor = new Tone.Compressor({
-      threshold: -12,
-      ratio: 6,
-      attack: 0.003,
-      release: 0.12,
-      knee: 6,
+      threshold: -8,
+      ratio: 3,
+      attack: 0.015,
+      release: 0.2,
+      knee: 10,
     });
     this.limiter = new Tone.Limiter(-1);
     this.meter = new Tone.Meter({ normalRange: true });
@@ -50,7 +65,8 @@ export class MasterFxBus {
     this.lp.connect(this.sumGain);
     this.directIn.connect(this.sumGain);
     this.auxIn.connect(this.sumGain);
-    this.sumGain.connect(this.compressor);
+    this.sumGain.connect(this.headroom);
+    this.headroom.connect(this.compressor);
     this.compressor.connect(this.limiter);
     this.limiter.toDestination();
     // Meter before dynamics so the Output bar shows when limiting kicks in.
@@ -91,12 +107,28 @@ export class MasterFxBus {
 
   update(p: MasterFxParams): void {
     if (!this.hp || !this.lp || !this.sumGain) return;
-    const hpHz = p.hpEnabled ? Math.max(20, Math.min(20000, p.hpHz)) : 20;
+    const finite = (value: number, fallback: number) =>
+      Number.isFinite(value) ? value : fallback;
+    const hpHz = p.hpEnabled
+      ? Math.max(20, Math.min(20000, finite(p.hpHz, 20)))
+      : 20;
     this.hp.frequency.rampTo(hpHz, 0.08);
-    this.hp.Q.rampTo(p.hpEnabled ? Math.max(0.1, p.hpQ) : 0.7, 0.08);
-    const lpHz = p.lpEnabled ? Math.max(20, Math.min(20000, p.lpHz)) : 20000;
+    this.hp.Q.rampTo(
+      p.hpEnabled
+        ? Math.max(0.1, Math.min(20, finite(p.hpQ, 0.7)))
+        : 0.7,
+      0.08,
+    );
+    const lpHz = p.lpEnabled
+      ? Math.max(20, Math.min(20000, finite(p.lpHz, 20000)))
+      : 20000;
     this.lp.frequency.rampTo(lpHz, 0.08);
-    this.lp.Q.rampTo(p.lpEnabled ? Math.max(0.1, p.lpQ) : 0.7, 0.08);
+    this.lp.Q.rampTo(
+      p.lpEnabled
+        ? Math.max(0.1, Math.min(20, finite(p.lpQ, 0.7)))
+        : 0.7,
+      0.08,
+    );
     const rawOutput = Number(p.outputGain);
     const out = Math.max(
       0,

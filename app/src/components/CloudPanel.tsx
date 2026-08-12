@@ -36,6 +36,12 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
   const upd = (patch: Partial<CloudParams>) => setCloud(patch);
   const updCloudTop = (patch: Partial<CloudTopParams>) => setCloudTop(patch);
   const updStrand = (patch: Partial<StrandParams>) => setStrand(patch);
+  const updColorProfile = (
+    patch: Partial<StrandParams["colorProfile"]>,
+  ) =>
+    updStrand({
+      colorProfile: { ...strand.colorProfile, ...patch },
+    });
   return (
     <div ref={panelRef} style={{ ...panelStyle, ...dynStyle }}>
       <div
@@ -321,6 +327,15 @@ export function CloudPanel({ visible = true }: { visible?: boolean }) {
           step={0.1}
           onChange={(v) => updStrand({ sensorHemisphereFocus: v })}
           formatValue={(v) => v.toFixed(1)}
+        />
+        <SliderRow
+          label="Output gamma"
+          value={strand.colorProfile.brightnessGamma}
+          min={0.25}
+          max={3}
+          step={0.05}
+          onChange={(value) => updColorProfile({ brightnessGamma: value })}
+          formatValue={(value) => value.toFixed(2)}
         />
       </div>
     </div>

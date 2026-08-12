@@ -36,6 +36,7 @@ import {
   spotConeAttenuation,
   spreadToSpotAngle,
 } from "../lighting/shade";
+import { encodeLedRgb, srgbByteToLinear } from "../lighting/ledColor";
 import {
   clearBakedSurfaceGeometry,
   getBakedSurfaceGeometry,
@@ -427,7 +428,6 @@ export function MappingScene({
       wled.enabled &&
       now - lastMappingSendRef.current >= 1000 / Math.max(1, wled.fps);
     if (!previewDue && !streamDue) return;
-    const lightColor = new Color(mapping.mappingLightColor);
     const packedColor = Number.parseInt(mapping.mappingLightColor.slice(1), 16);
     const outputR = (packedColor >> 16) & 255;
     const outputG = (packedColor >> 8) & 255;
@@ -511,7 +511,7 @@ export function MappingScene({
         mappingLightTarget,
         bead.pos,
         spreadToSpotAngle(mapping.mappingLightSpread),
-        0.35,
+        mapping.mappingLightFocus,
       );
       const domeTransmission =
         mapping.bumpLightOpacity > 0 && orientedGaussians.length > 0
@@ -568,13 +568,23 @@ export function MappingScene({
         ),
       );
       outputLevelsRef.current[physicalIndex] = level;
-      bytes[outIndex * 3] = Math.round(level * outputR);
-      bytes[outIndex * 3 + 1] = Math.round(level * outputG);
-      bytes[outIndex * 3 + 2] = Math.round(level * outputB);
+      const [red, green, blue] = encodeLedRgb(
+        level * (outputR / 255),
+        level * (outputG / 255),
+        level * (outputB / 255),
+        strand.colorProfile,
+      );
+      bytes[outIndex * 3] = red;
+      bytes[outIndex * 3 + 1] = green;
+      bytes[outIndex * 3 + 2] = blue;
       const material = outputMaterialRefs.current[physicalIndex];
       if (previewDue && material) {
-        material.color.copy(lightColor).multiplyScalar(level);
-        material.emissive.copy(lightColor).multiplyScalar(level);
+        material.color.setRGB(
+          srgbByteToLinear(red),
+          srgbByteToLinear(green),
+          srgbByteToLinear(blue),
+        );
+        material.emissive.copy(material.color);
         material.emissiveIntensity = 1;
       }
     }
@@ -903,7 +913,7 @@ export function MappingScene({
         color={mapping.mappingLightColor}
         intensity={mapping.mappingLightIntensity}
         angle={spreadToSpotAngle(mapping.mappingLightSpread)}
-        penumbra={0.35}
+        penumbra={mapping.mappingLightFocus}
         distance={0}
         decay={mapping.mappingLightDecay}
         target={mappingSpotTarget}
@@ -1084,11 +1094,22 @@ export function MappingScene({
                   outputMaterialRefs.current[physicalIndex] = material;
                   if (!material) return;
                   const level = outputLevelsRef.current[physicalIndex] ?? 0;
-                  const outputColor = new Color(
-                    mapping.mappingLightColor,
-                  ).multiplyScalar(level);
-                  material.color.copy(outputColor);
-                  material.emissive.copy(outputColor);
+                  const packed = Number.parseInt(
+                    mapping.mappingLightColor.slice(1),
+                    16,
+                  );
+                  const [red, green, blue] = encodeLedRgb(
+                    level * (((packed >> 16) & 255) / 255),
+                    level * (((packed >> 8) & 255) / 255),
+                    level * ((packed & 255) / 255),
+                    strand.colorProfile,
+                  );
+                  material.color.setRGB(
+                    srgbByteToLinear(red),
+                    srgbByteToLinear(green),
+                    srgbByteToLinear(blue),
+                  );
+                  material.emissive.copy(material.color);
                   material.emissiveIntensity = 1;
                 }}
                 color="#000000"

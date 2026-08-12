@@ -32,7 +32,8 @@ export function PadRuntime(): null {
       const { pad } = modulatedEngineParams(state, performance.now());
       engine.update(
         state.sky.timeHours,
-        state.audioSolo && state.audioSolo !== "pad"
+        state.audioMuted.pad ||
+          (state.audioSolo && state.audioSolo !== "pad")
           ? { ...pad, master: 0 }
           : pad,
       );

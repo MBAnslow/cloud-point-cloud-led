@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import * as Tone from "tone";
 import { useSimStore } from "../state";
 import { getMasterFxBus } from "./MasterFxBus";
 import { getDroneEngine } from "./DroneEngine";
@@ -22,6 +23,20 @@ export function MasterFxRuntime(): null {
     const pad = getPadEngine();
     const samples = getSampleEngine();
     let raf = 0;
+    const resumeAudio = () => {
+      const context = Tone.getContext().rawContext;
+      if (context.state !== "running") {
+        void Tone.start().catch((err) =>
+          console.warn("[masterfx] audio resume failed", err),
+        );
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") resumeAudio();
+    };
+    window.addEventListener("pointerdown", resumeAudio, { capture: true });
+    window.addEventListener("keydown", resumeAudio, { capture: true });
+    document.addEventListener("visibilitychange", onVisibility);
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -55,6 +70,9 @@ export function MasterFxRuntime(): null {
 
     return () => {
       cancelAnimationFrame(raf);
+      window.removeEventListener("pointerdown", resumeAudio, { capture: true });
+      window.removeEventListener("keydown", resumeAudio, { capture: true });
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
   return null;

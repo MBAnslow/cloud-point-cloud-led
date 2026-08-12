@@ -21,6 +21,7 @@ import { meterAbs } from "./meterAbs";
  */
 export class LightningAudioEngine {
   private started = false;
+  private startPromise: Promise<void> | null = null;
   private out: Tone.Gain | null = null;
   private bg: Tone.Player | null = null;
   private bgPanner: Tone.Panner | null = null;
@@ -48,7 +49,18 @@ export class LightningAudioEngine {
 
   async start(): Promise<void> {
     if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     await Tone.start();
+    if (this.started) return;
     this.out = new Tone.Gain(1);
     // Route through the shared brickwall so strikes can't slam the DAC.
     const aux = await ensureLimitedAux();
