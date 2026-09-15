@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import * as Tone from "tone";
 import { useSimStore } from "../state";
 import { getMasterFxBus } from "./MasterFxBus";
 import { getDroneEngine } from "./DroneEngine";
@@ -24,12 +23,11 @@ export function MasterFxRuntime(): null {
     const samples = getSampleEngine();
     let raf = 0;
     const resumeAudio = () => {
-      const context = Tone.getContext().rawContext;
-      if (context.state !== "running") {
-        void Tone.start().catch((err) =>
-          console.warn("[masterfx] audio resume failed", err),
-        );
-      }
+      // Start/resume the bus first so instrument start-up never leaves an
+      // otherwise-live engine waiting for an asynchronous routing target.
+      void bus.start().catch((err) =>
+        console.warn("[masterfx] audio resume failed", err),
+      );
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") resumeAudio();
@@ -40,9 +38,8 @@ export function MasterFxRuntime(): null {
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      // The bus needs a Tone.start() unlock too, but any engine.start()
-      // already awaits it; kick it off once any engine is live so the
-      // graph is ready before update() calls do anything.
+      // Also recover if an instrument was started by code rather than by
+      // the shared user-gesture listeners.
       const anyStarted =
         drone.isStarted() || pad.isStarted() || samples.isStarted();
       if (anyStarted && !bus.isStarted()) {

@@ -13,24 +13,42 @@ export function SampleRuntime(): null {
   useEffect(() => {
     const engine = getSampleEngine();
     let raf = 0;
+    let unlocking = false;
 
     const unlock = () => {
+      if (unlocking) return;
+      unlocking = true;
       engine
         .start()
-        .catch((err) => console.warn("[samples] start failed", err));
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+        .then(() => {
+          window.removeEventListener("pointerdown", unlock);
+          window.removeEventListener("keydown", unlock);
+        })
+        .catch((err) => console.warn("[samples] start failed", err))
+        .finally(() => {
+          unlocking = false;
+        });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") unlock();
     };
     window.addEventListener("pointerdown", unlock);
     window.addEventListener("keydown", unlock);
+    document.addEventListener("visibilitychange", onVisibility);
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const state = useSimStore.getState();
       const { samples } = modulatedEngineParams(state, performance.now());
+      const hour = Number.isFinite(state.sky.timeHours)
+        ? state.sky.timeHours
+        : 0;
+      const cycleSeconds = Number.isFinite(state.sky.cycleSeconds)
+        ? Math.max(1, state.sky.cycleSeconds)
+        : 300;
       engine.update(
-        state.sky.timeHours,
-        state.sky.cycleSeconds,
+        hour,
+        cycleSeconds,
         state.audioMuted.samples ||
           (state.audioSolo && state.audioSolo !== "samples")
           ? { ...samples, master: 0 }
@@ -44,6 +62,7 @@ export function SampleRuntime(): null {
       cancelAnimationFrame(raf);
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
   return null;

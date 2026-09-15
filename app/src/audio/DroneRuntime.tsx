@@ -17,14 +17,28 @@ export function DroneRuntime(): null {
   useEffect(() => {
     const engine = getDroneEngine();
     let raf = 0;
+    let unlocking = false;
 
     const unlock = () => {
-      engine.start().catch((err) => console.warn("[drone] start failed", err));
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+      if (unlocking) return;
+      unlocking = true;
+      engine
+        .start()
+        .then(() => {
+          window.removeEventListener("pointerdown", unlock);
+          window.removeEventListener("keydown", unlock);
+        })
+        .catch((err) => console.warn("[drone] start failed", err))
+        .finally(() => {
+          unlocking = false;
+        });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") unlock();
     };
     window.addEventListener("pointerdown", unlock);
     window.addEventListener("keydown", unlock);
+    document.addEventListener("visibilitychange", onVisibility);
 
     // Drives both the sky clock and the drone engine each frame. This
     // runs regardless of the current route so the Play button works on
@@ -113,6 +127,7 @@ export function DroneRuntime(): null {
       cancelAnimationFrame(raf);
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
   return null;

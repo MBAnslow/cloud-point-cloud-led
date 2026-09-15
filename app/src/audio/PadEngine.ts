@@ -3,7 +3,10 @@ import type { PadParams, PadWaveform } from "../state";
 import { activePadVoicesAt } from "./padCycle";
 import { applyFilterChain } from "./filterChain";
 import { meterAbs } from "./meterAbs";
-import { ensureLimitedAux } from "./MasterFxBus";
+import { ensureLimitedAux, limitedAuxIfStarted } from "./MasterFxBus";
+
+const finite = (value: number, fallback: number): number =>
+  Number.isFinite(value) ? value : fallback;
 
 /**
  * Warm-pad synth engine. Signal chain per voice:
@@ -45,6 +48,8 @@ interface PadVoice {
   attackAt: number;
   /** Tone-context timestamp of release, or null while still holding. */
   releaseAt: number | null;
+  lastUnisonCount: number;
+  lastUnisonSpread: number;
   /** ADSR params captured at attack time so envelope math is stable
    *  even if the user edits ADSR sliders mid-note. */
   adsr: { a: number; d: number; s: number; r: number };
@@ -70,8 +75,13 @@ export class PadEngine {
    */
   private probGate = new Map<string, boolean>();
   private currentWaveform: PadWaveform = "sawtooth";
+  private filterCutoffState = 900;
+  private waveformTransitioning = false;
   async start(): Promise<void> {
-    if (this.started) return;
+    if (this.started) {
+      if (Tone.getContext().rawContext.state !== "running") await Tone.start();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startOnce();
     try {
@@ -105,6 +115,10 @@ export class PadEngine {
     this.bus = new Tone.Gain(1);
     this.bus.connect(this.filter);
     this.meter = new Tone.Meter({ normalRange: true });
+    const aux = await ensureLimitedAux();
+    this.masterLp.connect(aux);
+    this.masterLp.connect(this.meter);
+    this.currentRoutingTarget = null;
     this.started = true;
   }
 
@@ -125,6 +139,12 @@ export class PadEngine {
       return;
     }
     this.currentRoutingTarget = null;
+    const auxNow = limitedAuxIfStarted();
+    if (auxNow) {
+      this.masterLp.connect(auxNow);
+      if (this.meter) this.masterLp.connect(this.meter);
+      return;
+    }
     void ensureLimitedAux().then((aux) => {
       if (this.currentRoutingTarget !== null || !this.masterLp) return;
       this.masterLp.disconnect();
@@ -150,14 +170,26 @@ export class PadEngine {
     )
       return;
 
-    this.master.gain.rampTo(p.enabled ? p.master : 0, 0.05);
+    const masterTarget = p.enabled
+      ? Math.max(0, Math.min(1, finite(p.master, 0)))
+      : 0;
+    if (!this.waveformTransitioning) {
+      this.master.gain.rampTo(masterTarget, 0.05);
+    }
     applyFilterChain(this.masterHp, this.masterLp, p.filters);
 
-    if (p.waveform !== this.currentWaveform) {
-      this.currentWaveform = p.waveform;
-      for (const v of this.voices.values()) {
-        for (const o of v.oscs) o.type = p.waveform;
-      }
+    if (p.waveform !== this.currentWaveform && !this.waveformTransitioning) {
+      const nextWaveform = p.waveform;
+      this.waveformTransitioning = true;
+      this.master.gain.rampTo(0, 0.01);
+      setTimeout(() => {
+        for (const v of this.voices.values()) {
+          for (const o of v.oscs) o.type = nextWaveform;
+        }
+        this.currentWaveform = nextWaveform;
+        this.waveformTransitioning = false;
+        this.master?.gain.rampTo(masterTarget, 0.02);
+      }, 12);
     }
 
     // Filter cutoff pipeline (matches PadFilterResponse exactly):
@@ -167,24 +199,33 @@ export class PadEngine {
     // in log-space rather than being added as Hz.
     const tNow = Tone.now();
     const peakEnv = this.getEnvelopePeak(tNow);
-    const envOctaves = (Math.max(0, p.filterEnvAmount) / 1200) * peakEnv;
+    const envOctaves =
+      (Math.max(0, finite(p.filterEnvAmount, 0)) / 1200) * peakEnv;
     const baseCutoff = Math.max(
       20,
-      Math.min(20000, p.filterHz * Math.pow(2, envOctaves)),
+      Math.min(20000, finite(p.filterHz, 900) * Math.pow(2, envOctaves)),
     );
     let cutoff = baseCutoff;
-    const lfoDepth = Math.max(0, Math.min(1, p.filterLfoDepth));
-    if (lfoDepth > 0 && p.filterLfoRateHz > 0) {
+    const lfoDepth = Math.max(0, Math.min(1, finite(p.filterLfoDepth, 0)));
+    const filterLfoRate = Math.max(0, finite(p.filterLfoRateHz, 0));
+    if (lfoDepth > 0 && filterLfoRate > 0) {
       // Unipolar sine [0, 1] → sweep 0 to `depth` octaves below base.
-      const s = 0.5 + 0.5 * Math.sin(2 * Math.PI * p.filterLfoRateHz * tNow);
+      const s = 0.5 + 0.5 * Math.sin(2 * Math.PI * filterLfoRate * tNow);
       cutoff = baseCutoff * Math.pow(2, -lfoDepth * s);
     }
     // Direct value write (not `rampTo`) so per-frame LFO modulation
     // isn't smoothed away by successive ramp cancellations. At 60 fps
     // the resulting step-wise cutoff is well below any audible zipper
     // for LFO rates up to ~10 Hz.
-    this.filter.frequency.value = Math.max(20, Math.min(20000, cutoff));
-    this.filter.Q.rampTo(Math.max(0.1, p.filterQ), 0.08);
+    this.filterCutoffState += 0.3 * (cutoff - this.filterCutoffState);
+    this.filter.frequency.value = Math.max(
+      20,
+      Math.min(20000, this.filterCutoffState),
+    );
+    this.filter.Q.rampTo(
+      Math.max(0.1, Math.min(20, finite(p.filterQ, 0.7))),
+      0.08,
+    );
 
     // Saturation: both drive amount and wet mix scale with the same
     // knob so 0 is bit-perfect transparent.
@@ -204,6 +245,7 @@ export class PadEngine {
 
     if (!p.enabled) {
       for (const v of this.voices.values()) this.release(v, p);
+      this.reapReleasedVoices(tNow);
       return;
     }
 
@@ -268,15 +310,7 @@ export class PadEngine {
     // Reap voices whose release has completed. `envAt` returns 0 for
     // t >= releaseAt + r; adding a small tail keeps LFO/drift smooth
     // right up to the final sample.
-    for (const [id, voice] of this.voices) {
-      if (
-        voice.releaseAt !== null &&
-        tNow > voice.releaseAt + voice.adsr.r + 0.1
-      ) {
-        this.disposeVoice(voice);
-        this.voices.delete(id);
-      }
-    }
+    this.reapReleasedVoices(tNow);
     // Clear probability-gate memory for notes that are no longer active
     // (whether suppressed or previously played) so the next entry rolls.
     for (const id of this.probGate.keys()) {
@@ -331,6 +365,8 @@ export class PadEngine {
       lastGain: 0,
       attackAt: 0,
       releaseAt: null,
+      lastUnisonCount: 0,
+      lastUnisonSpread: Number.NaN,
       adsr: { a: 0.001, d: 0.001, s: 1, r: 0.001 },
     };
     this.growUnisonTo(v, freq, p);
@@ -359,12 +395,21 @@ export class PadEngine {
 
   private syncUnison(v: PadVoice, p: PadParams): void {
     const target = Math.max(1, Math.min(8, Math.round(p.unisonCount)));
+    const spread = Math.max(0, finite(p.unisonDetuneCents, 0));
+    if (
+      v.oscs.length === target &&
+      v.lastUnisonCount === target &&
+      Math.abs(v.lastUnisonSpread - spread) < 0.01
+    ) {
+      return;
+    }
     if (v.oscs.length === target) {
-      // Detune spread may have changed — recompute + apply.
       this.recomputeDetuneOffsets(v, p);
       for (let i = 0; i < v.oscs.length; i++) {
         v.oscs[i].detune.rampTo(v.detuneOffsets[i] ?? 0, 0.05);
       }
+      v.lastUnisonCount = target;
+      v.lastUnisonSpread = spread;
       return;
     }
     const freq = Tone.Frequency(v.note).toFrequency();
@@ -391,6 +436,8 @@ export class PadEngine {
     }
     // Equal-power-ish compensation so more unison doesn't blow up level.
     v.mix.gain.rampTo(1 / Math.sqrt(target), 0.05);
+    v.lastUnisonCount = target;
+    v.lastUnisonSpread = spread;
   }
 
   private recomputeDetuneOffsets(v: PadVoice, p: PadParams): void {
@@ -407,6 +454,18 @@ export class PadEngine {
       }
     }
     v.detuneOffsets = offsets;
+  }
+
+  private reapReleasedVoices(now: number): void {
+    for (const [id, voice] of this.voices) {
+      if (
+        voice.releaseAt !== null &&
+        now > voice.releaseAt + voice.adsr.r + 0.1
+      ) {
+        this.disposeVoice(voice);
+        this.voices.delete(id);
+      }
+    }
   }
 
   private attack(v: PadVoice, p: PadParams, gain: number): void {

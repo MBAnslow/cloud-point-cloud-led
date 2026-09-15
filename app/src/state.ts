@@ -208,11 +208,8 @@ export interface LightningParams {
   strikeSample: LightningSample | null;
   /** Optional looping background ambience (rain, thunder rumble, …). */
   backgroundSample: LightningSample | null;
-  /**
-   * One-shot audio played when a storm sprite flash appears.
-   * Null = silent sprites (images still project).
-   */
-  spriteSample: LightningSample | null;
+  /** Randomly selected one-shot audio library for storm sprite flashes. */
+  spriteAudioSamples: LightningSample[];
   /**
    * Uploaded sprite image library. Each sprite trigger picks one at
    * random and projects it through the cloud along a random ±X/Y/Z axis.
@@ -2102,7 +2099,7 @@ const DEFAULTS = {
     boltSamples: [],
     strikeSample: null,
     backgroundSample: null,
-    spriteSample: null,
+    spriteAudioSamples: [],
     spriteSamples: [],
     spriteDurationMs: 180,
     spriteStrobeHz: 18,
@@ -3480,10 +3477,17 @@ function resolveLightning(input: unknown): LightningParams {
       if (!raw || typeof raw !== "object") return null;
       return resolveLightningSample(raw as Record<string, unknown>);
     })(),
-    spriteSample: (() => {
-      const raw = (saved as Record<string, unknown>).spriteSample;
-      if (!raw || typeof raw !== "object") return null;
-      return resolveLightningSample(raw as Record<string, unknown>);
+    spriteAudioSamples: (() => {
+      const modern = resolveLightningSamples(
+        (saved as Record<string, unknown>).spriteAudioSamples,
+      );
+      if (modern.length > 0) return modern;
+      const legacy = (saved as Record<string, unknown>).spriteSample;
+      if (!legacy || typeof legacy !== "object") return [];
+      const migrated = resolveLightningSample(
+        legacy as Record<string, unknown>,
+      );
+      return migrated ? [migrated] : [];
     })(),
     spriteSamples: resolveLightningSpriteSamples(
       (saved as Record<string, unknown>).spriteSamples,

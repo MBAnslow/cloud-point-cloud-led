@@ -1429,12 +1429,18 @@ function AudioSection({
 
   const onSpriteSoundFile = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const sample = await ingestFile(files[0]);
-    if (sample) {
-      if (lightning.spriteSample) {
-        void deleteSampleBlob(lightning.spriteSample.id);
-      }
-      upd({ spriteSample: sample });
+    const added: LightningSample[] = [];
+    for (const file of Array.from(files)) {
+      const sample = await ingestFile(file);
+      if (sample) added.push(sample);
+    }
+    if (added.length > 0) {
+      upd({
+        spriteAudioSamples: [
+          ...(lightning.spriteAudioSamples ?? []),
+          ...added,
+        ],
+      });
     }
     if (spriteSoundInputRef.current) spriteSoundInputRef.current.value = "";
   };
@@ -1453,11 +1459,13 @@ function AudioSection({
     upd({ strikeSample: null });
   };
 
-  const clearSpriteSound = () => {
-    if (lightning.spriteSample) {
-      void deleteSampleBlob(lightning.spriteSample.id);
-    }
-    upd({ spriteSample: null });
+  const removeSpriteSound = (id: string) => {
+    void deleteSampleBlob(id);
+    upd({
+      spriteAudioSamples: (lightning.spriteAudioSamples ?? []).filter(
+        (sample) => sample.id !== id,
+      ),
+    });
   };
 
   return (
@@ -1566,31 +1574,57 @@ function AudioSection({
         title="Plays when a storm sprite image appears (Sprites / min)"
       >
         <span style={{ fontSize: 11, opacity: 0.85, flex: 1 }}>
-          Sprite sound
-          {lightning.spriteSample
-            ? `: ${lightning.spriteSample.name}`
-            : " (none)"}
+          Sprite sounds ({(lightning.spriteAudioSamples ?? []).length})
         </span>
         <button
           type="button"
           style={miniBtn}
           onClick={() => spriteSoundInputRef.current?.click()}
         >
-          {lightning.spriteSample ? "replace" : "+ upload"}
+          + add
         </button>
-        {lightning.spriteSample && (
-          <button type="button" style={miniBtn} onClick={clearSpriteSound}>
-            clear
-          </button>
-        )}
         <input
           ref={spriteSoundInputRef}
           type="file"
           accept="audio/*"
+          multiple
           style={{ display: "none" }}
           onChange={(e) => onSpriteSoundFile(e.target.files)}
         />
       </div>
+      {(lightning.spriteAudioSamples ?? []).map((sample) => (
+        <div
+          key={sample.id}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            paddingLeft: 10,
+          }}
+        >
+          <span
+            title={sample.name}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: 10,
+              opacity: 0.75,
+            }}
+          >
+            {sample.name}
+          </span>
+          <button
+            type="button"
+            style={miniBtn}
+            onClick={() => removeSpriteSound(sample.id)}
+          >
+            remove
+          </button>
+        </div>
+      ))}
 
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
         <span style={{ fontSize: 11, opacity: 0.85, flex: 1 }}>

@@ -13,26 +13,38 @@ export function BreathExhaleAudioRuntime(): null {
     const engine = getBreathExhaleAudioEngine();
     let raf = 0;
     let lastMaxBorn = -Infinity;
-    let unlockedOnce = false;
+    let unlockedOnce = engine.isStarted();
+    let unlocking = false;
     let firstFrame = true;
 
     const unlock = () => {
+      if (unlocking) return;
+      unlocking = true;
       engine
         .start()
         .then(() => {
           unlockedOnce = true;
           engine.preload(useSimStore.getState().breath);
+          window.removeEventListener("pointerdown", unlock);
+          window.removeEventListener("keydown", unlock);
         })
-        .catch((err) => console.warn("[breath-exhale] start failed", err));
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+        .catch((err) => console.warn("[breath-exhale] start failed", err))
+        .finally(() => {
+          unlocking = false;
+        });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") unlock();
     };
     window.addEventListener("pointerdown", unlock);
     window.addEventListener("keydown", unlock);
+    document.addEventListener("visibilitychange", onVisibility);
+    if (unlockedOnce) engine.preload(useSimStore.getState().breath);
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
       if (!unlockedOnce) return;
+      engine.update();
       const state = useSimStore.getState();
       const breath = state.breath;
       engine.preload(breath);
@@ -69,6 +81,7 @@ export function BreathExhaleAudioRuntime(): null {
       cancelAnimationFrame(raf);
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
   return null;

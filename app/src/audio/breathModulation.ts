@@ -49,18 +49,26 @@ function apply(
   amount: number,
   reveal: number,
 ): number {
-  if (amount === 0) return base;
-  const t = reveal < 0 ? 0 : reveal > 1 ? 1 : reveal;
+  const safeBase = Number.isFinite(base)
+    ? Math.max(r.min, Math.min(r.max, base))
+    : r.min;
+  const safeAmount = Number.isFinite(amount) ? amount : 0;
+  if (safeAmount === 0) return safeBase;
+  const safeReveal = Number.isFinite(reveal) ? reveal : 0;
+  const t = safeReveal < 0 ? 0 : safeReveal > 1 ? 1 : safeReveal;
   if (r.log) {
     const lo = Math.log(Math.max(1e-6, r.min));
     const hi = Math.log(Math.max(1e-6, r.max));
-    const bLog = Math.log(Math.max(1e-6, base));
-    const next = bLog + amount * (1 - t) * (hi - lo);
+    const bLog = Math.log(Math.max(1e-6, safeBase));
+    const next = bLog + safeAmount * (1 - t) * (hi - lo);
     return Math.exp(Math.max(lo, Math.min(hi, next)));
   }
   return Math.max(
     r.min,
-    Math.min(r.max, base + amount * (1 - t) * (r.max - r.min)),
+    Math.min(
+      r.max,
+      safeBase + safeAmount * (1 - t) * (r.max - r.min),
+    ),
   );
 }
 
@@ -72,7 +80,8 @@ export const BREATH_MOD_REVEAL_CEILING_MIN = 0.05;
  * ceiling=1 → identity; ceiling=0.4 → raw 0.4 already drives mod to 1.
  */
 export function scaleBreathModReveal(raw: number, ceiling: number): number {
-  const r = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+  const safeRaw = Number.isFinite(raw) ? raw : 0;
+  const r = safeRaw < 0 ? 0 : safeRaw > 1 ? 1 : safeRaw;
   const c = Math.max(
     BREATH_MOD_REVEAL_CEILING_MIN,
     Math.min(1, Number.isFinite(ceiling) ? ceiling : 1),
@@ -125,7 +134,10 @@ export function modulatedEngineParams(
     state.breathModRevealCeiling,
   );
   const bm = state.breathMod;
-  const g = (k: string): number => bm[k] ?? 0;
+  const g = (k: string): number => {
+    const value = bm[k] ?? 0;
+    return Number.isFinite(value) ? value : 0;
+  };
   const drone: DroneParams = {
     ...state.drone,
     masterGain: apply(

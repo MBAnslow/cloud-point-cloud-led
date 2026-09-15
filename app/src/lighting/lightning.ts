@@ -1364,7 +1364,8 @@ export class LightningController {
         const age = nowMs - sp.bornMs;
         if (age < 0 || age > sp.durationMs) continue;
         const visualEnvelope =
-          params.spriteAudioReactiveBrightness && params.spriteSample
+          params.spriteAudioReactiveBrightness &&
+          (params.spriteAudioSamples?.length ?? 0) > 0
           ? Math.max(0, Math.min(1, sp.audioDynamics))
           : spriteFlashEnvelope(sp, nowMs);
         if (visualEnvelope <= 1e-4) continue;

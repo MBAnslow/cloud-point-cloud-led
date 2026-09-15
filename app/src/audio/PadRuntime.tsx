@@ -17,14 +17,28 @@ export function PadRuntime(): null {
   useEffect(() => {
     const engine = getPadEngine();
     let raf = 0;
+    let unlocking = false;
 
     const unlock = () => {
-      engine.start().catch((err) => console.warn("[pad] start failed", err));
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+      if (unlocking) return;
+      unlocking = true;
+      engine
+        .start()
+        .then(() => {
+          window.removeEventListener("pointerdown", unlock);
+          window.removeEventListener("keydown", unlock);
+        })
+        .catch((err) => console.warn("[pad] start failed", err))
+        .finally(() => {
+          unlocking = false;
+        });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") unlock();
     };
     window.addEventListener("pointerdown", unlock);
     window.addEventListener("keydown", unlock);
+    document.addEventListener("visibilitychange", onVisibility);
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -44,6 +58,7 @@ export function PadRuntime(): null {
       cancelAnimationFrame(raf);
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
   return null;

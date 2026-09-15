@@ -16,7 +16,7 @@ import { getLightningAudioEngine } from "./LightningAudioEngine";
  *      tracking born-timestamps and fires a bolt sound per new strike.
  *      Ground strikes (`kind === "strike"`) use `strikeSample`; cloud
  *      flashes use the tagged `boltSamples` library. Newly spawned
- *      storm sprites fire `spriteSample` when set.
+ *      storm sprites choose randomly from `spriteAudioSamples`.
  *
  * We identify new strikes by the max `bornMs` seen so far — cheap and
  * doesn't require patching the LightningController API. Sprites use
@@ -28,25 +28,45 @@ export function LightningAudioRuntime(): null {
     let raf = 0;
     let lastMaxBorn = -Infinity;
     let lastMaxSpriteBorn = -Infinity;
-    let unlockedOnce = false;
+    let unlockedOnce = engine.isStarted();
+    let unlocking = false;
     let firstFrame = true;
+    let nextSpriteEventId = 1;
+    const spriteEventIds = new WeakMap<object, number>();
+    const spriteEventId = (sprite: object): number => {
+      const existing = spriteEventIds.get(sprite);
+      if (existing !== undefined) return existing;
+      const id = nextSpriteEventId++;
+      spriteEventIds.set(sprite, id);
+      return id;
+    };
     // Pending thunder timers so we can clear queued sounds on unmount /
     // when the effect is disabled mid-flight.
     const pendingThunder = new Set<ReturnType<typeof setTimeout>>();
 
     const unlock = () => {
+      if (unlocking) return;
+      unlocking = true;
       engine
         .start()
         .then(() => {
           unlockedOnce = true;
           engine.preload(useSimStore.getState().lightning);
+          window.removeEventListener("pointerdown", unlock);
+          window.removeEventListener("keydown", unlock);
         })
-        .catch((err) => console.warn("[lightning-audio] start failed", err));
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+        .catch((err) => console.warn("[lightning-audio] start failed", err))
+        .finally(() => {
+          unlocking = false;
+        });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") unlock();
     };
     window.addEventListener("pointerdown", unlock);
     window.addEventListener("keydown", unlock);
+    document.addEventListener("visibilitychange", onVisibility);
+    if (unlockedOnce) engine.preload(useSimStore.getState().lightning);
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -80,11 +100,12 @@ export function LightningAudioRuntime(): null {
       const sprites = sharedLightningController.getSprites();
       const nowMs = performance.now();
       for (const sp of sprites) {
+        const eventId = spriteEventId(sp);
         engine.setSpriteEnvelope(
-          sp.bornMs,
+          eventId,
           p.spriteAudioReactiveBrightness ? 1 : spriteFlashEnvelope(sp, nowMs),
         );
-        sp.audioDynamics = engine.getSpriteDynamics(sp.bornMs);
+        sp.audioDynamics = engine.getSpriteDynamics(eventId);
       }
       // Skip on the very first tick after start — otherwise pre-existing
       // strikes would all replay simultaneously.
@@ -101,7 +122,11 @@ export function LightningAudioRuntime(): null {
       let newMax = lastMaxBorn;
       for (const s of strikes) {
         if (s.bornMs > lastMaxBorn) {
-          const delay = Math.max(0, s.thunderDelayMs ?? p.thunderDelayMs ?? 0);
+          const rawDelay = s.thunderDelayMs ?? p.thunderDelayMs ?? 0;
+          const delay = Math.max(
+            0,
+            Number.isFinite(rawDelay) ? rawDelay : 0,
+          );
           const intensity = s.intensity;
           const boltGain = s.boltGain ?? p.boltGain;
           const pan = s.pan ?? p.pan ?? 0;
@@ -120,10 +145,24 @@ export function LightningAudioRuntime(): null {
           if (delay <= 0) {
             fire(p);
           } else {
+            const dueAt = performance.now() + delay;
             const timer = setTimeout(() => {
               pendingThunder.delete(timer);
-              const cur = useSimStore.getState().lightning;
-              if (!cur.enabled) return;
+              const curState = useSimStore.getState();
+              const cur = curState.lightning;
+              // Hidden-tab timer throttling can release many stale thunder
+              // callbacks together. Drop very late events instead of
+              // producing an overload burst when audio resumes.
+              if (performance.now() - dueAt > 1000 || !cur.enabled) return;
+              if (
+                !hourInRange(
+                  curState.sky.timeHours,
+                  cur.activeStartHour,
+                  cur.activeEndHour,
+                )
+              ) {
+                return;
+              }
               fire(cur);
             }, delay);
             pendingThunder.add(timer);
@@ -136,10 +175,11 @@ export function LightningAudioRuntime(): null {
       let newSpriteMax = lastMaxSpriteBorn;
       for (const sp of sprites) {
         if (sp.bornMs > lastMaxSpriteBorn) {
+          const eventId = spriteEventId(sp);
           const pan = live.pan ?? p.pan ?? 0;
-          engine.triggerSprite(p, 1, p.spriteAudioGain, pan, sp.bornMs);
+          engine.triggerSprite(p, 1, p.spriteAudioGain, pan, eventId);
           engine.setSpriteEnvelope(
-            sp.bornMs,
+            eventId,
             p.spriteAudioReactiveBrightness
               ? 1
               : spriteFlashEnvelope(sp, performance.now()),
@@ -157,6 +197,7 @@ export function LightningAudioRuntime(): null {
       pendingThunder.clear();
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
   return null;

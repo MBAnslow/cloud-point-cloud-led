@@ -4,7 +4,7 @@ import { getSampleBlob } from "../samples/sampleStorage";
 import { clipsActiveAt, type ActiveClip } from "./sampleCycle";
 import { applyFilterChain } from "./filterChain";
 import { meterAbs } from "./meterAbs";
-import { ensureLimitedAux } from "./MasterFxBus";
+import { ensureLimitedAux, limitedAuxIfStarted } from "./MasterFxBus";
 
 /**
  * Samples engine — scrubber-synced spans.
@@ -31,6 +31,8 @@ const MAX_SMOOTH_STEP_HOURS = 1.0;
 const MIN_REMAINING_BUF_SEC = 0.01;
 /** Skip gain automation unless the target moved by at least this. */
 const GAIN_EPS = 0.01;
+const finite = (value: number, fallback: number): number =>
+  Number.isFinite(value) ? value : fallback;
 
 function normalizedWetMixes(
   reverb: number,
@@ -67,6 +69,7 @@ interface Voice {
   /** True while autoPlay is off and the player is stopped mid-span. */
   paused: boolean;
   disposed: boolean;
+  lastPitchSemitones: number;
 }
 
 type EnterRoll = "accepted" | "rejected";
@@ -89,10 +92,10 @@ export class SampleEngine {
   private pitchLfoRateHz = 0;
   private pitchLfoDepthCents = 0;
   private pitchLfoShape: "sine" | "triangle" | "square" | "sawtooth" = "sine";
-  private startTimeMs = 0;
+  private audioStartTone = 0;
 
   private currentPitchCents(): number {
-    const t = (performance.now() - this.startTimeMs) / 1000;
+    const t = Math.max(0, Tone.now() - this.audioStartTone);
     let v = 0;
     if (this.pitchLfoDepthCents > 0 && this.pitchLfoRateHz > 0) {
       const phase = ((t * this.pitchLfoRateHz) % 1 + 1) % 1;
@@ -122,7 +125,10 @@ export class SampleEngine {
   private enterRolls = new Map<string, EnterRoll>();
 
   async start(): Promise<void> {
-    if (this.started) return;
+    if (this.started) {
+      if (Tone.getContext().rawContext.state !== "running") await Tone.start();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startOnce();
     try {
@@ -160,7 +166,11 @@ export class SampleEngine {
     this.bus.connect(this.masterDelay);
     this.masterDelay.connect(this.masterDelayWet);
     this.masterDelayWet.connect(this.master);
-    this.startTimeMs = performance.now();
+    const aux = await ensureLimitedAux();
+    this.masterLp.connect(aux);
+    this.masterLp.connect(this.meter);
+    this.currentRoutingTarget = null;
+    this.audioStartTone = Tone.now();
     this.started = true;
   }
 
@@ -180,6 +190,12 @@ export class SampleEngine {
       return;
     }
     this.currentRoutingTarget = null;
+    const auxNow = limitedAuxIfStarted();
+    if (auxNow) {
+      this.masterLp.connect(auxNow);
+      if (this.meter) this.masterLp.connect(this.meter);
+      return;
+    }
     void ensureLimitedAux().then((aux) => {
       if (this.currentRoutingTarget !== null || !this.masterLp) return;
       this.masterLp.disconnect();
@@ -222,15 +238,16 @@ export class SampleEngine {
       console.warn("[samples] preview: empty trim", sample.id);
       return;
     }
-    const rate = Math.max(0.05, sample.playbackRate);
+    const rate = Math.max(0.05, finite(sample.playbackRate, 1));
     const master = useSimStore.getState().samples.master;
-    const gainLin = Math.max(
-      0.0001,
-      Math.max(0, sample.gain) * Math.max(0, master),
-    );
+    const gainLin =
+      Math.max(0, finite(sample.gain, 0)) * Math.max(0, finite(master, 0));
+    if (gainLin <= 0) return;
     const source = new Tone.ToneBufferSource({
       url: buf,
       playbackRate: rate,
+      fadeIn: 0.008,
+      fadeOut: 0.02,
     });
     const gain = new Tone.Gain(gainLin);
     const panner = new Tone.Panner(
@@ -264,18 +281,24 @@ export class SampleEngine {
     const nodes = this.previewNodes;
     this.previewNodes = null;
     if (!nodes) return;
+    const now = Tone.now();
     try {
-      nodes.source.stop();
+      nodes.gain.gain.cancelScheduledValues(now);
+      nodes.gain.gain.setValueAtTime(nodes.gain.gain.value, now);
+      nodes.gain.gain.linearRampToValueAtTime(0, now + 0.015);
+      nodes.source.stop(now + 0.02);
     } catch {
       /* already stopped */
     }
-    try {
-      nodes.source.dispose();
-      nodes.gain.dispose();
-      nodes.panner.dispose();
-    } catch {
-      /* ignore */
-    }
+    setTimeout(() => {
+      try {
+        nodes.source.dispose();
+        nodes.gain.dispose();
+        nodes.panner.dispose();
+      } catch {
+        /* ignore */
+      }
+    }, 50);
   }
 
   /** Drop a cached decode so a rewritten blob is picked up next play. */
@@ -297,7 +320,10 @@ export class SampleEngine {
   ): void {
     if (!this.started || !this.master || !this.bus) return;
 
-    this.master.gain.rampTo(p.enabled ? p.master : 0, 0.05);
+    this.master.gain.rampTo(
+      p.enabled ? Math.max(0, Math.min(3, finite(p.master, 0))) : 0,
+      0.05,
+    );
     applyFilterChain(this.masterHp, this.masterLp, p.filters);
 
     this.pitchCents = p.pitchCents;
@@ -313,7 +339,7 @@ export class SampleEngine {
     }
     if (this.masterReverb) {
       (this.masterReverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
-        Math.max(0, Math.min(0.99, p.reverbDecay)),
+        Math.max(0, Math.min(0.99, finite(p.reverbDecay, 0.7))),
         0.1,
       );
     }
@@ -322,11 +348,11 @@ export class SampleEngine {
     }
     if (this.masterDelay) {
       this.masterDelay.delayTime.rampTo(
-        Math.max(0, Math.min(2, p.delayTimeSec)),
+        Math.max(0, Math.min(2, finite(p.delayTimeSec, 0.25))),
         0.08,
       );
       this.masterDelay.feedback.rampTo(
-        Math.max(0, Math.min(0.9, p.delayFeedback)),
+        Math.max(0, Math.min(0.9, finite(p.delayFeedback, 0.3))),
         0.08,
       );
     }
@@ -420,7 +446,10 @@ export class SampleEngine {
 
       // autoPlay: free-run at timeline rate. Seek only on real scrub/wrap
       // or if the player stopped early while still inside the span.
-      if (voice.paused || scrubJump) {
+      const driftSec = Math.abs(
+        this.estimatedOffsetSec(voice) - a.offsetSec,
+      );
+      if (voice.paused || scrubJump || driftSec > 0.08) {
         this.startSegment(voice, a, buf, a.offsetSec);
       } else if (
         voice.player.state !== "started" &&
@@ -441,18 +470,26 @@ export class SampleEngine {
 
   private applyPitch(voice: Voice): void {
     const cents = voice.randomCents + this.currentPitchCents();
-    const semitones = cents / 100;
+    const target = Math.max(-24, Math.min(24, finite(cents / 100, 0)));
+    const semitones = Number.isFinite(voice.lastPitchSemitones)
+      ? voice.lastPitchSemitones + (target - voice.lastPitchSemitones) * 0.2
+      : target;
+    if (Math.abs(semitones - voice.lastPitchSemitones) < 0.002) return;
     try {
       voice.pitchShift.pitch = semitones;
+      voice.lastPitchSemitones = semitones;
     } catch {
       /* ignore */
     }
   }
 
   private applyLiveParams(voice: Voice, a: ActiveClip): void {
-    voice.panner.pan.rampTo(a.pan, 0.05);
+    voice.panner.pan.rampTo(
+      Math.max(-1, Math.min(1, finite(a.pan, 0))),
+      0.05,
+    );
     voice.filter.frequency.rampTo(
-      Math.max(20, Math.min(20000, a.filterHz)),
+      Math.max(20, Math.min(20000, finite(a.filterHz, 20000))),
       0.05,
     );
     const mix = normalizedWetMixes(a.reverbMix, a.delayMix);
@@ -460,15 +497,15 @@ export class SampleEngine {
     voice.reverbWet.gain.rampTo(mix.reverb, 0.08);
     voice.delayWet.gain.rampTo(mix.delay, 0.08);
     (voice.reverb.roomSize as unknown as Tone.Signal<"normalRange">).rampTo(
-      Math.max(0, Math.min(0.99, a.reverbDecay)),
+      Math.max(0, Math.min(0.99, finite(a.reverbDecay, 0.7))),
       0.1,
     );
     voice.delay.delayTime.rampTo(
-      Math.max(0, Math.min(2, a.delayTimeSec)),
+      Math.max(0, Math.min(2, finite(a.delayTimeSec, 0.25))),
       0.08,
     );
     voice.delay.feedback.rampTo(
-      Math.max(0, Math.min(0.95, a.delayFeedback)),
+      Math.max(0, Math.min(0.95, finite(a.delayFeedback, 0.3))),
       0.08,
     );
   }
@@ -478,16 +515,7 @@ export class SampleEngine {
    * full fade-in from silence. Only ramps when the target moved.
    */
   private applyPositionGain(voice: Voice, a: ActiveClip): void {
-    const offset = a.offsetSec;
-    const dur = Math.max(1e-4, a.durationSec);
-    const fi = Math.max(0, a.fadeInSec);
-    const fo = Math.max(0, a.fadeOutSec);
-    let env = 1;
-    if (fi > 0 && offset < fi) env = Math.min(env, offset / fi);
-    if (fo > 0 && offset > dur - fo) {
-      env = Math.min(env, Math.max(0, (dur - offset) / fo));
-    }
-    const target = a.gain * env;
+    const target = this.positionGainTarget(a);
     if (Math.abs(target - voice.lastGainTarget) < GAIN_EPS) return;
     voice.lastGainTarget = target;
     const now = Tone.now();
@@ -514,9 +542,11 @@ export class SampleEngine {
     const player = new Tone.Player({
       autostart: false,
       loop: false,
+      fadeIn: 0.008,
+      fadeOut: 0.02,
     });
     player.buffer = buffer;
-    player.playbackRate = Math.max(0.05, a.playbackRate);
+    player.playbackRate = Math.max(0.05, finite(a.playbackRate, 1));
 
     const pitchShift = new Tone.PitchShift({
       pitch: 0,
@@ -526,24 +556,25 @@ export class SampleEngine {
     const gain = new Tone.Gain(0);
     const filter = new Tone.Filter({
       type: "lowpass",
-      frequency: Math.max(20, Math.min(20000, a.filterHz)),
+      frequency: Math.max(20, Math.min(20000, finite(a.filterHz, 20000))),
       Q: 0.7,
     });
-    const panner = new Tone.Panner(a.pan);
-    const reverbMix = Math.max(0, Math.min(1, a.reverbMix));
-    const delayMix = Math.max(0, Math.min(1, a.delayMix));
-    const dryGain = new Tone.Gain(Math.max(0, 1 - reverbMix - delayMix));
+    const panner = new Tone.Panner(
+      Math.max(-1, Math.min(1, finite(a.pan, 0))),
+    );
+    const mix = normalizedWetMixes(a.reverbMix, a.delayMix);
+    const dryGain = new Tone.Gain(mix.dry);
     const reverb = new Tone.Freeverb({
       roomSize: Math.max(0, Math.min(0.99, a.reverbDecay)),
       dampening: 3000,
     });
-    const reverbWet = new Tone.Gain(reverbMix);
+    const reverbWet = new Tone.Gain(mix.reverb);
     const delay = new Tone.FeedbackDelay({
       delayTime: Math.max(0, Math.min(2, a.delayTimeSec)),
       feedback: Math.max(0, Math.min(0.95, a.delayFeedback)),
       wet: 1,
     });
-    const delayWet = new Tone.Gain(delayMix);
+    const delayWet = new Tone.Gain(mix.delay);
 
     player.connect(pitchShift);
     pitchShift.connect(gain);
@@ -577,6 +608,7 @@ export class SampleEngine {
       startedAtTone: Tone.now(),
       paused: true,
       disposed: false,
+      lastPitchSemitones: Number.NaN,
     };
   }
 
@@ -587,7 +619,7 @@ export class SampleEngine {
     offsetSec: number,
   ): void {
     const now = Tone.now();
-    const rate = Math.max(0.05, a.playbackRate);
+    const rate = Math.max(0.05, finite(a.playbackRate, 1));
     const regionStart = Math.max(0, a.bufferStartSec);
     const regionEnd = Math.min(
       buffer.duration,
@@ -609,10 +641,12 @@ export class SampleEngine {
       return;
     }
 
+    const fadeEnd = now + 0.008;
     try {
-      if (voice.player.state === "started") {
-        voice.player.stop(now);
-      }
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+      voice.gain.gain.linearRampToValueAtTime(0, fadeEnd);
+      if (voice.player.state === "started") voice.player.stop(fadeEnd);
     } catch {
       /* not started */
     }
@@ -621,7 +655,7 @@ export class SampleEngine {
       voice.player.buffer = buffer;
     }
     voice.player.playbackRate = rate;
-    const startAt = now + 0.005;
+    const startAt = now + 0.012;
     try {
       voice.player.start(startAt, offset, remainingBuf);
     } catch (err) {
@@ -632,9 +666,10 @@ export class SampleEngine {
     voice.startOffsetSec = offsetSec;
     voice.startedAtTone = startAt;
     voice.paused = false;
-    // Force gain apply after seek so we don't stick at 0.
-    voice.lastGainTarget = -1;
-    this.applyPositionGain(voice, a);
+    const target = this.positionGainTarget(a);
+    voice.gain.gain.setValueAtTime(0, startAt);
+    voice.gain.gain.linearRampToValueAtTime(target, startAt + 0.015);
+    voice.lastGainTarget = target;
   }
 
   private pauseVoice(voice: Voice): void {
@@ -644,7 +679,10 @@ export class SampleEngine {
     voice.startOffsetSec =
       voice.startOffsetSec + elapsed * voice.player.playbackRate;
     try {
-      voice.player.stop(now);
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+      voice.gain.gain.linearRampToValueAtTime(0, now + 0.008);
+      voice.player.stop(now + 0.01);
     } catch {
       /* already stopped */
     }
@@ -674,7 +712,26 @@ export class SampleEngine {
       v.reverbWet.dispose();
       v.delay.dispose();
       v.delayWet.dispose();
-    }, 80);
+    }, 220);
+  }
+
+  private estimatedOffsetSec(voice: Voice): number {
+    if (voice.paused) return voice.startOffsetSec;
+    const elapsed = Math.max(0, Tone.now() - voice.startedAtTone);
+    return voice.startOffsetSec + elapsed * voice.player.playbackRate;
+  }
+
+  private positionGainTarget(a: ActiveClip): number {
+    const offset = a.offsetSec;
+    const dur = Math.max(1e-4, a.durationSec);
+    const fi = Math.max(0, a.fadeInSec);
+    const fo = Math.max(0, a.fadeOutSec);
+    let env = 1;
+    if (fi > 0 && offset < fi) env = Math.min(env, offset / fi);
+    if (fo > 0 && offset > dur - fo) {
+      env = Math.min(env, Math.max(0, (dur - offset) / fo));
+    }
+    return Math.max(0, finite(a.gain, 0)) * env;
   }
 
   private async loadBuffer(

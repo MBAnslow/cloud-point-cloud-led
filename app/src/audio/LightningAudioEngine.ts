@@ -5,6 +5,8 @@ import { pickBoltSample } from "./boltSampleMatch";
 import { ensureLimitedAux } from "./MasterFxBus";
 import { meterAbs } from "./meterAbs";
 
+const MAX_ONE_SHOT_VOICES = 24;
+
 /**
  * Audio engine for the lightning system.
  *
@@ -12,7 +14,7 @@ import { meterAbs } from "./meterAbs";
  *   long as `enabled && withinActiveWindow`.
  * - Cloud-flash bolts pick from the tagged `boltSamples` library.
  * - Ground strikes play the single `strikeSample` (if set).
- * - Sprite flashes play the single `spriteSample` (if set).
+ * - Sprite flashes randomly choose from `spriteAudioSamples`.
  * - Each one-shot gets a random Tone.PitchShift in ±boltPitchJitterCents.
  *
  * Buffers are lazily loaded from the shared IndexedDB blob store
@@ -24,11 +26,13 @@ export class LightningAudioEngine {
   private startPromise: Promise<void> | null = null;
   private out: Tone.Gain | null = null;
   private bg: Tone.Player | null = null;
+  private bgGain: Tone.Gain | null = null;
   private bgPanner: Tone.Panner | null = null;
   private bgSampleId: string | null = null;
-  private bgWasEnabled = false;
+  private desiredBgSampleId: string | null = null;
+  private bgGeneration = 0;
   private boltBuffers = new Map<string, AudioBuffer>();
-  private pendingLoads = new Set<string>();
+  private pendingLoads = new Map<string, Promise<AudioBuffer | null>>();
   private spriteVoices = new Map<
     number,
     {
@@ -48,7 +52,10 @@ export class LightningAudioEngine {
   }> = [];
 
   async start(): Promise<void> {
-    if (this.started) return;
+    if (this.started) {
+      if (Tone.getContext().rawContext.state !== "running") await Tone.start();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startOnce();
     try {
@@ -85,7 +92,7 @@ export class LightningAudioEngine {
       bgWanted,
       p.backgroundGain,
       p.pan ?? 0,
-    );
+    ).catch((err) => console.warn("[lightning] background sync failed", err));
   }
 
   /**
@@ -129,8 +136,7 @@ export class LightningAudioEngine {
   }
 
   /**
-   * Trigger the storm-sprite appear one-shot (`spriteSample`).
-   * No-op when no sprite sound is uploaded.
+   * Trigger a random storm-sprite one-shot.
    */
   triggerSprite(
     p: LightningParams,
@@ -140,8 +146,16 @@ export class LightningAudioEngine {
     eventId?: number,
   ): void {
     if (!this.started || !this.out) return;
-    const sample = p.spriteSample;
-    if (!sample) return;
+    const library = p.spriteAudioSamples ?? [];
+    if (library.length === 0) return;
+    const ready = library.filter((sample) =>
+      this.boltBuffers.has(sample.id),
+    );
+    if (ready.length === 0) {
+      for (const sample of library) void this.ensureBoltBuffer(sample.id);
+      return;
+    }
+    const sample = ready[Math.floor(Math.random() * ready.length)]!;
     const voice = this.playOneShot(p, sample, intensity, gain, pan);
     if (voice && eventId !== undefined) {
       this.spriteVoices.set(eventId, voice);
@@ -152,7 +166,9 @@ export class LightningAudioEngine {
   setSpriteEnvelope(eventId: number, envelope: number): void {
     const voice = this.spriteVoices.get(eventId);
     if (!voice) return;
-    const target = voice.baseGain * Math.max(0, Math.min(1, envelope));
+    const safeEnvelope = Number.isFinite(envelope) ? envelope : 0;
+    const target =
+      voice.baseGain * Math.max(0, Math.min(1, safeEnvelope));
     voice.gain.gain.rampTo(target, 0.008);
   }
 
@@ -180,7 +196,9 @@ export class LightningAudioEngine {
   preload(p: LightningParams): void {
     for (const s of p.boltSamples) void this.ensureBoltBuffer(s.id);
     if (p.strikeSample) void this.ensureBoltBuffer(p.strikeSample.id);
-    if (p.spriteSample) void this.ensureBoltBuffer(p.spriteSample.id);
+    for (const sample of p.spriteAudioSamples ?? []) {
+      void this.ensureBoltBuffer(sample.id);
+    }
     if (p.backgroundSample) void this.ensureBoltBuffer(p.backgroundSample.id);
   }
 
@@ -205,20 +223,35 @@ export class LightningAudioEngine {
     // Random pitch in ±boltPitchJitterCents. Use PitchShift (semitones)
     // rather than playbackRate so thunder keeps its length — rate-only
     // jitter is easy to miss on broadband rumble (strike sound).
-    const jitter = Math.max(0, Number(p.boltPitchJitterCents) || 0);
+    const jitter = Math.max(
+      0,
+      Number.isFinite(p.boltPitchJitterCents)
+        ? p.boltPitchJitterCents
+        : 0,
+    );
     const cents = jitter > 0 ? (Math.random() * 2 - 1) * jitter : 0;
     const semitones = cents / 100;
-    const gainLin = Math.max(
-      0.0001,
-      Math.max(0, boltGain) * Math.max(0, strikeIntensity),
+    const safeGain = Number.isFinite(boltGain) ? boltGain : 0;
+    const safeIntensity = Number.isFinite(strikeIntensity)
+      ? strikeIntensity
+      : 0;
+    const gainLin = Math.min(
+      2,
+      Math.max(0, safeGain) * Math.max(0, safeIntensity),
     );
-    const panVal = Math.max(-1, Math.min(1, pan));
+    if (gainLin <= 0) return null;
+    const panVal = Math.max(
+      -1,
+      Math.min(1, Number.isFinite(pan) ? pan : 0),
+    );
 
     const source = new Tone.ToneBufferSource({
       url: buf,
       playbackRate: 1,
+      fadeIn: 0.008,
+      fadeOut: 0.025,
     });
-    const gain = new Tone.Gain(gainLin);
+    const gain = new Tone.Gain(0);
     const panner = new Tone.Panner(panVal);
     const meter = new Tone.Meter({ normalRange: true, smoothing: 0.8 });
     let pitchShift: Tone.PitchShift | null = null;
@@ -237,8 +270,11 @@ export class LightningAudioEngine {
     }
     gain.connect(panner);
     panner.connect(this.out);
+    const now = Tone.now();
     try {
-      source.start();
+      source.start(now + 0.003);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(gainLin, now + 0.011);
     } catch (err) {
       console.warn("[lightning] one-shot start failed", err);
       source.dispose();
@@ -250,20 +286,25 @@ export class LightningAudioEngine {
     }
     // PitchShift adds a short delay line; keep the voice alive a bit longer.
     const dur = buf.duration + (pitchShift ? 0.2 : 0.05);
+    if (this.voices.length >= MAX_ONE_SHOT_VOICES) {
+      this.fadeOutVoice(
+        this.voices[this.voices.length - MAX_ONE_SHOT_VOICES],
+      );
+    }
     this.voices.push({
       source,
       pitchShift,
       gain,
       panner,
       meter,
-      endsAt: Tone.now() + dur,
+      endsAt: now + dur,
     });
     this.reap();
     return {
       gain,
       baseGain: gainLin,
       meter,
-      audioEndsAt: Tone.now() + buf.duration,
+      audioEndsAt: now + buf.duration,
     };
   }
 
@@ -290,6 +331,28 @@ export class LightningAudioEngine {
     });
   }
 
+  private fadeOutVoice(
+    voice:
+      | {
+          source: Tone.ToneBufferSource;
+          gain: Tone.Gain;
+          endsAt: number;
+        }
+      | undefined,
+  ): void {
+    if (!voice) return;
+    const now = Tone.now();
+    try {
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+      voice.gain.gain.linearRampToValueAtTime(0, now + 0.02);
+      voice.source.stop(now + 0.025);
+    } catch {
+      /* already stopped */
+    }
+    voice.endsAt = Math.min(voice.endsAt, now + 0.03);
+  }
+
   private async syncBackground(
     sample: LightningSample | null,
     wanted: boolean,
@@ -297,84 +360,137 @@ export class LightningAudioEngine {
     pan: number,
   ): Promise<void> {
     if (!this.out) return;
-    const panVal = Math.max(-1, Math.min(1, pan));
+    const panVal = Math.max(
+      -1,
+      Math.min(1, Number.isFinite(pan) ? pan : 0),
+    );
+    const gainVal = Math.max(
+      0,
+      Math.min(2, Number.isFinite(gain) ? gain : 0),
+    );
     const wantedId = wanted && sample ? sample.id : null;
-    // Rewire if the desired sample changed.
-    if (wantedId !== this.bgSampleId) {
-      if (this.bg) {
-        try {
-          this.bg.stop();
-        } catch {
-          /* ignore */
-        }
-        this.bg.dispose();
-        this.bg = null;
-      }
-      if (this.bgPanner) {
-        this.bgPanner.dispose();
-        this.bgPanner = null;
-      }
-      this.bgSampleId = wantedId;
-      this.bgWasEnabled = false;
-      if (wantedId && sample) {
-        try {
-          const buf = await this.ensureBoltBuffer(sample.id);
-          if (!buf || this.bgSampleId !== sample.id) return;
-          const player = new Tone.Player();
-          const panner = new Tone.Panner(panVal);
-          (player as unknown as { buffer: Tone.ToneAudioBuffer }).buffer =
-            new Tone.ToneAudioBuffer(buf);
-          player.loop = true;
-          player.volume.value = Tone.gainToDb(Math.max(0.0001, gain));
-          player.connect(panner);
-          panner.connect(this.out);
-          this.bg = player;
-          this.bgPanner = panner;
-        } catch (err) {
-          console.warn("[lightning] background load failed", err);
-        }
+    if (wantedId !== this.desiredBgSampleId) {
+      this.desiredBgSampleId = wantedId;
+      this.bgGeneration += 1;
+      if (!wantedId) {
+        const old = this.takeBackground();
+        if (old) this.fadeDisposeBackground(old);
+        return;
       }
     }
-    // Update volume + pan + play/stop.
-    if (this.bg) {
-      this.bg.volume.rampTo(Tone.gainToDb(Math.max(0.0001, gain)), 0.1);
-      if (this.bgPanner) this.bgPanner.pan.rampTo(panVal, 0.1);
-      if (wanted && !this.bgWasEnabled) {
-        try {
-          this.bg.start();
-          this.bgWasEnabled = true;
-        } catch (err) {
-          console.warn("[lightning] background start failed", err);
-        }
-      } else if (!wanted && this.bgWasEnabled) {
-        try {
-          this.bg.stop();
-        } catch {
-          /* ignore */
-        }
-        this.bgWasEnabled = false;
-      }
+    if (!wantedId || !sample) return;
+
+    if (this.bgSampleId === wantedId && this.bg && this.bgGain) {
+      this.bgGain.gain.rampTo(gainVal, 0.1);
+      this.bgPanner?.pan.rampTo(panVal, 0.1);
+      return;
     }
+
+    const generation = this.bgGeneration;
+    const buf = await this.ensureBoltBuffer(wantedId);
+    if (
+      !buf ||
+      generation !== this.bgGeneration ||
+      this.desiredBgSampleId !== wantedId ||
+      !this.out
+    ) {
+      return;
+    }
+    // Another waiter for the same in-flight decode may have won the race.
+    if (this.bgSampleId === wantedId && this.bg && this.bgGain) return;
+
+    const player = new Tone.Player({
+      url: new Tone.ToneAudioBuffer(buf),
+      loop: true,
+      fadeIn: 0.01,
+      fadeOut: 0.03,
+    });
+    const gainNode = new Tone.Gain(0);
+    const panner = new Tone.Panner(panVal);
+    player.connect(gainNode);
+    gainNode.connect(panner);
+    panner.connect(this.out);
+    try {
+      player.start();
+    } catch (err) {
+      player.dispose();
+      gainNode.dispose();
+      panner.dispose();
+      console.warn("[lightning] background start failed", err);
+      return;
+    }
+    const old = this.takeBackground();
+    this.bg = player;
+    this.bgGain = gainNode;
+    this.bgPanner = panner;
+    this.bgSampleId = wantedId;
+    gainNode.gain.rampTo(gainVal, 0.15);
+    if (old) this.fadeDisposeBackground(old);
   }
 
   private async ensureBoltBuffer(id: string): Promise<AudioBuffer | null> {
     if (this.boltBuffers.has(id)) return this.boltBuffers.get(id) ?? null;
-    if (this.pendingLoads.has(id)) return null;
-    this.pendingLoads.add(id);
+    const pending = this.pendingLoads.get(id);
+    if (pending) return pending;
+    const load = (async () => {
+      try {
+        const blob = await getSampleBlob(id);
+        if (!blob) return null;
+        const arr = await blob.arrayBuffer();
+        const ctx = Tone.getContext().rawContext as unknown as AudioContext;
+        const buf = await ctx.decodeAudioData(arr.slice(0));
+        this.boltBuffers.set(id, buf);
+        return buf;
+      } catch (err) {
+        console.warn("[lightning] buffer load failed", id, err);
+        return null;
+      }
+    })();
+    this.pendingLoads.set(id, load);
     try {
-      const blob = await getSampleBlob(id);
-      if (!blob) return null;
-      const arr = await blob.arrayBuffer();
-      const ctx = Tone.getContext().rawContext as unknown as AudioContext;
-      const buf = await ctx.decodeAudioData(arr.slice(0));
-      this.boltBuffers.set(id, buf);
-      return buf;
-    } catch (err) {
-      console.warn("[lightning] buffer load failed", id, err);
-      return null;
+      return await load;
     } finally {
-      this.pendingLoads.delete(id);
+      if (this.pendingLoads.get(id) === load) this.pendingLoads.delete(id);
     }
+  }
+
+  private takeBackground(): {
+    player: Tone.Player;
+    gain: Tone.Gain;
+    panner: Tone.Panner;
+  } | null {
+    if (!this.bg || !this.bgGain || !this.bgPanner) return null;
+    const value = {
+      player: this.bg,
+      gain: this.bgGain,
+      panner: this.bgPanner,
+    };
+    this.bg = null;
+    this.bgGain = null;
+    this.bgPanner = null;
+    this.bgSampleId = null;
+    return value;
+  }
+
+  private fadeDisposeBackground(nodes: {
+    player: Tone.Player;
+    gain: Tone.Gain;
+    panner: Tone.Panner;
+  }): void {
+    const now = Tone.now();
+    try {
+      nodes.gain.gain.cancelScheduledValues(now);
+      nodes.gain.gain.setValueAtTime(nodes.gain.gain.value, now);
+      nodes.gain.gain.linearRampToValueAtTime(0, now + 0.15);
+      nodes.player.stop(now + 0.16);
+    } catch {
+      /* already stopped */
+    }
+    setTimeout(() => {
+      nodes.player.dispose();
+      nodes.gain.dispose();
+      nodes.panner.dispose();
+    }, 220);
   }
 }
 

@@ -1,7 +1,7 @@
 import * as Tone from "tone";
 import { applyFilterChain } from "./filterChain";
 import { meterAbs } from "./meterAbs";
-import { ensureLimitedAux } from "./MasterFxBus";
+import { ensureLimitedAux, limitedAuxIfStarted } from "./MasterFxBus";
 import {
   HARMONIC_COUNT,
   HARMONIC_OCTAVE_OFFSETS,
@@ -70,6 +70,8 @@ const MAX_WOBBLE_OCTAVES = 5;
  */
 const DRIFT_JITTER = [1.0, 0.83, 1.17, 0.71, 1.29, 0.93, 1.11, 0.77];
 
+const finite = (value: number, fallback: number): number =>
+  Number.isFinite(value) ? value : fallback;
 
 interface Voice {
   note: string;
@@ -109,6 +111,8 @@ interface Voice {
   /** Last snapshot of each harmonic slot — used for change detection. */
   harmonicPrev: HarmonicVoice[];
   isOn: boolean;
+  releaseAt: number | null;
+  filterCutoffState: number;
   /** Last applied fx snapshot — used to skip no-op writes. */
   fx: NoteFx;
 }
@@ -147,6 +151,7 @@ export class DroneEngine {
   private currentWaveform: DroneWaveform = "triangle";
   private currentTremoloShape: DroneLfoShape = "sine";
   private currentDistortionDrive = -1;
+  private waveformTransitioning = false;
 
   private shapeSample(shape: DroneLfoShape, phase01: number): number {
     const p = phase01 - Math.floor(phase01);
@@ -187,7 +192,10 @@ export class DroneEngine {
   }
 
   async start(): Promise<void> {
-    if (this.started) return;
+    if (this.started) {
+      if (Tone.getContext().rawContext.state !== "running") await Tone.start();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startOnce();
     try {
@@ -236,6 +244,10 @@ export class DroneEngine {
     }).start();
     this.tremoloLfo.connect(this.tremoloGain.gain);
     this.meter = new Tone.Meter({ normalRange: true });
+    const aux = await ensureLimitedAux();
+    this.lp.connect(aux);
+    this.lp.connect(this.meter);
+    this.currentRoutingTarget = null;
     this.started = true;
   }
 
@@ -259,6 +271,12 @@ export class DroneEngine {
     // Never hit the DAC raw — park on the limited aux until MasterFx
     // assigns fx/direct routing.
     this.currentRoutingTarget = null;
+    const auxNow = limitedAuxIfStarted();
+    if (auxNow) {
+      this.lp.connect(auxNow);
+      if (this.meter) this.lp.connect(this.meter);
+      return;
+    }
     void ensureLimitedAux().then((aux) => {
       if (this.currentRoutingTarget !== null || !this.lp) return;
       this.lp.disconnect();
@@ -291,25 +309,42 @@ export class DroneEngine {
       !this.distortion
     )
       return;
-    this.master.gain.rampTo(p.enabled ? p.masterGain : 0, 0.05);
+    const masterTarget = p.enabled
+      ? Math.max(0, Math.min(1, finite(p.masterGain, 0)))
+      : 0;
+    if (!this.waveformTransitioning) {
+      this.master.gain.rampTo(masterTarget, 0.05);
+    }
     applyFilterChain(this.hp, this.lp, p.filters);
 
-    if (p.waveform !== this.currentWaveform) {
-      this.currentWaveform = p.waveform;
-      for (const v of this.voices.values()) {
-        for (const o of v.oscs) o.type = p.waveform;
-      }
-      if (this.previewVoice) {
-        for (const o of this.previewVoice.oscs) o.type = p.waveform;
-      }
+    if (p.waveform !== this.currentWaveform && !this.waveformTransitioning) {
+      const nextWaveform = p.waveform;
+      this.waveformTransitioning = true;
+      this.master.gain.rampTo(0, 0.01);
+      setTimeout(() => {
+        for (const v of this.voices.values()) {
+          for (const o of v.oscs) o.type = nextWaveform;
+        }
+        if (this.previewVoice) {
+          for (const o of this.previewVoice.oscs) o.type = nextWaveform;
+        }
+        this.currentWaveform = nextWaveform;
+        this.waveformTransitioning = false;
+        this.master?.gain.rampTo(masterTarget, 0.02);
+      }, 12);
     }
 
     // Tremolo LFO drives the gain directly (it overrides). Full range
     // is [1 - depth, 1]; depth=0 collapses to a constant 1 = passthrough.
-    const trDepth = Math.max(0, Math.min(1, p.tremoloDepth));
-    this.tremoloLfo.frequency.rampTo(Math.max(0.01, p.tremoloRateHz), 0.05);
-    this.tremoloLfo.min = 1 - trDepth;
-    this.tremoloLfo.max = 1;
+    const trDepth = Math.max(0, Math.min(1, finite(p.tremoloDepth, 0)));
+    this.tremoloLfo.frequency.rampTo(
+      Math.max(0.01, finite(p.tremoloRateHz, 4)),
+      0.05,
+    );
+    if (Math.abs(this.tremoloLfo.min - (1 - trDepth)) > 0.001) {
+      this.tremoloLfo.min = 1 - trDepth;
+      this.tremoloLfo.max = 1;
+    }
     if (p.tremoloShape !== this.currentTremoloShape) {
       this.tremoloLfo.type = p.tremoloShape;
       this.currentTremoloShape = p.tremoloShape;
@@ -336,6 +371,7 @@ export class DroneEngine {
     if (!p.enabled) {
       for (const v of this.voices.values()) this.release(v, p);
       if (this.previewVoice) this.release(this.previewVoice, p);
+      this.reapReleasedVoices(p);
       return;
     }
 
@@ -368,6 +404,10 @@ export class DroneEngine {
 
     if (this.previewNote) {
       const pv = this.ensurePreviewVoice(this.previewNote, p.waveform);
+      // Timeline voices get their audible content from their configured
+      // harmonic layers. A keyboard preview has no note-FX payload, so
+      // give only that dedicated voice an audible fundamental.
+      pv.legacyBaseGain.gain.rampTo(0.7, 0.02);
       if (!pv.isOn) {
         this.attack(pv, p);
         pv.isOn = true;
@@ -375,6 +415,7 @@ export class DroneEngine {
     } else if (this.previewVoice) {
       this.release(this.previewVoice, p);
     }
+    this.reapReleasedVoices(p);
   }
 
   private getOrCreateVoice(id: string, note: string, wf: DroneWaveform): Voice {
@@ -569,6 +610,8 @@ export class DroneEngine {
       harmonicDriftLfos,
       harmonicPrev,
       isOn: false,
+      releaseAt: null,
+      filterCutoffState: NOTE_FX_DEFAULTS.filterHz,
       fx: {
         ...NOTE_FX_DEFAULTS,
         harmonics: NOTE_FX_DEFAULTS.harmonics.map((h) => ({ ...h })),
@@ -582,6 +625,7 @@ export class DroneEngine {
     const d = Math.max(0.001, p.decay);
     const s = Math.max(0.0001, Math.min(1, p.sustain));
     const g = v.env.gain;
+    v.releaseAt = null;
     g.cancelScheduledValues(now);
     g.setValueAtTime(g.value, now);
     const vg = Math.max(0, Math.min(1, v.fx.gain));
@@ -634,8 +678,6 @@ export class DroneEngine {
       osc?.dispose();
     }
 
-    v.unisonMix.gain.rampTo(1 / Math.sqrt(targetCount), 0.05);
-
     const spread = Math.max(0, fx.unisonDetuneCents);
     const drift = Math.max(0, fx.unisonDriftCents);
     const rate = Math.max(0.01, fx.unisonDriftRateHz);
@@ -674,14 +716,14 @@ export class DroneEngine {
     }
 
     // Per-note filter + cutoff wobble around the base cutoff.
-    const base = Math.max(20, fx.filterHz);
+    const base = Math.max(20, Math.min(20000, finite(fx.filterHz, 20000)));
     const fld = Math.max(0, Math.min(1, fx.filterLfoDepth));
     // Symmetric log-space wobble around the base cutoff so modulation
     // moves both above and below the specified filter frequency.
     const halfSpanOct = (fld * MAX_WOBBLE_OCTAVES) / 2;
     const minHz = Math.max(20, base / Math.pow(2, halfSpanOct));
     const maxHz = Math.max(minHz, Math.min(20000, base * Math.pow(2, halfSpanOct)));
-    const rateHz = Math.max(0.05, fx.filterLfoRateHz || 0.05);
+    const rateHz = Math.max(0.05, finite(fx.filterLfoRateHz, 0.05));
     const phase = Tone.now() * rateHz;
     const wave = this.shapeSample(fx.filterLfoShape, phase); // [-1, 1]
     const t = (wave + 1) * 0.5; // [0, 1]
@@ -689,8 +731,21 @@ export class DroneEngine {
       fld > 0.0001
         ? minHz * Math.pow(maxHz / minHz, t)
         : base;
-    v.perNoteFilter.frequency.rampTo(cutoffNow, 0.03);
-    v.perNoteFilter.Q.rampTo(Math.max(0.1, fx.filterQ), 0.05);
+    // A short one-pole smoothing stage prevents square/saw modulation
+    // from stepping the biquad cutoff by several octaves in one sample.
+    const alpha =
+      fx.filterLfoShape === "square" || fx.filterLfoShape === "sawtooth"
+        ? 0.12
+        : 0.3;
+    v.filterCutoffState += alpha * (cutoffNow - v.filterCutoffState);
+    v.perNoteFilter.frequency.value = Math.max(
+      20,
+      Math.min(20000, v.filterCutoffState),
+    );
+    v.perNoteFilter.Q.rampTo(
+      Math.max(0.1, Math.min(20, finite(fx.filterQ, 0.7))),
+      0.05,
+    );
 
     // Per-voice tremolo LFO.
     const td = Math.max(0, Math.min(1, fx.tremoloDepth));
@@ -698,8 +753,10 @@ export class DroneEngine {
       Math.max(0.01, fx.tremoloRateHz),
       0.05,
     );
-    v.perNoteTremoloLfo.min = 1 - td;
-    v.perNoteTremoloLfo.max = 1;
+    if (Math.abs(v.perNoteTremoloLfo.min - (1 - td)) > 0.001) {
+      v.perNoteTremoloLfo.min = 1 - td;
+      v.perNoteTremoloLfo.max = 1;
+    }
     if (fx.tremoloShape !== prev.tremoloShape) {
       v.perNoteTremoloLfo.type = fx.tremoloShape;
     }
@@ -723,9 +780,23 @@ export class DroneEngine {
         v.harmonicLevels[i].gain.rampTo(Math.max(0, Math.min(1, h.level)), 0.05);
       }
       if (Math.abs(h.overtones - hp.overtones) > 0.005) {
-        // Reassigning `partials` rebuilds the oscillator's periodic wave.
-        // Cheap and glitch-free in Tone.js.
-        v.harmonicOscs[i].partials = overtonePartials(h.overtones);
+        // Rebuilding a live periodic wave can create a discontinuity.
+        // Briefly duck only this layer around the swap.
+        const level = v.harmonicLevels[i];
+        const osc = v.harmonicOscs[i];
+        const targetLevel = Math.max(0, Math.min(1, finite(h.level, 0)));
+        const now = Tone.now();
+        level.gain.cancelScheduledValues(now);
+        level.gain.setValueAtTime(level.gain.value, now);
+        level.gain.linearRampToValueAtTime(0, now + 0.004);
+        setTimeout(() => {
+          try {
+            osc.partials = overtonePartials(h.overtones);
+            level.gain.rampTo(targetLevel, 0.012);
+          } catch {
+            /* voice may have been disposed during the transition */
+          }
+        }, 5);
       }
       if (
         Math.abs(h.tremDepth - hp.tremDepth) > 0.005 ||
@@ -756,6 +827,16 @@ export class DroneEngine {
       }
       v.harmonicPrev[i] = { ...h };
     }
+    // Harmonic layers are parallel sources. Equal-power compensation
+    // stops dense note designs from overdriving the shared compressor.
+    const harmonicEnergy = fx.harmonics.reduce((sum, h) => {
+      const level = Math.max(0, Math.min(1, finite(h.level, 0)));
+      return sum + level * level;
+    }, 0);
+    v.unisonMix.gain.rampTo(
+      1 / Math.sqrt(Math.max(1, harmonicEnergy)),
+      0.05,
+    );
 
     v.fx = fx;
   }
@@ -769,6 +850,62 @@ export class DroneEngine {
     g.setValueAtTime(g.value, now);
     g.linearRampToValueAtTime(0, now + r);
     v.isOn = false;
+    v.releaseAt = now;
+  }
+
+  private reapReleasedVoices(p: DroneParams): void {
+    const now = Tone.now();
+    const tail = Math.max(0.001, finite(p.release, 0.5)) + 0.1;
+    for (const [id, voice] of this.voices) {
+      if (voice.releaseAt !== null && now >= voice.releaseAt + tail) {
+        this.disposeVoice(voice);
+        this.voices.delete(id);
+      }
+    }
+    if (
+      this.previewVoice?.releaseAt !== null &&
+      this.previewVoice?.releaseAt !== undefined &&
+      now >= this.previewVoice.releaseAt + tail
+    ) {
+      this.disposeVoice(this.previewVoice);
+      this.previewVoice = null;
+    }
+  }
+
+  private disposeVoice(v: Voice): void {
+    const oscillators = [...v.oscs, ...v.harmonicOscs];
+    const lfos = [
+      ...v.driftLfos,
+      v.perNoteFilterLfo,
+      v.perNoteTremoloLfo,
+      ...v.harmonicTremLfos,
+      ...v.harmonicDriftLfos,
+    ];
+    for (const lfo of lfos) {
+      try {
+        lfo.disconnect();
+        lfo.stop();
+        lfo.dispose();
+      } catch {
+        /* already stopped */
+      }
+    }
+    for (const osc of oscillators) {
+      try {
+        osc.disconnect();
+        osc.stop();
+        osc.dispose();
+      } catch {
+        /* already stopped */
+      }
+    }
+    v.legacyBaseGain.dispose();
+    for (const node of v.harmonicLevels) node.dispose();
+    for (const node of v.harmonicTremGains) node.dispose();
+    v.unisonMix.dispose();
+    v.perNoteFilter.dispose();
+    v.env.dispose();
+    v.perNoteTremoloGain.dispose();
   }
 }
 

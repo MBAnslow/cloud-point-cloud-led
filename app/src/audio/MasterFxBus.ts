@@ -26,9 +26,17 @@ export class MasterFxBus {
   private compressor: Tone.Compressor | null = null;
   private limiter: Tone.Limiter | null = null;
   private meter: Tone.Meter | null = null;
+  private lastHpHz = Number.NaN;
+  private lastHpQ = Number.NaN;
+  private lastLpHz = Number.NaN;
+  private lastLpQ = Number.NaN;
+  private lastOutputGain = Number.NaN;
 
   async start(): Promise<void> {
-    if (this.started) return;
+    if (this.started) {
+      if (Tone.getContext().rawContext.state !== "running") await Tone.start();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startOnce();
     try {
@@ -69,8 +77,10 @@ export class MasterFxBus {
     this.headroom.connect(this.compressor);
     this.compressor.connect(this.limiter);
     this.limiter.toDestination();
-    // Meter before dynamics so the Output bar shows when limiting kicks in.
-    this.sumGain.connect(this.meter);
+    // Measure the signal that actually reaches the destination. A
+    // pre-limiter meter could report clipping even when the safety stage
+    // is working, and could not reveal a post-dynamics dropout.
+    this.limiter.connect(this.meter);
     this.started = true;
   }
 
@@ -99,7 +109,7 @@ export class MasterFxBus {
     return this.auxIn;
   }
 
-  /** Program peak after the sum, before the compressor/limiter (0..1+). */
+  /** Program peak after the compressor/limiter (0..1). */
   getPeakLevel(): number {
     if (!this.meter) return 0;
     return meterAbs(this.meter.getValue());
@@ -112,29 +122,42 @@ export class MasterFxBus {
     const hpHz = p.hpEnabled
       ? Math.max(20, Math.min(20000, finite(p.hpHz, 20)))
       : 20;
-    this.hp.frequency.rampTo(hpHz, 0.08);
-    this.hp.Q.rampTo(
-      p.hpEnabled
-        ? Math.max(0.1, Math.min(20, finite(p.hpQ, 0.7)))
-        : 0.7,
-      0.08,
-    );
+    const hpQ = p.hpEnabled
+      ? Math.max(0.1, Math.min(20, finite(p.hpQ, 0.7)))
+      : 0.7;
     const lpHz = p.lpEnabled
       ? Math.max(20, Math.min(20000, finite(p.lpHz, 20000)))
       : 20000;
-    this.lp.frequency.rampTo(lpHz, 0.08);
-    this.lp.Q.rampTo(
-      p.lpEnabled
-        ? Math.max(0.1, Math.min(20, finite(p.lpQ, 0.7)))
-        : 0.7,
-      0.08,
-    );
+    const lpQ = p.lpEnabled
+      ? Math.max(0.1, Math.min(20, finite(p.lpQ, 0.7)))
+      : 0.7;
     const rawOutput = Number(p.outputGain);
     const out = Math.max(
       0,
       Math.min(1.5, Number.isFinite(rawOutput) ? rawOutput : 1),
     );
-    this.sumGain.gain.rampTo(out, 0.05);
+    // These values are usually unchanged for thousands of frames. Avoid
+    // cancelling and recreating AudioParam ramps on every RAF tick.
+    if (Math.abs(hpHz - this.lastHpHz) > 0.5) {
+      this.hp.frequency.rampTo(hpHz, 0.08);
+      this.lastHpHz = hpHz;
+    }
+    if (Math.abs(hpQ - this.lastHpQ) > 0.001) {
+      this.hp.Q.rampTo(hpQ, 0.08);
+      this.lastHpQ = hpQ;
+    }
+    if (Math.abs(lpHz - this.lastLpHz) > 0.5) {
+      this.lp.frequency.rampTo(lpHz, 0.08);
+      this.lastLpHz = lpHz;
+    }
+    if (Math.abs(lpQ - this.lastLpQ) > 0.001) {
+      this.lp.Q.rampTo(lpQ, 0.08);
+      this.lastLpQ = lpQ;
+    }
+    if (Math.abs(out - this.lastOutputGain) > 0.0001) {
+      this.sumGain.gain.rampTo(out, 0.05);
+      this.lastOutputGain = out;
+    }
   }
 }
 
@@ -152,4 +175,10 @@ export async function ensureLimitedAux(): Promise<Tone.Gain> {
   const bus = getMasterFxBus();
   if (!bus.isStarted()) await bus.start();
   return bus.auxInput();
+}
+
+/** Synchronous fallback for engines whose initial start already awaited it. */
+export function limitedAuxIfStarted(): Tone.Gain | null {
+  const bus = getMasterFxBus();
+  return bus.isStarted() ? bus.auxInput() : null;
 }

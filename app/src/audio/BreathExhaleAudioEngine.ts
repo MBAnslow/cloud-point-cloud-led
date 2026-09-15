@@ -3,6 +3,8 @@ import type { BreathParams, LightningSample } from "../state";
 import { getSampleBlob } from "../samples/sampleStorage";
 import { ensureLimitedAux } from "./MasterFxBus";
 
+const MAX_EXHALE_VOICES = 8;
+
 /**
  * One-shot exhale audio: plays `breath.exhaleSample` with random
  * PitchShift (±exhalePitchJitterCents), matching lightning bolt/strike
@@ -13,7 +15,7 @@ export class BreathExhaleAudioEngine {
   private startPromise: Promise<void> | null = null;
   private out: Tone.Gain | null = null;
   private buffers = new Map<string, AudioBuffer>();
-  private pendingLoads = new Set<string>();
+  private pendingLoads = new Map<string, Promise<AudioBuffer | null>>();
   private voices: Array<{
     source: Tone.ToneBufferSource;
     pitchShift: Tone.PitchShift | null;
@@ -22,7 +24,10 @@ export class BreathExhaleAudioEngine {
   }> = [];
 
   async start(): Promise<void> {
-    if (this.started) return;
+    if (this.started) {
+      if (Tone.getContext().rawContext.state !== "running") await Tone.start();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startOnce();
     try {
@@ -43,6 +48,10 @@ export class BreathExhaleAudioEngine {
 
   isStarted(): boolean {
     return this.started;
+  }
+
+  update(): void {
+    if (this.started) this.reap();
   }
 
   preload(p: BreathParams): void {
@@ -71,16 +80,25 @@ export class BreathExhaleAudioEngine {
       void this.ensureBuffer(sample.id);
       return;
     }
-    const jitter = Math.max(0, Number(pitchJitterCents) || 0);
+    const jitter = Math.max(
+      0,
+      Number.isFinite(pitchJitterCents) ? pitchJitterCents : 0,
+    );
     const cents = jitter > 0 ? (Math.random() * 2 - 1) * jitter : 0;
     const semitones = cents / 100;
-    const gainLin = Math.max(0.0001, Math.max(0, gain));
+    const gainLin = Math.min(
+      2,
+      Math.max(0, Number.isFinite(gain) ? gain : 0),
+    );
+    if (gainLin <= 0) return;
 
     const source = new Tone.ToneBufferSource({
       url: buf,
       playbackRate: 1,
+      fadeIn: 0.008,
+      fadeOut: 0.025,
     });
-    const gainNode = new Tone.Gain(gainLin);
+    const gainNode = new Tone.Gain(0);
     let pitchShift: Tone.PitchShift | null = null;
     if (Math.abs(semitones) >= 0.01) {
       pitchShift = new Tone.PitchShift({
@@ -94,8 +112,11 @@ export class BreathExhaleAudioEngine {
       source.connect(gainNode);
     }
     gainNode.connect(this.out);
+    const now = Tone.now();
     try {
-      source.start();
+      source.start(now + 0.003);
+      gainNode.gain.setValueAtTime(0, now);
+      gainNode.gain.linearRampToValueAtTime(gainLin, now + 0.011);
     } catch (err) {
       console.warn("[breath-exhale] start failed", err);
       source.dispose();
@@ -104,11 +125,26 @@ export class BreathExhaleAudioEngine {
       return;
     }
     const dur = buf.duration + (pitchShift ? 0.2 : 0.05);
+    if (this.voices.length >= MAX_EXHALE_VOICES) {
+      const oldest = this.voices[this.voices.length - MAX_EXHALE_VOICES];
+      if (oldest) {
+        const fadeNow = Tone.now();
+        try {
+          oldest.gain.gain.cancelScheduledValues(fadeNow);
+          oldest.gain.gain.setValueAtTime(oldest.gain.gain.value, fadeNow);
+          oldest.gain.gain.linearRampToValueAtTime(0, fadeNow + 0.02);
+          oldest.source.stop(fadeNow + 0.025);
+        } catch {
+          /* already stopped */
+        }
+        oldest.endsAt = Math.min(oldest.endsAt, fadeNow + 0.03);
+      }
+    }
     this.voices.push({
       source,
       pitchShift,
       gain: gainNode,
-      endsAt: Tone.now() + dur,
+      endsAt: now + dur,
     });
     this.reap();
   }
@@ -133,21 +169,27 @@ export class BreathExhaleAudioEngine {
 
   private async ensureBuffer(id: string): Promise<AudioBuffer | null> {
     if (this.buffers.has(id)) return this.buffers.get(id) ?? null;
-    if (this.pendingLoads.has(id)) return null;
-    this.pendingLoads.add(id);
+    const pending = this.pendingLoads.get(id);
+    if (pending) return pending;
+    const load = (async () => {
+      try {
+        const blob = await getSampleBlob(id);
+        if (!blob) return null;
+        const arr = await blob.arrayBuffer();
+        const ctx = Tone.getContext().rawContext as unknown as AudioContext;
+        const buf = await ctx.decodeAudioData(arr.slice(0));
+        this.buffers.set(id, buf);
+        return buf;
+      } catch (err) {
+        console.warn("[breath-exhale] buffer load failed", id, err);
+        return null;
+      }
+    })();
+    this.pendingLoads.set(id, load);
     try {
-      const blob = await getSampleBlob(id);
-      if (!blob) return null;
-      const arr = await blob.arrayBuffer();
-      const ctx = Tone.getContext().rawContext as unknown as AudioContext;
-      const buf = await ctx.decodeAudioData(arr.slice(0));
-      this.buffers.set(id, buf);
-      return buf;
-    } catch (err) {
-      console.warn("[breath-exhale] buffer load failed", id, err);
-      return null;
+      return await load;
     } finally {
-      this.pendingLoads.delete(id);
+      if (this.pendingLoads.get(id) === load) this.pendingLoads.delete(id);
     }
   }
 }
