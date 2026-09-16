@@ -22,6 +22,7 @@ import { useDraggable } from "./useDraggable";
 import { RangeSlider } from "./RangeSlider";
 import { putSampleBlob, deleteSampleBlob } from "../samples/sampleStorage";
 import { invalidateSpriteImage } from "../lighting/spriteImageCache";
+import { getLightningAudioEngine } from "../audio/LightningAudioEngine";
 import {
   isRangePlotChannel,
   plotChannelMax,
@@ -1384,6 +1385,59 @@ function KeyframeEditor({
   );
 }
 
+function AudioAssetControls({
+  sample,
+  onPlay,
+  onGain,
+}: {
+  sample: LightningSample;
+  onPlay: () => void;
+  onGain: (gain: number) => void;
+}) {
+  const gain = sample.gain ?? 1;
+  return (
+    <>
+      <button
+        type="button"
+        style={{
+          ...miniBtn,
+          width: 20,
+          minWidth: 20,
+          padding: 0,
+          lineHeight: 1.2,
+        }}
+        onClick={onPlay}
+        title={`Play ${sample.name}`}
+        aria-label={`Play ${sample.name}`}
+      >
+        ▶
+      </button>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          width: 64,
+          flexShrink: 0,
+        }}
+        title={`Per-sound volume ${Math.round(gain * 100)}%`}
+      >
+        <span style={{ fontSize: 8, opacity: 0.5 }}>vol</span>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={gain}
+          onChange={(e) => onGain(Number(e.target.value))}
+          style={{ width: 44, margin: 0 }}
+          aria-label={`${sample.name} volume`}
+        />
+      </label>
+    </>
+  );
+}
+
 function AudioSection({
   lightning,
   anim,
@@ -1468,6 +1522,20 @@ function AudioSection({
     });
   };
 
+  const playSample = (sample: LightningSample) => {
+    void getLightningAudioEngine()
+      .previewSample(lightning, sample)
+      .catch((err) => console.warn("[lightning] audio preview failed", err));
+  };
+
+  const patchSpriteSoundGain = (id: string, gain: number) => {
+    upd({
+      spriteAudioSamples: (lightning.spriteAudioSamples ?? []).map((sample) =>
+        sample.id === id ? { ...sample, gain } : sample,
+      ),
+    });
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ fontSize: 10, opacity: 0.7, marginBottom: 2 }}>Audio</div>
@@ -1548,6 +1616,20 @@ function AudioSection({
             ? `: ${lightning.strikeSample.name}`
             : " (none)"}
         </span>
+        {lightning.strikeSample && (
+          <AudioAssetControls
+            sample={lightning.strikeSample}
+            onPlay={() => playSample(lightning.strikeSample!)}
+            onGain={(gain) =>
+              upd({
+                strikeSample: {
+                  ...lightning.strikeSample!,
+                  gain,
+                },
+              })
+            }
+          />
+        )}
         <button
           type="button"
           style={miniBtn}
@@ -1616,6 +1698,11 @@ function AudioSection({
           >
             {sample.name}
           </span>
+          <AudioAssetControls
+            sample={sample}
+            onPlay={() => playSample(sample)}
+            onGain={(gain) => patchSpriteSoundGain(sample.id, gain)}
+          />
           <button
             type="button"
             style={miniBtn}
@@ -1690,6 +1777,12 @@ function BoltSamplesColumn({
         s.id === id ? { ...s, ...patch } : s,
       ),
     });
+  };
+
+  const playBolt = (sample: LightningSample) => {
+    void getLightningAudioEngine()
+      .previewBolt(lightning, sample)
+      .catch((err) => console.warn("[lightning] bolt preview failed", err));
   };
 
   const toggleIntensity = (id: string, tag: BoltIntensityTag) => {
@@ -1794,6 +1887,45 @@ function BoltSamplesColumn({
               >
                 {s.name}
               </span>
+              <button
+                type="button"
+                style={{
+                  ...miniBtn,
+                  width: 20,
+                  minWidth: 20,
+                  padding: 0,
+                  lineHeight: 1.2,
+                }}
+                onClick={() => playBolt(s)}
+                title={`Play ${s.name}`}
+                aria-label={`Play ${s.name}`}
+              >
+                ▶
+              </button>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 2,
+                  width: 64,
+                  flexShrink: 0,
+                }}
+                title={`Per-bolt volume ${Math.round((s.gain ?? 1) * 100)}%`}
+              >
+                <span style={{ fontSize: 8, opacity: 0.5 }}>vol</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={s.gain ?? 1}
+                  onChange={(e) =>
+                    patchBolt(s.id, { gain: Number(e.target.value) })
+                  }
+                  style={{ width: 44, margin: 0 }}
+                  aria-label={`${s.name} volume`}
+                />
+              </label>
               <span
                 style={tagGroupStyle}
                 title="Intensity: low / medium / high"
@@ -2009,6 +2141,7 @@ async function ingestFile(file: File): Promise<LightningSample | null> {
       id,
       name: file.name,
       durationSec,
+      gain: 1,
       intensityTags: [],
       lengthTags: [],
     };

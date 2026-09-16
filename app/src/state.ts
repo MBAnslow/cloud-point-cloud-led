@@ -293,6 +293,8 @@ export interface LightningSample {
   id: string;
   name: string;
   durationSec?: number;
+  /** Per-asset playback trim. Defaults to 1 for legacy samples. */
+  gain?: number;
   /**
    * Manual intensity bands this clip suits. Empty = untagged (matches
    * any intensity as a fallback). Tick one or more in the lightning UI.
@@ -3252,10 +3254,15 @@ export function resolveLightningSample(
     typeof input.durationSec === "number" && Number.isFinite(input.durationSec)
       ? input.durationSec
       : undefined;
+  const gain =
+    typeof input.gain === "number" && Number.isFinite(input.gain)
+      ? Math.max(0, Math.min(1, input.gain))
+      : 1;
   return {
     id: input.id,
     name: input.name,
     ...(durationSec !== undefined ? { durationSec } : {}),
+    gain,
     intensityTags: resolveIntensityTags(input.intensityTags),
     lengthTags: resolveLengthTags(input.lengthTags),
   };

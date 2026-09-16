@@ -116,7 +116,41 @@ export class LightningAudioEngine {
         match?.durationMs ?? 600,
       ) ?? p.boltSamples[0];
     if (!sample) return;
-    this.playOneShot(p, sample, strikeIntensity, boltGain, pan);
+    this.playOneShot(
+      p,
+      sample,
+      strikeIntensity,
+      boltGain * this.sampleGain(sample),
+      pan,
+    );
+  }
+
+  /** Audition the raw asset using only its per-bolt volume trim. */
+  async previewBolt(
+    p: LightningParams,
+    sample: LightningSample,
+  ): Promise<void> {
+    return this.previewSample(p, sample);
+  }
+
+  /** Audition any lightning asset before global gain, pitch, or pan. */
+  async previewSample(
+    p: LightningParams,
+    sample: LightningSample,
+  ): Promise<void> {
+    await this.start();
+    const buffer = await this.ensureBoltBuffer(sample.id);
+    if (!buffer) {
+      console.warn("[lightning] bolt preview: missing buffer", sample.id);
+      return;
+    }
+    this.playOneShot(
+      { ...p, boltPitchJitterCents: 0 },
+      sample,
+      1,
+      this.sampleGain(sample),
+      0,
+    );
   }
 
   /**
@@ -132,7 +166,13 @@ export class LightningAudioEngine {
     if (!this.started || !this.out) return;
     const sample = p.strikeSample;
     if (!sample) return;
-    this.playOneShot(p, sample, strikeIntensity, boltGain, pan);
+    this.playOneShot(
+      p,
+      sample,
+      strikeIntensity,
+      boltGain * this.sampleGain(sample),
+      pan,
+    );
   }
 
   /**
@@ -156,7 +196,13 @@ export class LightningAudioEngine {
       return;
     }
     const sample = ready[Math.floor(Math.random() * ready.length)]!;
-    const voice = this.playOneShot(p, sample, intensity, gain, pan);
+    const voice = this.playOneShot(
+      p,
+      sample,
+      intensity,
+      gain * this.sampleGain(sample),
+      pan,
+    );
     if (voice && eventId !== undefined) {
       this.spriteVoices.set(eventId, voice);
     }
@@ -452,6 +498,12 @@ export class LightningAudioEngine {
     } finally {
       if (this.pendingLoads.get(id) === load) this.pendingLoads.delete(id);
     }
+  }
+
+  private sampleGain(sample: LightningSample): number {
+    return typeof sample.gain === "number" && Number.isFinite(sample.gain)
+      ? Math.max(0, Math.min(1, sample.gain))
+      : 1;
   }
 
   private takeBackground(): {
