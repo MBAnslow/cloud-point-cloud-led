@@ -932,7 +932,38 @@ export interface PadParams {
   saturation: number;
   /** Per-engine HPF+LPF chain applied on the master before output. */
   filters: FilterChain;
+  /** Full-patch snapshots interpolated around the 24-hour day. */
+  keyframes: PadKeyframe[];
   notes: PadNote[];
+}
+
+export const PAD_KEYFRAME_PARAMS = [
+  "master",
+  "unisonDetuneCents",
+  "driftRateHz",
+  "driftDepthCents",
+  "attack",
+  "decay",
+  "sustain",
+  "release",
+  "filterHz",
+  "filterQ",
+  "filterEnvAmount",
+  "filterLfoRateHz",
+  "filterLfoDepth",
+  "saturation",
+  "chorusRateHz",
+  "chorusDepth",
+] as const;
+
+export type PadKeyframeParam = (typeof PAD_KEYFRAME_PARAMS)[number];
+export type PadKeyframeValues = Pick<PadParams, PadKeyframeParam>;
+
+export interface PadKeyframe {
+  id: string;
+  /** Position on the circular day timeline, [0, 24). */
+  hour: number;
+  values: PadKeyframeValues;
 }
 
 /** Day-timeline automation params on a sample library track. */
@@ -2184,6 +2215,7 @@ const DEFAULTS = {
     filterLfoDepth: 0,
     saturation: 0.15,
     filters: DEFAULT_FILTER_CHAIN,
+    keyframes: [],
     notes: [],
   } as PadParams,
   samples: {
@@ -2490,6 +2522,46 @@ function resolveDroneParams(
  * Reconcile a saved `pad` payload against the current shape. Missing
  * fields fall back to defaults; unknown fields are ignored.
  */
+function resolvePadKeyframes(
+  input: unknown,
+  fallback: PadParams,
+): PadKeyframe[] {
+  if (!Array.isArray(input)) return [];
+  const out: PadKeyframe[] = [];
+  const ids = new Set<string>();
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const rec = raw as Record<string, unknown>;
+    if (
+      typeof rec.id !== "string" ||
+      !rec.id ||
+      ids.has(rec.id) ||
+      typeof rec.hour !== "number" ||
+      !Number.isFinite(rec.hour) ||
+      !rec.values ||
+      typeof rec.values !== "object"
+    ) {
+      continue;
+    }
+    const valuesRec = rec.values as Record<string, unknown>;
+    const values = {} as PadKeyframeValues;
+    for (const key of PAD_KEYFRAME_PARAMS) {
+      const value = valuesRec[key];
+      values[key] =
+        typeof value === "number" && Number.isFinite(value)
+          ? value
+          : fallback[key];
+    }
+    ids.add(rec.id);
+    out.push({
+      id: rec.id,
+      hour: ((rec.hour % 24) + 24) % 24,
+      values,
+    });
+  }
+  return out.sort((a, b) => a.hour - b.hour);
+}
+
 function resolvePadParams(
   saved: (Partial<PadParams> & Record<string, unknown>) | undefined,
 ): PadParams {
@@ -2501,7 +2573,7 @@ function resolvePadParams(
     const v = (saved as Record<string, unknown>)[k];
     return (v ?? DEFAULTS.pad[k]) as PadParams[K];
   };
-  return {
+  const resolved: PadParams = {
     enabled:
       typeof saved.enabled === "boolean" ? saved.enabled : DEFAULTS.pad.enabled,
     master: pick("master"),
@@ -2523,8 +2595,14 @@ function resolvePadParams(
     filterLfoDepth: pick("filterLfoDepth"),
     saturation: pick("saturation"),
     filters: resolveFilterChain((saved as Record<string, unknown>).filters),
+    keyframes: [],
     notes,
   };
+  resolved.keyframes = resolvePadKeyframes(
+    (saved as Record<string, unknown>).keyframes,
+    resolved,
+  );
+  return resolved;
 }
 
 /**

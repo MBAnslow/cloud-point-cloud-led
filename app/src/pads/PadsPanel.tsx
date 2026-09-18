@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { useSimStore, type PadNote } from "../state";
+import {
+  PAD_KEYFRAME_PARAMS,
+  useSimStore,
+  type PadKeyframeParam,
+  type PadNote,
+  type PadParams,
+} from "../state";
 import { PadSynthPanel } from "./PadSynthPanel";
+import { PadKeyframeEditor } from "./PadKeyframeEditor";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
 import { AudioSoloButton } from "../components/AudioSoloButton";
 import {
@@ -23,6 +30,11 @@ const GUTTER_WIDTH = 56;
 const RESIZE_EDGE_PX = 6;
 const DEFAULT_NOTE_LENGTH_H = 2;
 const MIN_NOTE_LENGTH_H = 0.1;
+const PAD_KEYFRAME_PARAM_SET = new Set<string>(PAD_KEYFRAME_PARAMS);
+
+function isPadKeyframeParam(key: string): key is PadKeyframeParam {
+  return PAD_KEYFRAME_PARAM_SET.has(key);
+}
 
 function midiToName(m: number): string {
   const n = NAMES[((m % 12) + 12) % 12];
@@ -94,9 +106,15 @@ export function PadsPanel() {
   const setSky = useSimStore((s) => s.setSky);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(
+    null,
+  );
+  const [selectedPadParam, setSelectedPadParam] =
+    useState<PadKeyframeParam>("filterHz");
   const [rollWidth, setRollWidth] = useState(900);
   const [horizontalZoom, setHorizontalZoom] = useState(1);
-  const [snapHours, setSnapHours] = useState(0.25);
+  const [snapHours, setSnapHours] = useState(0);
+  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const rollRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const scrubbingRef = useRef(false);
@@ -111,6 +129,12 @@ export function PadsPanel() {
     setRollWidth(el.clientWidth - GUTTER_WIDTH);
     return () => ro.disconnect();
   }, []);
+  useEffect(() => {
+    const element = rollRef.current;
+    if (element && Math.abs(element.scrollLeft - timelineScrollLeft) > 1) {
+      element.scrollLeft = timelineScrollLeft;
+    }
+  }, [timelineScrollLeft, horizontalZoom, rollWidth]);
   const pxPerHour = rollWidth / HOURS;
   const snapHour = useCallback(
     (hour: number) =>
@@ -246,6 +270,42 @@ export function PadsPanel() {
     () => pad.notes.find((n) => n.id === selectedId) ?? null,
     [pad.notes, selectedId],
   );
+  const selectedKeyframe =
+    pad.keyframes.find((frame) => frame.id === selectedKeyframeId) ?? null;
+  const displayedPad: PadParams = selectedKeyframe
+    ? { ...pad, ...selectedKeyframe.values }
+    : pad;
+
+  const patchPadControls = (patch: Partial<PadParams>) => {
+    const globalPatch: Partial<PadParams> = {};
+    let nextValues = selectedKeyframe
+      ? { ...selectedKeyframe.values }
+      : null;
+    let changedKeyframe = false;
+
+    for (const [rawKey, rawValue] of Object.entries(patch)) {
+      if (
+        selectedKeyframe &&
+        nextValues &&
+        isPadKeyframeParam(rawKey) &&
+        typeof rawValue === "number"
+      ) {
+        nextValues[rawKey] = rawValue;
+        changedKeyframe = true;
+      } else {
+        (globalPatch as Record<string, unknown>)[rawKey] = rawValue;
+      }
+    }
+
+    if (changedKeyframe && nextValues && selectedKeyframe) {
+      globalPatch.keyframes = pad.keyframes.map((frame) =>
+        frame.id === selectedKeyframe.id
+          ? { ...frame, values: nextValues }
+          : frame,
+      );
+    }
+    if (Object.keys(globalPatch).length > 0) setPad(globalPatch);
+  };
 
   return (
     <div style={panelStyle}>
@@ -380,6 +440,9 @@ export function PadsPanel() {
           </div>
           <div
             ref={rollRef}
+            onScroll={(event) =>
+              setTimelineScrollLeft(event.currentTarget.scrollLeft)
+            }
             style={{
               display: "flex",
               flex: 1,
@@ -669,7 +732,25 @@ export function PadsPanel() {
           />
         )}
 
-        <PadSynthPanel />
+        <PadKeyframeEditor
+          pad={pad}
+          playheadHour={timeHours}
+          selectedId={selectedKeyframeId}
+          selectedParam={selectedPadParam}
+          timelineWidth={Math.max(400, rollWidth * horizontalZoom)}
+          scrollLeft={timelineScrollLeft}
+          snapHours={snapHours}
+          onSelectedIdChange={setSelectedKeyframeId}
+          onSelectedParamChange={setSelectedPadParam}
+          onKeyframesChange={(keyframes) => setPad({ keyframes })}
+          onScrollLeftChange={setTimelineScrollLeft}
+        />
+
+        <PadSynthPanel
+          pad={displayedPad}
+          onChange={patchPadControls}
+          onParamSelect={setSelectedPadParam}
+        />
       </div>
 
       <span style={{ display: "none" }}>{pxPerHour}</span>

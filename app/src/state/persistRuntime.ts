@@ -24,7 +24,8 @@ export function startPersistence(): void {
   useSimStore.subscribe((state, previous) => {
     const arrangementChanged =
       state.drone.notes !== previous.drone.notes ||
-      state.pad.notes !== previous.pad.notes;
+      state.pad.notes !== previous.pad.notes ||
+      state.pad.keyframes !== previous.pad.keyframes;
     const colorAuthoringChanged =
       state.sky.sunStops !== previous.sky.sunStops ||
       state.sky.moonStops !== previous.sky.moonStops ||

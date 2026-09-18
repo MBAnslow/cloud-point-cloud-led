@@ -6,6 +6,7 @@ import type {
 } from "../state";
 import { isBreathActive } from "../state";
 import { getBreathEffectDrive } from "../lighting/breathEffectDrive";
+import { samplePadAutomation } from "./padAutomation";
 
 interface ParamRange {
   min: number;
@@ -122,12 +123,15 @@ export function modulatedEngineParams(
   nowMs: number,
 ): { drone: DroneParams; pad: PadParams; samples: SamplesParams } {
   void nowMs;
+  // Pad keyframes define the time-of-day patch. Breath modulation remains
+  // the final expressive layer applied on top of that interpolated patch.
+  const padBase = samplePadAutomation(state.pad, state.sky.timeHours);
   // Hard bypass first: disabled means plain slider levels, always.
   if (!state.breathModEnabled) {
-    return { drone: state.drone, pad: state.pad, samples: state.samples };
+    return { drone: state.drone, pad: padBase, samples: state.samples };
   }
   if (!isBreathActive(state.breath, state.sky.timeHours)) {
-    return { drone: state.drone, pad: state.pad, samples: state.samples };
+    return { drone: state.drone, pad: padBase, samples: state.samples };
   }
   const reveal = scaleBreathModReveal(
     getBreathEffectDrive(),
@@ -186,39 +190,39 @@ export function modulatedEngineParams(
     },
   };
   const pad: PadParams = {
-    ...state.pad,
+    ...padBase,
     master: apply(
-      state.pad.master,
+      padBase.master,
       BREATH_MOD_PARAMS["pad.master"],
       g("pad.master"),
       reveal,
     ),
     saturation: apply(
-      state.pad.saturation,
+      padBase.saturation,
       BREATH_MOD_PARAMS["pad.saturation"],
       g("pad.saturation"),
       reveal,
     ),
     unisonDetuneCents: apply(
-      state.pad.unisonDetuneCents,
+      padBase.unisonDetuneCents,
       BREATH_MOD_PARAMS["pad.unisonDetuneCents"],
       g("pad.unisonDetuneCents"),
       reveal,
     ),
     filters: {
       lp: {
-        ...state.pad.filters.lp,
+        ...padBase.filters.lp,
         hz: apply(
-          state.pad.filters.lp.hz,
+          padBase.filters.lp.hz,
           BREATH_MOD_PARAMS["pad.filters.lp.hz"],
           g("pad.filters.lp.hz"),
           reveal,
         ),
       },
       hp: {
-        ...state.pad.filters.hp,
+        ...padBase.filters.hp,
         hz: apply(
-          state.pad.filters.hp.hz,
+          padBase.filters.hp.hz,
           BREATH_MOD_PARAMS["pad.filters.hp.hz"],
           g("pad.filters.hp.hz"),
           reveal,

@@ -1,4 +1,8 @@
-import { useSimStore, type PadWaveform } from "../state";
+import type {
+  PadKeyframeParam,
+  PadParams,
+  PadWaveform,
+} from "../state";
 import { PadFilterResponse } from "./PadFilterResponse";
 
 const WAVEFORMS: PadWaveform[] = ["sine", "sawtooth", "square", "triangle"];
@@ -8,9 +12,19 @@ const WAVEFORMS: PadWaveform[] = ["sine", "sawtooth", "square", "triangle"];
  * Intentionally simpler than the drone synth panel — the pad
  * uses one global patch and no per-note effects.
  */
-export function PadSynthPanel() {
-  const pad = useSimStore((s) => s.pad);
-  const setPad = useSimStore((s) => s.setPad);
+export function PadSynthPanel({
+  pad,
+  onChange,
+  onParamSelect,
+}: {
+  pad: PadParams;
+  onChange: (patch: Partial<PadParams>) => void;
+  onParamSelect: (param: PadKeyframeParam) => void;
+}) {
+  const setAutomated = (param: PadKeyframeParam, value: number) => {
+    onParamSelect(param);
+    onChange({ [param]: value } as Partial<PadParams>);
+  };
 
   return (
     <section style={sectionStyle}>
@@ -20,7 +34,9 @@ export function PadSynthPanel() {
             <span style={{ width: 70 }}>Waveform</span>
             <select
               value={pad.waveform}
-              onChange={(e) => setPad({ waveform: e.target.value as PadWaveform })}
+              onChange={(e) =>
+                onChange({ waveform: e.target.value as PadWaveform })
+              }
               style={selectStyle}
             >
               {WAVEFORMS.map((w) => (
@@ -36,7 +52,7 @@ export function PadSynthPanel() {
             min={1}
             max={8}
             step={1}
-            onChange={(v) => setPad({ unisonCount: Math.round(v) })}
+            onChange={(v) => onChange({ unisonCount: Math.round(v) })}
           />
           <Slider
             label="Spread"
@@ -45,7 +61,7 @@ export function PadSynthPanel() {
             max={50}
             step={0.5}
             unit="c"
-            onChange={(v) => setPad({ unisonDetuneCents: v })}
+            onChange={(v) => setAutomated("unisonDetuneCents", v)}
           />
           <Slider
             label="Drift rate"
@@ -55,7 +71,7 @@ export function PadSynthPanel() {
             step={0.01}
             unit="Hz"
             logScale
-            onChange={(v) => setPad({ driftRateHz: v })}
+            onChange={(v) => setAutomated("driftRateHz", v)}
           />
           <Slider
             label="Drift depth"
@@ -64,7 +80,7 @@ export function PadSynthPanel() {
             max={30}
             step={0.5}
             unit="c"
-            onChange={(v) => setPad({ driftDepthCents: v })}
+            onChange={(v) => setAutomated("driftDepthCents", v)}
           />
           <div style={hint}>
             Each unison osc gets its own random phase — drift feels
@@ -81,7 +97,7 @@ export function PadSynthPanel() {
             step={0.01}
             unit="s"
             logScale
-            onChange={(v) => setPad({ attack: v })}
+            onChange={(v) => setAutomated("attack", v)}
           />
           <Slider
             label="Decay"
@@ -91,7 +107,7 @@ export function PadSynthPanel() {
             step={0.01}
             unit="s"
             logScale
-            onChange={(v) => setPad({ decay: v })}
+            onChange={(v) => setAutomated("decay", v)}
           />
           <Slider
             label="Sustain"
@@ -99,7 +115,7 @@ export function PadSynthPanel() {
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setPad({ sustain: v })}
+            onChange={(v) => setAutomated("sustain", v)}
           />
           <Slider
             label="Release"
@@ -109,7 +125,7 @@ export function PadSynthPanel() {
             step={0.01}
             unit="s"
             logScale
-            onChange={(v) => setPad({ release: v })}
+            onChange={(v) => setAutomated("release", v)}
           />
           <EnvelopeGraph
             a={pad.attack}
@@ -128,7 +144,7 @@ export function PadSynthPanel() {
             step={1}
             unit="Hz"
             logScale
-            onChange={(v) => setPad({ filterHz: v })}
+            onChange={(v) => setAutomated("filterHz", v)}
           />
           <Slider
             label="Q"
@@ -136,7 +152,7 @@ export function PadSynthPanel() {
             min={0.1}
             max={12}
             step={0.05}
-            onChange={(v) => setPad({ filterQ: v })}
+            onChange={(v) => setAutomated("filterQ", v)}
           />
           <Slider
             label="Env"
@@ -145,7 +161,7 @@ export function PadSynthPanel() {
             max={5000}
             step={10}
             unit="c"
-            onChange={(v) => setPad({ filterEnvAmount: v })}
+            onChange={(v) => setAutomated("filterEnvAmount", v)}
           />
           <div style={hint}>
             Env pushes cutoff up while any note is sounding — larger
@@ -159,7 +175,7 @@ export function PadSynthPanel() {
             step={0.01}
             unit="Hz"
             logScale
-            onChange={(v) => setPad({ filterLfoRateHz: v })}
+            onChange={(v) => setAutomated("filterLfoRateHz", v)}
           />
           <Slider
             label="LFO depth"
@@ -167,7 +183,7 @@ export function PadSynthPanel() {
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setPad({ filterLfoDepth: v })}
+            onChange={(v) => setAutomated("filterLfoDepth", v)}
           />
           <div style={hint}>
             LFO sweeps cutoff down from base by up to one octave.
@@ -182,7 +198,7 @@ export function PadSynthPanel() {
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setPad({ saturation: v })}
+            onChange={(v) => setAutomated("saturation", v)}
           />
           <div style={hint}>
             Waveshaper drive; 0 is transparent. Adds warmth and edge
@@ -199,7 +215,7 @@ export function PadSynthPanel() {
             step={0.01}
             unit="Hz"
             logScale
-            onChange={(v) => setPad({ chorusRateHz: v })}
+            onChange={(v) => setAutomated("chorusRateHz", v)}
           />
           <Slider
             label="Depth"
@@ -207,7 +223,7 @@ export function PadSynthPanel() {
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setPad({ chorusDepth: v })}
+            onChange={(v) => setAutomated("chorusDepth", v)}
           />
         </Card>
 
@@ -216,7 +232,7 @@ export function PadSynthPanel() {
             <input
               type="checkbox"
               checked={pad.enabled}
-              onChange={(e) => setPad({ enabled: e.target.checked })}
+              onChange={(e) => onChange({ enabled: e.target.checked })}
             />
             <span>Enable audio</span>
           </label>
@@ -226,7 +242,7 @@ export function PadSynthPanel() {
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setPad({ master: v })}
+            onChange={(v) => setAutomated("master", v)}
           />
         </Card>
       </div>
