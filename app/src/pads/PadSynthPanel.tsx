@@ -64,6 +64,14 @@ export function PadSynthPanel({
             onChange={(v) => setAutomated("unisonDetuneCents", v)}
           />
           <Slider
+            label="Width"
+            value={pad.stereoWidth}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("stereoWidth", v)}
+          />
+          <Slider
             label="Drift rate"
             value={pad.driftRateHz}
             min={0.02}
@@ -83,8 +91,8 @@ export function PadSynthPanel({
             onChange={(v) => setAutomated("driftDepthCents", v)}
           />
           <div style={hint}>
-            Each unison osc gets its own random phase — drift feels
-            organic instead of in lock-step.
+            Unison oscillators are spread across stereo with independent
+            drift phases for a wide, moving sound.
           </div>
         </Card>
 
@@ -164,8 +172,8 @@ export function PadSynthPanel({
             onChange={(v) => setAutomated("filterEnvAmount", v)}
           />
           <div style={hint}>
-            Env pushes cutoff up while any note is sounding — larger
-            values give a more pronounced pad "swell".
+            Every note has its own filter envelope, so new notes can swell
+            without reopening the filter on older notes.
           </div>
           <Slider
             label="LFO rate"
@@ -201,8 +209,8 @@ export function PadSynthPanel({
             onChange={(v) => setAutomated("saturation", v)}
           />
           <div style={hint}>
-            Waveshaper drive; 0 is transparent. Adds warmth and edge
-            before the chorus.
+            Compensated soft drive adds warmth before chorus and ambience
+            without simply making the patch louder.
           </div>
         </Card>
 
@@ -225,6 +233,78 @@ export function PadSynthPanel({
             step={0.01}
             onChange={(v) => setAutomated("chorusDepth", v)}
           />
+        </Card>
+
+        <Card title="Ambience">
+          <Slider
+            label="Reverb"
+            value={pad.reverbMix}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("reverbMix", v)}
+          />
+          <Slider
+            label="Room"
+            value={pad.reverbRoomSize}
+            min={0}
+            max={0.99}
+            step={0.01}
+            onChange={(v) => setAutomated("reverbRoomSize", v)}
+          />
+          <Slider
+            label="Tail tone"
+            value={pad.reverbDampingHz}
+            min={200}
+            max={12000}
+            step={10}
+            unit="Hz"
+            logScale
+            onChange={(v) => setAutomated("reverbDampingHz", v)}
+          />
+          <div style={hint}>
+            Tail tone changes only the reverb: lower values sound darker
+            and softer; higher values sound brighter and airier.
+          </div>
+          <Slider
+            label="Pre-delay"
+            value={pad.reverbPreDelaySec}
+            min={0}
+            max={0.2}
+            step={0.001}
+            unit="s"
+            onChange={(v) => setAutomated("reverbPreDelaySec", v)}
+          />
+          <Slider
+            label="Delay"
+            value={pad.delayMix}
+            min={0}
+            max={0.6}
+            step={0.01}
+            onChange={(v) => setAutomated("delayMix", v)}
+          />
+          <Slider
+            label="Delay time"
+            value={pad.delayTimeSec}
+            min={0.05}
+            max={1.5}
+            step={0.005}
+            unit="s"
+            logScale
+            onChange={(v) => setAutomated("delayTimeSec", v)}
+          />
+          <Slider
+            label="Feedback"
+            value={pad.delayFeedback}
+            min={0}
+            max={0.75}
+            step={0.01}
+            onChange={(v) => setAutomated("delayFeedback", v)}
+          />
+          <div style={hint}>
+            Dry, reverb, and ping-pong delay returns are normalized to keep
+            ambience changes from overloading the output.
+          </div>
         </Card>
 
         <Card title="Master">

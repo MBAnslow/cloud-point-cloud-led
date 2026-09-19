@@ -898,6 +898,8 @@ export interface PadParams {
   unisonCount: number;
   /** Symmetric detune spread across the unison stack, cents. */
   unisonDetuneCents: number;
+  /** Stereo pan spread across the unison stack, [0, 1]. */
+  stereoWidth: number;
   attack: number;
   decay: number;
   sustain: number;
@@ -930,9 +932,23 @@ export interface PadParams {
   filterLfoDepth: number;
   /** Waveshaper drive, [0, 1]. 0 = clean. */
   saturation: number;
+  /** Parallel reverb return level, [0, 1]. */
+  reverbMix: number;
+  /** Freeverb room size, [0, 0.99]. */
+  reverbRoomSize: number;
+  /** Reverb high-frequency damping cutoff, Hz. */
+  reverbDampingHz: number;
+  /** Delay before the reverb tank, seconds. */
+  reverbPreDelaySec: number;
+  /** Parallel stereo delay return level, [0, 1]. */
+  delayMix: number;
+  /** Delay time, seconds. */
+  delayTimeSec: number;
+  /** Delay feedback, [0, 0.9]. */
+  delayFeedback: number;
   /** Per-engine HPF+LPF chain applied on the master before output. */
   filters: FilterChain;
-  /** Full-patch snapshots interpolated around the 24-hour day. */
+  /** Independent per-parameter automation points across the 24-hour day. */
   keyframes: PadKeyframe[];
   notes: PadNote[];
 }
@@ -940,6 +956,7 @@ export interface PadParams {
 export const PAD_KEYFRAME_PARAMS = [
   "master",
   "unisonDetuneCents",
+  "stereoWidth",
   "driftRateHz",
   "driftDepthCents",
   "attack",
@@ -954,16 +971,24 @@ export const PAD_KEYFRAME_PARAMS = [
   "saturation",
   "chorusRateHz",
   "chorusDepth",
+  "reverbMix",
+  "reverbRoomSize",
+  "reverbDampingHz",
+  "reverbPreDelaySec",
+  "delayMix",
+  "delayTimeSec",
+  "delayFeedback",
 ] as const;
 
 export type PadKeyframeParam = (typeof PAD_KEYFRAME_PARAMS)[number];
-export type PadKeyframeValues = Pick<PadParams, PadKeyframeParam>;
 
 export interface PadKeyframe {
   id: string;
   /** Position on the circular day timeline, [0, 24). */
   hour: number;
-  values: PadKeyframeValues;
+  /** The one synth parameter controlled by this point. */
+  param: PadKeyframeParam;
+  value: number;
 }
 
 /** Day-timeline automation params on a sample library track. */
@@ -1527,6 +1552,8 @@ export function fogSeedFromId(id: string): number {
 /** @deprecated Prefer BreathParticipant. Kept for snapshot migration. */
 export type Breather = BreathParticipant;
 
+export type BreathEffectMode = "travellingWave" | "localInflation";
+
 export interface BreathParams {
   enabled: boolean;
   /**
@@ -1536,9 +1563,16 @@ export interface BreathParams {
    */
   paused: boolean;
   /**
-   * Where exhale wave spawns come from (mutually exclusive):
-   * - `internal` — simulated oscillator rising edge into exhale only
-   * - `osc` — TouchDesigner `/breathN/breath_binary` rising edge to 1 only
+   * Spatial breath rendering:
+   * - travellingWave: the original exhale volume crosses the cloud
+   * - localInflation: an inhale-driven volume grows at each participant's
+   *   nearest point on the cloud
+   */
+  effectMode: BreathEffectMode;
+  /**
+   * Mutually exclusive breath source:
+   * - `internal` — simulated per-participant oscillator
+   * - `osc` — TouchDesigner `/breathN/breath_binary`; -1 inhales, +1 exhales
    */
   triggerSource: "internal" | "osc";
   /** Duration of inhale ramp (seconds). */
@@ -1564,6 +1598,15 @@ export interface BreathParams {
   waveDepth: number;
   /** Wave travel speed toward/through the cloud (m/s). */
   waveSpeed: number;
+  /** Maximum radius of a participant-attached local inhale volume (metres). */
+  localInflationRadius: number;
+  /** Peak local inhale mask multiplier, [0, 1]. */
+  localInflationStrength: number;
+  /**
+   * Shapes radius growth from lung fullness. >1 delays expansion;
+   * <1 expands earlier in the inhale.
+   */
+  localInflationGrowthExponent: number;
   /** Falloff exponent for the LED mask (>1 concentrates, <1 broadens). */
   falloffExponent: number;
   /**
@@ -2017,6 +2060,7 @@ const DEFAULTS = {
   breath: {
     enabled: true,
     paused: false,
+    effectMode: "travellingWave",
     triggerSource: "internal",
     inhaleSeconds: 2.5,
     holdPeakSeconds: 0.8,
@@ -2028,6 +2072,9 @@ const DEFAULTS = {
     waveHeight: 0.25,
     waveDepth: 0.25,
     waveSpeed: 1.2,
+    localInflationRadius: 0.65,
+    localInflationStrength: 1,
+    localInflationGrowthExponent: 1,
     falloffExponent: 2.1,
     noiseScale: 2.0,
     noiseAmount: 0.85,
@@ -2200,6 +2247,7 @@ const DEFAULTS = {
     waveform: "sawtooth",
     unisonCount: 3,
     unisonDetuneCents: 12,
+    stereoWidth: 0.7,
     attack: 1.5,
     decay: 0.4,
     sustain: 0.8,
@@ -2214,6 +2262,13 @@ const DEFAULTS = {
     filterLfoRateHz: 0.4,
     filterLfoDepth: 0,
     saturation: 0.15,
+    reverbMix: 0.3,
+    reverbRoomSize: 0.78,
+    reverbDampingHz: 3500,
+    reverbPreDelaySec: 0.035,
+    delayMix: 0.1,
+    delayTimeSec: 0.375,
+    delayFeedback: 0.25,
     filters: DEFAULT_FILTER_CHAIN,
     keyframes: [],
     notes: [],
@@ -2529,37 +2584,71 @@ function resolvePadKeyframes(
   if (!Array.isArray(input)) return [];
   const out: PadKeyframe[] = [];
   const ids = new Set<string>();
+  const params = new Set<string>(PAD_KEYFRAME_PARAMS);
+  const addPoint = (
+    idBase: string,
+    hour: number,
+    param: PadKeyframeParam,
+    value: number,
+  ) => {
+    let id = idBase;
+    let suffix = 2;
+    while (ids.has(id)) id = `${idBase}-${suffix++}`;
+    ids.add(id);
+    out.push({
+      id,
+      hour: ((hour % 24) + 24) % 24,
+      param,
+      value,
+    });
+  };
   for (const raw of input) {
     if (!raw || typeof raw !== "object") continue;
     const rec = raw as Record<string, unknown>;
     if (
       typeof rec.id !== "string" ||
       !rec.id ||
-      ids.has(rec.id) ||
       typeof rec.hour !== "number" ||
-      !Number.isFinite(rec.hour) ||
-      !rec.values ||
-      typeof rec.values !== "object"
+      !Number.isFinite(rec.hour)
     ) {
       continue;
     }
-    const valuesRec = rec.values as Record<string, unknown>;
-    const values = {} as PadKeyframeValues;
-    for (const key of PAD_KEYFRAME_PARAMS) {
-      const value = valuesRec[key];
-      values[key] =
-        typeof value === "number" && Number.isFinite(value)
-          ? value
-          : fallback[key];
+
+    // Current independent-lane format.
+    if (
+      typeof rec.param === "string" &&
+      params.has(rec.param) &&
+      typeof rec.value === "number" &&
+      Number.isFinite(rec.value)
+    ) {
+      addPoint(
+        rec.id,
+        rec.hour,
+        rec.param as PadKeyframeParam,
+        rec.value,
+      );
+      continue;
     }
-    ids.add(rec.id);
-    out.push({
-      id: rec.id,
-      hour: ((rec.hour % 24) + 24) % 24,
-      values,
-    });
+
+    // Legacy full-patch snapshot: expand it into one point per parameter.
+    if (rec.values && typeof rec.values === "object") {
+      const valuesRec = rec.values as Record<string, unknown>;
+      for (const param of PAD_KEYFRAME_PARAMS) {
+        const rawValue = valuesRec[param];
+        const value =
+          typeof rawValue === "number" && Number.isFinite(rawValue)
+            ? rawValue
+            : fallback[param];
+        addPoint(`${rec.id}-${param}`, rec.hour, param, value);
+      }
+    }
   }
-  return out.sort((a, b) => a.hour - b.hour);
+  return out.sort(
+    (a, b) =>
+      a.hour - b.hour ||
+      PAD_KEYFRAME_PARAMS.indexOf(a.param) -
+        PAD_KEYFRAME_PARAMS.indexOf(b.param),
+  );
 }
 
 function resolvePadParams(
@@ -2580,6 +2669,7 @@ function resolvePadParams(
     waveform: pick("waveform"),
     unisonCount: pick("unisonCount"),
     unisonDetuneCents: pick("unisonDetuneCents"),
+    stereoWidth: pick("stereoWidth"),
     attack: pick("attack"),
     decay: pick("decay"),
     sustain: pick("sustain"),
@@ -2594,6 +2684,13 @@ function resolvePadParams(
     filterLfoRateHz: pick("filterLfoRateHz"),
     filterLfoDepth: pick("filterLfoDepth"),
     saturation: pick("saturation"),
+    reverbMix: pick("reverbMix"),
+    reverbRoomSize: pick("reverbRoomSize"),
+    reverbDampingHz: pick("reverbDampingHz"),
+    reverbPreDelaySec: pick("reverbPreDelaySec"),
+    delayMix: pick("delayMix"),
+    delayTimeSec: pick("delayTimeSec"),
+    delayFeedback: pick("delayFeedback"),
     filters: resolveFilterChain((saved as Record<string, unknown>).filters),
     keyframes: [],
     notes,
@@ -2830,6 +2927,11 @@ function resolveBreath(input: unknown): BreathParams {
   return {
     enabled: typeof saved.enabled === "boolean" ? saved.enabled : d.enabled,
     paused: typeof saved.paused === "boolean" ? saved.paused : d.paused,
+    effectMode:
+      saved.effectMode === "localInflation" ||
+      saved.effectMode === "travellingWave"
+        ? saved.effectMode
+        : d.effectMode,
     triggerSource:
       saved.triggerSource === "osc" || saved.triggerSource === "internal"
         ? saved.triggerSource
@@ -2844,6 +2946,30 @@ function resolveBreath(input: unknown): BreathParams {
     waveHeight,
     waveDepth,
     waveSpeed: Math.max(0, Math.min(2, waveSpeed)),
+    localInflationRadius: Math.max(
+      0.02,
+      Math.min(
+        3,
+        num(saved.localInflationRadius, d.localInflationRadius),
+      ),
+    ),
+    localInflationStrength: Math.max(
+      0,
+      Math.min(
+        1,
+        num(saved.localInflationStrength, d.localInflationStrength),
+      ),
+    ),
+    localInflationGrowthExponent: Math.max(
+      0.1,
+      Math.min(
+        4,
+        num(
+          saved.localInflationGrowthExponent,
+          d.localInflationGrowthExponent,
+        ),
+      ),
+    ),
     falloffExponent: Math.max(0, Math.min(10, falloffExponent)),
     noiseScale: Math.max(0.1, Math.min(20, noiseScale)),
     noiseAmount: Math.max(0, Math.min(1, noiseAmount)),

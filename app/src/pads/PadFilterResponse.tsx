@@ -4,19 +4,18 @@ import type { PadParams } from "../state";
 import { getPadEngine } from "../audio/PadEngine";
 
 /**
- * Live magnitude-response plot for the pad's low-pass filter.
+ * Live magnitude-response plot for the pad's per-note low-pass filters.
  *
  * Draws two curves:
  *  - a faint band showing the LFO sweep range (base ↔ base·2^-depth)
- *  - a solid curve at the *current* cutoff, animated every frame so
- *    users see the LFO wobble in real time
+ *  - a solid curve at the brightest live voice's current cutoff
  *
  * Matches the pad engine's cutoff pipeline exactly:
  *   base   = filterHz * 2^(envAmount/1200 * peakEnv)
  *   cutoff = base * 2^(-depth * (0.5 + 0.5·sin(2π·rate·t)))
- * where `peakEnv ∈ [0, 1]` is the maximum ADSR envelope across all
- * live voices (queried from the engine each frame, so probability
- * suppression and release tails are honoured).
+ * Each voice has an independent ADSR and LFO phase. The faint range uses
+ * the peak ADSR as a guide; the solid curve reads the actual brightest
+ * per-note filter from the engine.
  */
 export function PadFilterResponse({ pad }: { pad: PadParams }) {
   const lfoDepth = clamp(0, 1, pad.filterLfoDepth);
@@ -36,6 +35,10 @@ export function PadFilterResponse({ pad }: { pad: PadParams }) {
       const envOct = (Math.max(0, pad.filterEnvAmount) / 1200) * peakEnv;
       const base = clamp(20, 20000, pad.filterHz * Math.pow(2, envOct));
       setBaseCutoff(base);
+      if (engine.isStarted()) {
+        setLiveCutoff(engine.getBrightestFilterCutoff(base));
+        return;
+      }
       if (!lfoActive) {
         setLiveCutoff(base);
         return;

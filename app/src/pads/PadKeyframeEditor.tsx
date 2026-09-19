@@ -8,8 +8,7 @@ import {
 import {
   PAD_AUTOMATION_META,
   clampPadKeyframeValue,
-  padKeyframeValues,
-  samplePadAutomation,
+  samplePadParamAutomation,
   sortedPadKeyframes,
 } from "../audio/padAutomation";
 import { confirmDestructiveClear } from "../components/confirmDestructiveClear";
@@ -20,16 +19,25 @@ const VALUE_TOP_FRAC = 0.08;
 const VALUE_SPAN_FRAC = 0.7;
 const PIANO_GUTTER_WIDTH = 56;
 
+interface MarqueeSelection {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+}
+
 interface Props {
   pad: PadParams;
   playheadHour: number;
   selectedId: string | null;
   selectedParam: PadKeyframeParam;
+  followPlayhead: boolean;
   timelineWidth: number;
   scrollLeft: number;
   snapHours: number;
   onSelectedIdChange: (id: string | null) => void;
   onSelectedParamChange: (param: PadKeyframeParam) => void;
+  onFollowPlayheadChange: (follow: boolean) => void;
   onKeyframesChange: (keyframes: PadKeyframe[]) => void;
   onScrollLeftChange: (scrollLeft: number) => void;
 }
@@ -74,29 +82,69 @@ export function PadKeyframeEditor({
   playheadHour,
   selectedId,
   selectedParam,
+  followPlayhead,
   timelineWidth,
   scrollLeft,
   snapHours,
   onSelectedIdChange,
   onSelectedParamChange,
+  onFollowPlayheadChange,
   onKeyframesChange,
   onScrollLeftChange,
 }: Props) {
   const plotRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
-  const frames = useMemo(
-    () => sortedPadKeyframes(pad.keyframes),
-    [pad.keyframes],
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(),
   );
-  const selected = frames.find((frame) => frame.id === selectedId) ?? null;
+  const [marquee, setMarquee] = useState<MarqueeSelection | null>(null);
+  const marqueeIdsRef = useRef<Set<string>>(new Set());
+  const frames = useMemo(
+    () => sortedPadKeyframes(pad.keyframes, selectedParam),
+    [pad.keyframes, selectedParam],
+  );
+  const selected =
+    pad.keyframes.find((frame) => frame.id === selectedId) ?? null;
   const meta = PAD_AUTOMATION_META[selectedParam];
+  const selectionCount =
+    selectedIds.size > 0 ? selectedIds.size : selected ? 1 : 0;
 
   useEffect(() => {
-    if (selectedId && !pad.keyframes.some((frame) => frame.id === selectedId)) {
+    if (
+      selectedId &&
+      !pad.keyframes.some(
+        (frame) =>
+          frame.id === selectedId && frame.param === selectedParam,
+      )
+    ) {
       onSelectedIdChange(null);
     }
-  }, [onSelectedIdChange, pad.keyframes, selectedId]);
+  }, [onSelectedIdChange, pad.keyframes, selectedId, selectedParam]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setMarquee(null);
+  }, [selectedParam]);
+
+  useEffect(() => {
+    const validIds = new Set(frames.map((frame) => frame.id));
+    setSelectedIds((previous) => {
+      const next = new Set(
+        [...previous].filter((id) => validIds.has(id)),
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [frames]);
+
+  useEffect(() => {
+    if (selectedId && !selectedIds.has(selectedId)) {
+      const frame = pad.keyframes.find(
+        (item) => item.id === selectedId && item.param === selectedParam,
+      );
+      if (frame) setSelectedIds(new Set([selectedId]));
+    }
+  }, [pad.keyframes, selectedId, selectedIds, selectedParam]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -106,20 +154,27 @@ export function PadKeyframeEditor({
   }, [scrollLeft, timelineWidth]);
 
   const curvePoints = useMemo(() => {
-    // Every keyframe hour must be an actual polyline vertex. Sampling only
-    // at fixed intervals cuts across sharp peaks when a keyframe falls
-    // between samples, making the curve appear detached from its handle.
-    const hours = [...new Set([0, HOURS, ...frames.map((frame) => frame.hour)])]
-      .sort((a, b) => a - b);
-    const points: string[] = [];
-    for (const hour of hours) {
-      const value = samplePadAutomation(pad, hour)[selectedParam];
+    const point = (hour: number, value: number) => {
       const y =
         (VALUE_TOP_FRAC +
           (1 - valueFraction(selectedParam, value)) * VALUE_SPAN_FRAC) *
         100;
-      points.push(`${(hour / HOURS) * 100},${y}`);
+      return `${(hour / HOURS) * 100},${y}`;
+    };
+    const base = clampPadKeyframeValue(selectedParam, pad[selectedParam]);
+    if (frames.length === 0) {
+      return `${point(0, base)} ${point(HOURS, base)}`;
     }
+    const points: string[] = [point(0, base)];
+    const first = frames[0];
+    if (first.hour > 0) points.push(point(first.hour, base));
+    // Duplicate X at the first point intentionally shows the base→lane
+    // change as a vertical edge instead of altering the earlier track.
+    points.push(point(first.hour, first.value));
+    for (let i = 1; i < frames.length; i++) {
+      points.push(point(frames[i].hour, frames[i].value));
+    }
+    points.push(point(HOURS, frames[frames.length - 1].value));
     return points.join(" ");
   }, [frames, pad, selectedParam]);
 
@@ -129,15 +184,100 @@ export function PadKeyframeEditor({
     return (Math.round(normalized / snapHours) * snapHours) % HOURS;
   };
 
+  const plotFractionAt = (clientX: number, clientY: number) => {
+    const rect = plotRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return {
+      x: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const beginMarquee = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("button")) return;
+    const point = plotFractionAt(event.clientX, event.clientY);
+    const next = {
+      startX: point.x,
+      startY: point.y,
+      currentX: point.x,
+      currentY: point.y,
+    };
+    marqueeIdsRef.current = new Set();
+    setSelectedIds(new Set());
+    setMarquee(next);
+    onSelectedIdChange(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const updateMarquee = (clientX: number, clientY: number) => {
+    if (!marquee) return;
+    const point = plotFractionAt(clientX, clientY);
+    const next = {
+      ...marquee,
+      currentX: point.x,
+      currentY: point.y,
+    };
+    const minX = Math.min(next.startX, next.currentX);
+    const maxX = Math.max(next.startX, next.currentX);
+    const minY = Math.min(next.startY, next.currentY);
+    const maxY = Math.max(next.startY, next.currentY);
+    const ids = new Set(
+      frames
+        .filter((frame) => {
+          const x = frame.hour / HOURS;
+          const y =
+            VALUE_TOP_FRAC +
+            (1 - valueFraction(selectedParam, frame.value)) *
+              VALUE_SPAN_FRAC;
+          return x >= minX && x <= maxX && y >= minY && y <= maxY;
+        })
+        .map((frame) => frame.id),
+    );
+    marqueeIdsRef.current = ids;
+    setSelectedIds(ids);
+    setMarquee(next);
+  };
+
+  const finishPointerInteraction = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    if (dragId) {
+      setDragId(null);
+      return;
+    }
+    if (!marquee) return;
+    const ids = [...marqueeIdsRef.current];
+    onSelectedIdChange(ids[0] ?? null);
+    setMarquee(null);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      /* already released */
+    }
+  };
+
   const addAtPlayhead = () => {
     const hour = snapHour(playheadHour);
-    const sampled = samplePadAutomation(pad, hour);
+    const value = samplePadParamAutomation(pad, selectedParam, hour);
+    const existing = frames.find(
+      (frame) => Math.abs(frame.hour - hour) < 1e-6,
+    );
+    if (existing) {
+      updateFrame(existing.id, { value });
+      setSelectedIds(new Set([existing.id]));
+      onSelectedIdChange(existing.id);
+      return;
+    }
     const frame: PadKeyframe = {
       id: newKeyframeId(),
       hour,
-      values: padKeyframeValues(sampled),
+      param: selectedParam,
+      value,
     };
     onKeyframesChange(sortedPadKeyframes([...pad.keyframes, frame]));
+    setSelectedIds(new Set([frame.id]));
     onSelectedIdChange(frame.id);
   };
 
@@ -169,14 +309,25 @@ export function PadKeyframeEditor({
     const value = valueFromFraction(selectedParam, 1 - valueY);
     updateFrame(frame.id, {
       hour,
-      values: { ...frame.values, [selectedParam]: value },
+      value,
     });
   };
 
   const deleteSelected = () => {
-    if (!selected) return;
-    onKeyframesChange(pad.keyframes.filter((frame) => frame.id !== selected.id));
+    const ids =
+      selectedIds.size > 0
+        ? selectedIds
+        : selected
+          ? new Set([selected.id])
+          : new Set<string>();
+    if (ids.size === 0) return;
+    const remaining = pad.keyframes.filter(
+      (frame) => !ids.has(frame.id),
+    );
+    onKeyframesChange(remaining);
+    setSelectedIds(new Set());
     onSelectedIdChange(null);
+    onFollowPlayheadChange(remaining.length > 0);
   };
 
   const clearAll = () => {
@@ -185,7 +336,25 @@ export function PadKeyframeEditor({
       confirmDestructiveClear(`all ${pad.keyframes.length} pad keyframes`)
     ) {
       onKeyframesChange([]);
+      setSelectedIds(new Set());
       onSelectedIdChange(null);
+      onFollowPlayheadChange(false);
+    }
+  };
+
+  const clearCurve = () => {
+    if (
+      frames.length > 0 &&
+      confirmDestructiveClear(`all ${meta.label} pad keyframes`)
+    ) {
+      onKeyframesChange(
+        pad.keyframes.filter((frame) => frame.param !== selectedParam),
+      );
+      setSelectedIds(new Set());
+      onSelectedIdChange(null);
+      onFollowPlayheadChange(
+        pad.keyframes.some((frame) => frame.param !== selectedParam),
+      );
     }
   };
 
@@ -194,15 +363,21 @@ export function PadKeyframeEditor({
       <div style={toolbarStyle}>
         <strong style={{ fontSize: 12 }}>Pad keyframes</strong>
         <span style={{ fontSize: 10, opacity: 0.55 }}>
-          24-hour continuous patch automation
+          Independent 24-hour parameter automation
         </span>
         <label style={toolbarLabelStyle}>
           Curve
           <select
             value={selectedParam}
-            onChange={(event) =>
-              onSelectedParamChange(event.target.value as PadKeyframeParam)
-            }
+            onChange={(event) => {
+              onSelectedParamChange(
+                event.target.value as PadKeyframeParam,
+              );
+              if (selectedId) {
+                onSelectedIdChange(null);
+                onFollowPlayheadChange(pad.keyframes.length > 0);
+              }
+            }}
             style={selectStyle}
           >
             {PAD_KEYFRAME_PARAMS.map((param) => (
@@ -213,16 +388,51 @@ export function PadKeyframeEditor({
           </select>
         </label>
         <button type="button" style={buttonStyle} onClick={addAtPlayhead}>
-          + keyframe at {fmtTime(playheadHour)}
+          + {meta.label} keyframe at {fmtTime(playheadHour)}
         </button>
         <button
           type="button"
           style={{
             ...buttonStyle,
-            borderColor: !selected ? "rgba(192,132,252,0.75)" : undefined,
-            background: !selected ? "rgba(192,132,252,0.25)" : undefined,
+            borderColor:
+              followPlayhead && !selected
+                ? "rgba(255,225,77,0.8)"
+                : undefined,
+            background:
+              followPlayhead && !selected
+                ? "rgba(255,225,77,0.18)"
+                : undefined,
           }}
-          onClick={() => onSelectedIdChange(null)}
+          onClick={() => {
+            onSelectedIdChange(null);
+            onFollowPlayheadChange(true);
+          }}
+          disabled={pad.keyframes.length === 0}
+          title={
+            pad.keyframes.length > 0
+              ? "Show the interpolated pad values at the current playhead"
+              : "Add a keyframe to enable interpolated live values"
+          }
+        >
+          Live values
+        </button>
+        <button
+          type="button"
+          style={{
+            ...buttonStyle,
+            borderColor:
+              !followPlayhead && !selected
+                ? "rgba(192,132,252,0.75)"
+                : undefined,
+            background:
+              !followPlayhead && !selected
+                ? "rgba(192,132,252,0.25)"
+                : undefined,
+          }}
+          onClick={() => {
+            onSelectedIdChange(null);
+            onFollowPlayheadChange(false);
+          }}
           title="Edit the static base patch instead of a keyframe"
         >
           Base patch
@@ -230,10 +440,18 @@ export function PadKeyframeEditor({
         <button
           type="button"
           style={buttonStyle}
-          disabled={!selected}
+          disabled={selectionCount === 0}
           onClick={deleteSelected}
         >
-          Delete selected
+          Delete selected{selectionCount > 1 ? ` (${selectionCount})` : ""}
+        </button>
+        <button
+          type="button"
+          style={buttonStyle}
+          disabled={frames.length === 0}
+          onClick={clearCurve}
+        >
+          Clear curve
         </button>
         <button
           type="button"
@@ -257,11 +475,23 @@ export function PadKeyframeEditor({
         </div>
         <div
           ref={plotRef}
-          onPointerMove={(event) => updateDrag(event.clientX, event.clientY)}
-          onPointerUp={() => setDragId(null)}
-          onPointerCancel={() => setDragId(null)}
+          onPointerDown={beginMarquee}
+          onPointerMove={(event) => {
+            if (dragId) updateDrag(event.clientX, event.clientY);
+            else updateMarquee(event.clientX, event.clientY);
+          }}
+          onPointerUp={finishPointerInteraction}
+          onPointerCancel={(event) => {
+            setDragId(null);
+            setMarquee(null);
+            try {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            } catch {
+              /* already released */
+            }
+          }}
           style={{ ...plotStyle, width: timelineWidth }}
-          title="Select a point; drag horizontally for time and vertically for value"
+          title="Drag empty space to box-select points; drag a point to edit its time and value"
         >
         <svg
           viewBox="0 0 100 100"
@@ -302,23 +532,56 @@ export function PadKeyframeEditor({
           }}
         />
 
+        {marquee && (
+          <div
+            style={{
+              position: "absolute",
+              left: `${Math.min(marquee.startX, marquee.currentX) * 100}%`,
+              top: `${Math.min(marquee.startY, marquee.currentY) * 100}%`,
+              width: `${Math.abs(marquee.currentX - marquee.startX) * 100}%`,
+              height: `${Math.abs(marquee.currentY - marquee.startY) * 100}%`,
+              border: "1px solid rgba(255,225,77,0.9)",
+              background: "rgba(255,225,77,0.12)",
+              boxSizing: "border-box",
+              pointerEvents: "none",
+              zIndex: 4,
+            }}
+          />
+        )}
+
         {frames.map((frame) => {
           const y =
             VALUE_TOP_FRAC +
-            (1 - valueFraction(selectedParam, frame.values[selectedParam])) *
+            (1 - valueFraction(selectedParam, frame.value)) *
               VALUE_SPAN_FRAC;
-          const active = frame.id === selectedId;
+          const active =
+            selectedIds.has(frame.id) || frame.id === selectedId;
           return (
             <button
               key={frame.id}
               type="button"
               onPointerDown={(event) => {
+                event.stopPropagation();
+                let next = selectedIds;
+                if (event.shiftKey || event.metaKey || event.ctrlKey) {
+                  next = new Set(selectedIds);
+                  if (next.has(frame.id)) next.delete(frame.id);
+                  else next.add(frame.id);
+                  setSelectedIds(next);
+                } else if (!selectedIds.has(frame.id)) {
+                  next = new Set([frame.id]);
+                  setSelectedIds(next);
+                }
+                if (!next.has(frame.id)) {
+                  onSelectedIdChange([...next][0] ?? null);
+                  event.preventDefault();
+                  return;
+                }
                 setDragId(frame.id);
                 onSelectedIdChange(frame.id);
                 event.currentTarget.setPointerCapture(event.pointerId);
                 event.preventDefault();
               }}
-              onClick={() => onSelectedIdChange(frame.id)}
               style={{
                 position: "absolute",
                 left: `calc(${(frame.hour / HOURS) * 100}% - 7px)`,
@@ -337,9 +600,7 @@ export function PadKeyframeEditor({
                 cursor: "move",
                 touchAction: "none",
               }}
-              title={`${fmtTime(frame.hour)} · ${meta.label} ${frame.values[
-                selectedParam
-              ].toFixed(2)}`}
+              title={`${fmtTime(frame.hour)} · ${meta.label} ${frame.value.toFixed(2)}`}
               aria-label={`Pad keyframe at ${fmtTime(frame.hour)}`}
             />
           );
@@ -356,18 +617,34 @@ export function PadKeyframeEditor({
       </div>
 
       <div style={statusStyle}>
-        {selected ? (
+        {selectionCount > 1 ? (
           <>
-            Editing keyframe at <strong>{fmtTime(selected.hour)}</strong>
+            Selected <strong>{selectionCount}</strong> {meta.label} keyframes
+            <span style={{ opacity: 0.6 }}>
+              Delete them together or drag again to replace the selection.
+            </span>
+          </>
+        ) : selected ? (
+          <>
+            Editing <strong>{PAD_AUTOMATION_META[selected.param].label}</strong>
+            keyframe at <strong>{fmtTime(selected.hour)}</strong>
             <span style={{ opacity: 0.6 }}>
               Drag its point or use the pad controls below.
+            </span>
+          </>
+        ) : followPlayhead ? (
+          <>
+            Following playhead at <strong>{fmtTime(playheadHour)}</strong>
+            <span style={{ opacity: 0.6 }}>
+              Controls show interpolated values. Moving one creates a point
+              in only that parameter lane.
             </span>
           </>
         ) : (
           <>
             Editing <strong>base patch</strong>
             <span style={{ opacity: 0.6 }}>
-              Select or add a keyframe to edit its snapshot.
+              Select or add an independent parameter keyframe.
             </span>
           </>
         )}

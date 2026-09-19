@@ -9,7 +9,11 @@ import {
   sharedBreathWaveController,
   waveLocalFrame,
 } from "../lighting/breathWaves";
-import { isBreathActive, useSimStore } from "../state";
+import {
+  MAX_BREATH_PARTICIPANTS,
+  isBreathActive,
+  useSimStore,
+} from "../state";
 
 /** Concurrent travelling spheroids we keep mesh slots for. */
 const MAX_WAVE_MESHES = 16;
@@ -26,6 +30,7 @@ export function BreathArea() {
   const cloud = useSimStore((s) => s.cloud);
   const ledViewMode = useSimStore((s) => s.ledViewMode);
   const waveMeshesRef = useRef<(Mesh | null)[]>([]);
+  const inflationMeshesRef = useRef<(Mesh | null)[]>([]);
   const basisMat = useMemo(() => new Matrix4(), []);
   const rightV = useMemo(() => new Vector3(), []);
   const upV = useMemo(() => new Vector3(), []);
@@ -70,6 +75,7 @@ export function BreathArea() {
   useFrame(() => {
     const now = performance.now();
     const waves = sharedBreathWaveController.getWaves();
+    const inflations = sharedBreathWaveController.getInflations();
     const { width, height, depth } = liveWaveExtents(breath);
     const sx = Math.max(0.001, width);
     const sy = Math.max(0.001, height);
@@ -96,6 +102,25 @@ export function BreathArea() {
       const mat = mesh.material as MeshBasicMaterial;
       mat.color.set(w.color);
       mat.opacity = 0.06 + 0.28 * strength;
+    }
+    for (let i = 0; i < inflationMeshesRef.current.length; i++) {
+      const mesh = inflationMeshesRef.current[i];
+      if (!mesh) continue;
+      const inflation = inflations[i];
+      if (breath.effectMode !== "localInflation" || !inflation) {
+        mesh.visible = false;
+        continue;
+      }
+      mesh.visible = true;
+      mesh.position.set(
+        inflation.origin[0],
+        inflation.origin[1],
+        inflation.origin[2],
+      );
+      mesh.scale.setScalar(Math.max(0.001, inflation.radius));
+      const mat = mesh.material as MeshBasicMaterial;
+      mat.color.set(inflation.color);
+      mat.opacity = 0.05 + 0.3 * inflation.strength;
     }
   });
 
@@ -140,6 +165,25 @@ export function BreathArea() {
           key={`wave-${i}`}
           ref={(el) => {
             waveMeshesRef.current[i] = el;
+          }}
+          renderOrder={21}
+          visible={false}
+        >
+          <sphereGeometry args={[1, 24, 16]} />
+          <meshBasicMaterial
+            color="#8fd8ff"
+            transparent
+            opacity={0.14}
+            depthWrite={false}
+            toneMapped={false}
+          />
+        </mesh>
+      ))}
+      {Array.from({ length: MAX_BREATH_PARTICIPANTS }, (_, i) => (
+        <mesh
+          key={`inflation-${i}`}
+          ref={(el) => {
+            inflationMeshesRef.current[i] = el;
           }}
           renderOrder={21}
           visible={false}

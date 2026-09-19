@@ -4,15 +4,14 @@ import { sharedBreathWaveController } from "../lighting/breathWaves";
 import { getBreathExhaleAudioEngine } from "./BreathExhaleAudioEngine";
 
 /**
- * Fires the breath-out one-shot once per newly spawned travelling wave
- * (whichever exclusive trigger source is selected). Same bornMs watermark
- * pattern as LightningAudioRuntime.
+ * Fires the breath-out one-shot for exhale onsets in either spatial mode.
+ * Local inhale mode emits the event without spawning a travelling wave.
  */
 export function BreathExhaleAudioRuntime(): null {
   useEffect(() => {
     const engine = getBreathExhaleAudioEngine();
     let raf = 0;
-    let lastMaxBorn = -Infinity;
+    let lastEventId = 0;
     let unlockedOnce = engine.isStarted();
     let unlocking = false;
     let firstFrame = true;
@@ -49,10 +48,10 @@ export function BreathExhaleAudioRuntime(): null {
       const breath = state.breath;
       engine.preload(breath);
 
-      const waves = sharedBreathWaveController.getWaves();
+      const events = sharedBreathWaveController.getExhaleEvents();
       if (firstFrame) {
-        for (const w of waves) {
-          if (w.bornMs > lastMaxBorn) lastMaxBorn = w.bornMs;
+        for (const event of events) {
+          if (event.id > lastEventId) lastEventId = event.id;
         }
         firstFrame = false;
         return;
@@ -60,20 +59,20 @@ export function BreathExhaleAudioRuntime(): null {
 
       const active = isBreathActive(breath, state.sky.timeHours);
       if (!breath.enabled || !active) {
-        for (const w of waves) {
-          if (w.bornMs > lastMaxBorn) lastMaxBorn = w.bornMs;
+        for (const event of events) {
+          if (event.id > lastEventId) lastEventId = event.id;
         }
         return;
       }
 
-      let newMax = lastMaxBorn;
-      for (const w of waves) {
-        if (w.bornMs > lastMaxBorn) {
+      let newMax = lastEventId;
+      for (const event of events) {
+        if (event.id > lastEventId) {
           engine.triggerExhale(breath);
-          if (w.bornMs > newMax) newMax = w.bornMs;
+          if (event.id > newMax) newMax = event.id;
         }
       }
-      lastMaxBorn = newMax;
+      lastEventId = newMax;
     };
     raf = requestAnimationFrame(tick);
 

@@ -62,6 +62,12 @@ const PARAM_HELP = {
     "Vertical offset of participants from the horizon plane. Positive raises them above the plane, negative lowers them.",
   cloudDistance:
     "Radial distance from the cloud center out to the participants on the horizon circle.",
+  localInflationRadius:
+    "Maximum radius of the participant-attached inhale volume. The radius grows from zero during inhale and shrinks during exhale.",
+  localInflationStrength:
+    "Peak reveal and breath-mod strength inside the local inhale volume.",
+  localInflationGrowthExponent:
+    "Shapes inflation timing. Above 1 delays most growth until later in the inhale; below 1 expands earlier.",
   waveWidth:
     "Lateral half-size of the breath volume, across the travel path (metres).",
   waveHeight:
@@ -250,7 +256,39 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
           </label>
           <label
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-            title="Internal: simulated oscillator exhale onset only. OSC: TouchDesigner breath_binary rising edges only. The two never mix."
+            title="Choose the original travelling exhale wave or a participant-attached region that grows on inhale."
+          >
+            effect
+            <select
+              value={breath.effectMode}
+              onChange={(e) =>
+                setBreath({
+                  effectMode:
+                    e.target.value === "localInflation"
+                      ? "localInflation"
+                      : "travellingWave",
+                })
+              }
+              style={{
+                background: "rgba(0,0,0,0.35)",
+                color: "inherit",
+                border: "1px solid rgba(255,255,255,0.15)",
+                borderRadius: 4,
+                padding: "1px 4px",
+                fontSize: 11,
+              }}
+            >
+              <option value="travellingWave">Travelling exhale</option>
+              <option value="localInflation">Local inhale inflation</option>
+            </select>
+          </label>
+          <label
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            title={
+              breath.effectMode === "localInflation"
+                ? "Internal uses the simulated inhale level. OSC uses -1 to inflate, +1 to deflate and trigger the exhale sound, and 0 to hold. The two sources never mix."
+                : "Internal: simulated oscillator exhale onset only. OSC: TouchDesigner breath_binary rising edges only. The two never mix."
+            }
           >
             trigger
             <select
@@ -514,7 +552,13 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
               />
             </Section>
 
-            <Section title="Horizon Waves">
+            <Section
+              title={
+                breath.effectMode === "localInflation"
+                  ? "Local Inhale Inflation"
+                  : "Horizon Waves"
+              }
+            >
               <SliderField
                 label="horizon height"
                 tooltip={PARAM_HELP.horizonDistance}
@@ -533,42 +577,82 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                 step={0.05}
                 onChange={(v) => setBreath({ cloudDistance: v })}
               />
-              <SliderField
-                label="wave width"
-                tooltip={PARAM_HELP.waveWidth}
-                value={breath.waveWidth}
-                min={0}
-                max={0.5}
-                step={0.01}
-                onChange={(v) => setBreath({ waveWidth: v })}
-              />
-              <SliderField
-                label="wave height"
-                tooltip={PARAM_HELP.waveHeight}
-                value={breath.waveHeight}
-                min={0}
-                max={0.5}
-                step={0.01}
-                onChange={(v) => setBreath({ waveHeight: v })}
-              />
-              <SliderField
-                label="wave depth"
-                tooltip={PARAM_HELP.waveDepth}
-                value={breath.waveDepth}
-                min={0}
-                max={2}
-                step={0.01}
-                onChange={(v) => setBreath({ waveDepth: v })}
-              />
-              <SliderField
-                label="wave speed"
-                tooltip={PARAM_HELP.waveSpeed}
-                value={breath.waveSpeed}
-                min={0}
-                max={2}
-                step={0.05}
-                onChange={(v) => setBreath({ waveSpeed: v })}
-              />
+              {breath.effectMode === "travellingWave" ? (
+                <>
+                  <SliderField
+                    label="wave width"
+                    tooltip={PARAM_HELP.waveWidth}
+                    value={breath.waveWidth}
+                    min={0}
+                    max={0.5}
+                    step={0.01}
+                    onChange={(v) => setBreath({ waveWidth: v })}
+                  />
+                  <SliderField
+                    label="wave height"
+                    tooltip={PARAM_HELP.waveHeight}
+                    value={breath.waveHeight}
+                    min={0}
+                    max={0.5}
+                    step={0.01}
+                    onChange={(v) => setBreath({ waveHeight: v })}
+                  />
+                  <SliderField
+                    label="wave depth"
+                    tooltip={PARAM_HELP.waveDepth}
+                    value={breath.waveDepth}
+                    min={0}
+                    max={2}
+                    step={0.01}
+                    onChange={(v) => setBreath({ waveDepth: v })}
+                  />
+                  <SliderField
+                    label="wave speed"
+                    tooltip={PARAM_HELP.waveSpeed}
+                    value={breath.waveSpeed}
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    onChange={(v) => setBreath({ waveSpeed: v })}
+                  />
+                </>
+              ) : (
+                <>
+                  <SliderField
+                    label="max radius"
+                    tooltip={PARAM_HELP.localInflationRadius}
+                    value={breath.localInflationRadius}
+                    min={0.02}
+                    max={3}
+                    step={0.01}
+                    onChange={(v) =>
+                      setBreath({ localInflationRadius: v })
+                    }
+                  />
+                  <SliderField
+                    label="strength"
+                    tooltip={PARAM_HELP.localInflationStrength}
+                    value={breath.localInflationStrength}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    onChange={(v) =>
+                      setBreath({ localInflationStrength: v })
+                    }
+                  />
+                  <SliderField
+                    label="growth curve"
+                    tooltip={PARAM_HELP.localInflationGrowthExponent}
+                    value={breath.localInflationGrowthExponent}
+                    min={0.1}
+                    max={4}
+                    step={0.05}
+                    onChange={(v) =>
+                      setBreath({ localInflationGrowthExponent: v })
+                    }
+                  />
+                </>
+              )}
               <SliderField
                 label="falloff"
                 tooltip={PARAM_HELP.falloff}
@@ -632,15 +716,17 @@ export function BreathOscillator({ visible: mounted = true }: { visible?: boolea
                 step={0.01}
                 onChange={(v) => setBreath({ rimAmount: v })}
               />
-              <SliderField
-                label="rim arc"
-                tooltip={PARAM_HELP.rimArc}
-                value={breath.rimArcDegrees}
-                min={0}
-                max={360}
-                step={1}
-                onChange={(v) => setBreath({ rimArcDegrees: v })}
-              />
+              {breath.effectMode === "travellingWave" && (
+                <SliderField
+                  label="rim arc"
+                  tooltip={PARAM_HELP.rimArc}
+                  value={breath.rimArcDegrees}
+                  min={0}
+                  max={360}
+                  step={1}
+                  onChange={(v) => setBreath({ rimArcDegrees: v })}
+                />
+              )}
               <SliderField
                 label="breath/time mix"
                 tooltip={PARAM_HELP.breathTimeMix}

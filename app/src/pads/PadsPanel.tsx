@@ -12,6 +12,10 @@ import { PadKeyframeEditor } from "./PadKeyframeEditor";
 import { ActivePeriodBand, PeriodTransportButtons } from "../components/PeriodOverlay";
 import { AudioSoloButton } from "../components/AudioSoloButton";
 import {
+  samplePadAutomation,
+  sortedPadKeyframes,
+} from "../audio/padAutomation";
+import {
   confirmDestructiveClear,
   destructiveButtonStyle,
 } from "../components/confirmDestructiveClear";
@@ -52,6 +56,9 @@ function fmtTime(hour: number): string {
 }
 function newNoteId(): string {
   return `pad-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
+}
+function newKeyframeId(): string {
+  return `pad-kf-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
 }
 function rowToMidi(row: number): number {
   return MIDI_HIGH - row;
@@ -109,6 +116,9 @@ export function PadsPanel() {
   const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(
     null,
   );
+  const [followPlayhead, setFollowPlayhead] = useState(
+    () => pad.keyframes.length > 0,
+  );
   const [selectedPadParam, setSelectedPadParam] =
     useState<PadKeyframeParam>("filterHz");
   const [rollWidth, setRollWidth] = useState(900);
@@ -135,6 +145,11 @@ export function PadsPanel() {
       element.scrollLeft = timelineScrollLeft;
     }
   }, [timelineScrollLeft, horizontalZoom, rollWidth]);
+  useEffect(() => {
+    if (pad.keyframes.length === 0 && followPlayhead) {
+      setFollowPlayhead(false);
+    }
+  }, [followPlayhead, pad.keyframes.length]);
   const pxPerHour = rollWidth / HOURS;
   const snapHour = useCallback(
     (hour: number) =>
@@ -272,37 +287,72 @@ export function PadsPanel() {
   );
   const selectedKeyframe =
     pad.keyframes.find((frame) => frame.id === selectedKeyframeId) ?? null;
-  const displayedPad: PadParams = selectedKeyframe
-    ? { ...pad, ...selectedKeyframe.values }
-    : pad;
+  const displayedPad: PadParams = useMemo(
+    () => {
+      if (selectedKeyframe) {
+        return {
+          ...samplePadAutomation(pad, selectedKeyframe.hour),
+          [selectedKeyframe.param]: selectedKeyframe.value,
+        };
+      }
+      return followPlayhead
+        ? samplePadAutomation(pad, timeHours)
+        : pad;
+    },
+    [followPlayhead, pad, selectedKeyframe, timeHours],
+  );
 
   const patchPadControls = (patch: Partial<PadParams>) => {
     const globalPatch: Partial<PadParams> = {};
-    let nextValues = selectedKeyframe
-      ? { ...selectedKeyframe.values }
-      : null;
-    let changedKeyframe = false;
+    const currentPad = useSimStore.getState().pad;
+    let keyframes = currentPad.keyframes;
+    let selectedPointId: string | null = null;
+    const editHour = selectedKeyframe
+      ? selectedKeyframe.hour
+      : followPlayhead
+        ? ((snapHour(timeHours) % HOURS) + HOURS) % HOURS
+        : null;
 
     for (const [rawKey, rawValue] of Object.entries(patch)) {
       if (
-        selectedKeyframe &&
-        nextValues &&
+        editHour !== null &&
         isPadKeyframeParam(rawKey) &&
         typeof rawValue === "number"
       ) {
-        nextValues[rawKey] = rawValue;
-        changedKeyframe = true;
+        const param = rawKey;
+        const preferred =
+          selectedKeyframe?.param === param
+            ? keyframes.find(
+                (frame) => frame.id === selectedKeyframe.id,
+              )
+            : undefined;
+        const existing =
+          preferred ??
+          keyframes.find(
+            (frame) =>
+              frame.param === param &&
+              Math.abs(frame.hour - editHour) < 1e-6,
+          );
+        const id = existing?.id ?? newKeyframeId();
+        keyframes = existing
+          ? keyframes.map((frame) =>
+              frame.id === id ? { ...frame, value: rawValue } : frame,
+            )
+          : [
+              ...keyframes,
+              { id, hour: editHour, param, value: rawValue },
+            ];
+        selectedPointId = id;
+        setSelectedPadParam(param);
       } else {
         (globalPatch as Record<string, unknown>)[rawKey] = rawValue;
       }
     }
 
-    if (changedKeyframe && nextValues && selectedKeyframe) {
-      globalPatch.keyframes = pad.keyframes.map((frame) =>
-        frame.id === selectedKeyframe.id
-          ? { ...frame, values: nextValues }
-          : frame,
-      );
+    if (selectedPointId) {
+      globalPatch.keyframes = sortedPadKeyframes(keyframes);
+      setSelectedKeyframeId(selectedPointId);
+      setFollowPlayhead(false);
     }
     if (Object.keys(globalPatch).length > 0) setPad(globalPatch);
   };
@@ -737,11 +787,16 @@ export function PadsPanel() {
           playheadHour={timeHours}
           selectedId={selectedKeyframeId}
           selectedParam={selectedPadParam}
+          followPlayhead={followPlayhead}
           timelineWidth={Math.max(400, rollWidth * horizontalZoom)}
           scrollLeft={timelineScrollLeft}
           snapHours={snapHours}
-          onSelectedIdChange={setSelectedKeyframeId}
+          onSelectedIdChange={(id) => {
+            setSelectedKeyframeId(id);
+            if (id) setFollowPlayhead(false);
+          }}
           onSelectedParamChange={setSelectedPadParam}
+          onFollowPlayheadChange={setFollowPlayhead}
           onKeyframesChange={(keyframes) => setPad({ keyframes })}
           onScrollLeftChange={setTimelineScrollLeft}
         />

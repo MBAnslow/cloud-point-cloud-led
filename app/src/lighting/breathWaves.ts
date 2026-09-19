@@ -2,6 +2,7 @@ import type { BreathParams, BreathParticipant } from "../state";
 import type { CloudTransform } from "../scene/cloudTransform";
 import { applyCloudTransform } from "../scene/cloudTransform";
 import { sampleParticipantBreath } from "./breath";
+import { breathAreaInfluenceAt } from "./breathArea";
 import { fogDensity, signedEdgeNoise } from "./noise3d";
 import { hexToVec3 } from "./shade";
 import { consumeOscExhaleTriggers, getOscBreathBinary } from "../breath/oscBreathClient";
@@ -45,6 +46,22 @@ export interface BreathLedSample {
   rimR: number;
   rimG: number;
   rimB: number;
+}
+
+export interface BreathInflationVolume {
+  participantId: string;
+  color: string;
+  /** Exact nearest mapped LED/cloud point used as the attached origin. */
+  origin: [number, number, number];
+  radius: number;
+  strength: number;
+  fogSeed: number;
+}
+
+export interface BreathExhaleEvent {
+  id: number;
+  participantId: string;
+  bornMs: number;
 }
 
 function clamp01(v: number): number {
@@ -174,20 +191,33 @@ export function waveLocalFrame(
 }
 
 /**
- * Stateful tracker for travelling exhale waves. Spawn on exhale onset
- * from exactly one source (`triggerSource`: internal oscillator **or**
- * OSC) — never both. Advance on wall clock so motion is decoupled from
- * breath pause/scrub. Despawn as soon as a wave that has touched the
- * LED cloud loses all LED contact.
+ * Stateful tracker for both spatial breath modes. Travelling waves spawn
+ * on exhale onset; local volumes follow continuous inhale fullness and
+ * attach to the participant's nearest mapped cloud point. Trigger sources
+ * remain mutually exclusive (internal oscillator or OSC).
  */
 export class BreathWaveController {
   private waves: BreathWave[] = [];
+  private inflations: BreathInflationVolume[] = [];
+  private inhaleLevels = new Map<string, number>();
+  private oscInhaleTargets = new Map<string, number>();
+  private exhaleEvents: BreathExhaleEvent[] = [];
+  private nextExhaleEventId = 1;
+  private lastUpdateMs = 0;
   private lastPhase = new Map<string, BreathSamplePhase>();
   /** Last OSC binary per participant id (UI / debug). */
   private lastOscBinary = new Map<string, number>();
 
   getWaves(): BreathWave[] {
     return this.waves;
+  }
+
+  getInflations(): BreathInflationVolume[] {
+    return this.inflations;
+  }
+
+  getExhaleEvents(): BreathExhaleEvent[] {
+    return this.exhaleEvents;
   }
 
 /**
@@ -204,8 +234,16 @@ update(
   transform: CloudTransform,
   breathClockMs: number = nowMs,
 ): void {
+  const dtSec =
+    this.lastUpdateMs > 0
+      ? Math.max(0, Math.min(0.25, (nowMs - this.lastUpdateMs) / 1000))
+      : 0;
+  this.lastUpdateMs = nowMs;
   // Safety prune only (waves that never hit the cloud).
   this.waves = this.waves.filter((w) => nowMs - w.bornMs <= w.durationMs);
+  this.exhaleEvents = this.exhaleEvents.filter(
+    (event) => nowMs - event.bornMs <= 30_000,
+  );
 
   if (!params.enabled) {
     // Drop pending OSC edges while inactive so they don't burst-fire
@@ -213,14 +251,31 @@ update(
     consumeOscExhaleTriggers();
     this.lastPhase.clear();
     this.lastOscBinary.clear();
+    this.inhaleLevels.clear();
+    this.oscInhaleTargets.clear();
     this.waves = [];
+    this.inflations = [];
     return;
   }
 
+  const localMode = params.effectMode === "localInflation";
+  if (localMode) this.waves = [];
+  else this.inflations = [];
   const center = cloudCenterWorld(transform);
   const cloudDist = Math.max(0.2, params.cloudDistance);
   const metrics = waveMetrics(params, cloudDist);
   const useOsc = params.triggerSource === "osc";
+
+  const emitExhale = (p: BreathParticipant) => {
+    this.exhaleEvents.push({
+      id: this.nextExhaleEventId++,
+      participantId: p.id,
+      bornMs: nowMs,
+    });
+    if (this.exhaleEvents.length > 64) {
+      this.exhaleEvents.splice(0, this.exhaleEvents.length - 64);
+    }
+  };
 
   const spawnWave = (p: BreathParticipant) => {
     const origin = participantWorldPos(
@@ -257,7 +312,8 @@ update(
       if (pi < 0 || pi >= params.participants.length) continue;
       const p = params.participants[pi];
       if (!p.enabled) continue;
-      spawnWave(p);
+      emitExhale(p);
+      if (!localMode) spawnWave(p);
     }
   } else {
     // Internal mode: discard OSC pulses so they never leak into spawns
@@ -270,15 +326,43 @@ update(
     if (!p.enabled) {
       this.lastPhase.delete(p.id);
       this.lastOscBinary.delete(p.id);
+      this.inhaleLevels.delete(p.id);
+      this.oscInhaleTargets.delete(p.id);
       continue;
     }
 
     const channel = pi + 1;
-    this.lastOscBinary.set(p.id, getOscBreathBinary(channel));
+    const oscBinary = getOscBreathBinary(channel);
+    this.lastOscBinary.set(p.id, oscBinary);
 
-    if (useOsc) continue;
+    if (useOsc) {
+      if (localMode) {
+        let target = this.oscInhaleTargets.get(p.id) ?? 0;
+        if (oscBinary <= -0.5) target = 1;
+        else if (oscBinary >= 0.5) target = 0;
+        this.oscInhaleTargets.set(p.id, target);
+        const previous = this.inhaleLevels.get(p.id) ?? 0;
+        if (!params.paused) {
+          const duration =
+            target >= previous
+              ? Math.max(0.001, params.inhaleSeconds)
+              : Math.max(0.001, params.exhaleSeconds);
+          const step = dtSec / duration;
+          this.inhaleLevels.set(
+            p.id,
+            target >= previous
+              ? Math.min(target, previous + step)
+              : Math.max(target, previous - step),
+          );
+        } else {
+          this.inhaleLevels.set(p.id, previous);
+        }
+      }
+      continue;
+    }
 
     const sample = sampleParticipantBreath(p, params, breathClockMs);
+    if (localMode) this.inhaleLevels.set(p.id, sample.inhaleIntensity);
     const prev = this.lastPhase.get(p.id);
     this.lastPhase.set(p.id, sample.phase);
     // Require a known prior phase so window open / mode switch / first
@@ -289,10 +373,73 @@ update(
       sample.phase === "exhale" &&
       prev !== "exhale"
     ) {
-      spawnWave(p);
+      emitExhale(p);
+      if (!localMode) spawnWave(p);
     }
   }
 }
+
+  /**
+   * Build participant-attached local volumes from the exact mapped LED
+   * positions. Each origin is the cloud point nearest its participant.
+   */
+  syncLocalInflations(
+    params: BreathParams,
+    transform: CloudTransform,
+    positions: Float32Array,
+    ledCount: number,
+  ): void {
+    if (
+      params.effectMode !== "localInflation" ||
+      !params.enabled ||
+      ledCount <= 0
+    ) {
+      this.inflations = [];
+      return;
+    }
+    const next: BreathInflationVolume[] = [];
+    for (const p of params.participants) {
+      if (!p.enabled) continue;
+      const level = clamp01(this.inhaleLevels.get(p.id) ?? 0);
+      if (level <= 1e-5) continue;
+      const participant = participantWorldPos(
+        p,
+        Math.max(0.2, params.cloudDistance),
+        params.horizonDistance,
+        transform,
+      );
+      let nearest = 0;
+      let nearestD2 = Infinity;
+      for (let i = 0; i < ledCount; i++) {
+        const i3 = i * 3;
+        const dx = positions[i3] - participant[0];
+        const dy = positions[i3 + 1] - participant[1];
+        const dz = positions[i3 + 2] - participant[2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < nearestD2) {
+          nearestD2 = d2;
+          nearest = i3;
+        }
+      }
+      const growth = Math.pow(
+        level,
+        Math.max(0.1, params.localInflationGrowthExponent),
+      );
+      next.push({
+        participantId: p.id,
+        color: p.color,
+        origin: [
+          positions[nearest],
+          positions[nearest + 1],
+          positions[nearest + 2],
+        ],
+        radius: Math.max(0, params.localInflationRadius) * growth,
+        strength: clamp01(params.localInflationStrength) * level,
+        fogSeed: p.fogSeed >>> 0,
+      });
+    }
+    this.inflations = next;
+  }
 
   /**
    * Mark waves that currently overlap any LED; remove waves that previously
@@ -547,6 +694,129 @@ export function breathSampleAt(
       }
     }
   }
+  return {
+    mask: clamp01(bestMask),
+    solid: clamp01(bestSolid),
+    rim: clamp01(bestRim),
+    rimR,
+    rimG,
+    rimB,
+  };
+}
+
+/**
+ * Per-LED sample for participant-attached inhale volumes. The volume
+ * center is the nearest mapped cloud point, while radius and strength
+ * follow that participant's lung fullness.
+ */
+export function localBreathSampleAt(
+  px: number,
+  py: number,
+  pz: number,
+  controller: BreathWaveController,
+  nowMs: number,
+  falloffExponent: number,
+  rimThickness: number,
+  fog?: {
+    scale: number;
+    amount: number;
+    contrast: number;
+    edgeNoise?: number;
+  },
+  cloudCenter: [number, number, number] = [0, 0, 0],
+): BreathLedSample {
+  const volumes = controller.getInflations();
+  const empty: BreathLedSample = {
+    mask: 0,
+    solid: 0,
+    rim: 0,
+    rimR: 0,
+    rimG: 0,
+    rimB: 0,
+  };
+  if (volumes.length === 0) return empty;
+
+  const fall = Math.max(0, falloffExponent);
+  const amount = fog ? clamp01(fog.amount) : 0;
+  const edgeAmount = fog
+    ? Math.max(0, Math.min(2, fog.edgeNoise ?? 0))
+    : 0;
+  const thick = Math.max(0, rimThickness);
+  const fox = px - cloudCenter[0];
+  const foy = py - cloudCenter[1];
+  const foz = pz - cloudCenter[2];
+  const tSec = nowMs / 1000;
+
+  let bestMask = 0;
+  let bestSolid = 0;
+  let bestRim = 0;
+  let rimR = 0;
+  let rimG = 0;
+  let rimB = 0;
+
+  for (const volume of volumes) {
+    if (volume.radius <= 1e-6 || volume.strength <= 1e-6) continue;
+    const dx = px - volume.origin[0];
+    const dy = py - volume.origin[1];
+    const dz = pz - volume.origin[2];
+    const distance = Math.hypot(dx, dy, dz);
+    let adjustedRadius = volume.radius;
+    if (edgeAmount > 1e-6 && fog && distance < volume.radius * 1.5) {
+      const edge = signedEdgeNoise(
+        fox,
+        foy,
+        foz,
+        fog.scale,
+        tSec,
+        (volume.fogSeed ^ 0x9e3779b9) >>> 0,
+      );
+      adjustedRadius *= Math.max(0.1, 1 + edge * 0.22 * edgeAmount);
+    }
+    const proximity = breathAreaInfluenceAt(
+      [px, py, pz],
+      {
+        origin: volume.origin,
+        radius: adjustedRadius,
+        falloffExponent: 1,
+      },
+    );
+    const influence =
+      fall <= 0 ? (proximity > 0 ? 1 : 0) : Math.pow(proximity, fall);
+    if (influence > 0) {
+      const solid = volume.strength * influence;
+      if (solid > bestSolid) bestSolid = solid;
+      let densityBlend = 1;
+      if (amount > 0 && fog) {
+        const density = fogDensity(
+          fox,
+          foy,
+          foz,
+          fog.scale,
+          fog.contrast,
+          tSec,
+          volume.fogSeed,
+        );
+        densityBlend = 1 + amount * (density - 1);
+      }
+      const mask = solid * densityBlend;
+      if (mask > bestMask) bestMask = mask;
+    }
+
+    if (thick > 1e-6) {
+      const shell = clamp01(
+        1 - Math.abs(distance - adjustedRadius) / thick,
+      );
+      const rim = volume.strength * shell;
+      if (rim > bestRim) {
+        bestRim = rim;
+        const color = hexToVec3(volume.color);
+        rimR = color[0];
+        rimG = color[1];
+        rimB = color[2];
+      }
+    }
+  }
+
   return {
     mask: clamp01(bestMask),
     solid: clamp01(bestSolid),

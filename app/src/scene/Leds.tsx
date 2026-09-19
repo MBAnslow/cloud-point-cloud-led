@@ -43,6 +43,7 @@ import { setBreathEffectDrive } from "../lighting/breathEffectDrive";
 import {
   breathSampleAt,
   cloudCenterWorld,
+  localBreathSampleAt,
   liveWaveExtents,
   sharedBreathWaveController,
 } from "../lighting/breathWaves";
@@ -672,7 +673,14 @@ export function Leds() {
       cloudXformBreath,
       nowBreath,
     );
-    {
+    if (breath.effectMode === "localInflation") {
+      sharedBreathWaveController.syncLocalInflations(
+        breathForWaves,
+        cloudXformBreath,
+        buffers.positions,
+        buffers.n,
+      );
+    } else {
       const { width, height, depth } = liveWaveExtents(breath);
       sharedBreathWaveController.syncLedContact(
         wallNow,
@@ -706,21 +714,34 @@ export function Leds() {
       const fogCenter = cloudCenterWorld(cloudXformBreath);
       for (let i = 0; i < buffers.n; i++) {
         const i3 = i * 3;
-        const sample = breathSampleAt(
-          buffers.positions[i3],
-          buffers.positions[i3 + 1],
-          buffers.positions[i3 + 2],
-          sharedBreathWaveController,
-          wallNow,
-          falloffExp,
-          width,
-          height,
-          depth,
-          useBreathMask ? breath.rimThickness : 0,
-          useBreathMask ? breath.rimArcDegrees : 0,
-          fog,
-          fogCenter,
-        );
+        const sample =
+          breath.effectMode === "localInflation"
+            ? localBreathSampleAt(
+                buffers.positions[i3],
+                buffers.positions[i3 + 1],
+                buffers.positions[i3 + 2],
+                sharedBreathWaveController,
+                wallNow,
+                falloffExp,
+                useBreathMask ? breath.rimThickness : 0,
+                fog,
+                fogCenter,
+              )
+            : breathSampleAt(
+                buffers.positions[i3],
+                buffers.positions[i3 + 1],
+                buffers.positions[i3 + 2],
+                sharedBreathWaveController,
+                wallNow,
+                falloffExp,
+                width,
+                height,
+                depth,
+                useBreathMask ? breath.rimThickness : 0,
+                useBreathMask ? breath.rimArcDegrees : 0,
+                fog,
+                fogCenter,
+              );
         buffers.breathColorFloats[i3] = sample.mask;
         buffers.breathColorFloats[i3 + 1] = sample.mask;
         buffers.breathColorFloats[i3 + 2] = sample.mask;
