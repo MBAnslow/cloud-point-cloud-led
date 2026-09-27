@@ -40,25 +40,97 @@ Uploaded meshes and audio are kept in IndexedDB, not in the YAML.
 
 ### Simulator
 
-The sky timeline at the top holds the colour stops for the sun, moon and
-ambient light over 24 hours. The footer buttons open the control panels:
+The simulator page (top of this README) is the 3D view with overlays
+around it. The main ones are shown below.
 
-| Master volume | Cloud |
-| --- | --- |
-| ![Master volume panel](docs/screenshots/simulator-master-volume.png) | ![Cloud panel](docs/screenshots/simulator-cloud.png) |
-| **Breath** | **Breath filter** |
-| ![Breath panel](docs/screenshots/simulator-breath.png) | ![Breath filter panel](docs/screenshots/simulator-breath-filter.png) |
-| **Time of day** | **Lightning** |
-| ![Time of day panel](docs/screenshots/simulator-time-of-day.png) | ![Lightning panel](docs/screenshots/simulator-lightning.png) |
-| **Stream RGB** | |
-| ![Stream RGB matrix](docs/screenshots/simulator-stream-rgb.png) | |
+**Sky timeline.** The day is split into periods (Magical night, Dawn,
+Day, Dusk, Night) along the top row. Below that are the lightning
+window, the breath active window, and the colour stops for the sun,
+moon and ambient light. The green line is the current time. Drag a
+segment edge to reshape a period, and drag or click a stop to edit it.
+
+![Sky timeline](docs/screenshots/simulator-sky-timeline.png)
+
+**LED view** (left side) picks which pipeline colours the LEDs: breath,
+time of day, or a blend of the two. It also sets whether the 3D view
+shows the computed sensor colours or the exact colours streamed to WLED.
+"Locate LEDs" highlights individual LEDs by clicking them.
+
+<img src="docs/screenshots/simulator-led-view.png" width="320" alt="LED view panel">
+
+The footer buttons open these panels:
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<b>Master volume</b>: the shared output fader, and volume, saturation
+and filters for the drone, pad and sample engines, with solo and mute
+for each.<br><br>
+<img src="docs/screenshots/simulator-master-volume.png" alt="Master volume panel">
+</td>
+<td width="50%" valign="top">
+<b>Cloud</b>: position and rotation of the cloud, how much the domes
+and pyramid block light, the optional cloud-top model and its LED glow,
+and strand LED size and gamma.<br><br>
+<img src="docs/screenshots/simulator-cloud.png" alt="Cloud panel">
+</td>
+</tr>
+<tr>
+<td valign="top">
+<b>Time of day</b>: how strongly the sun, moon and ambient light paint
+the cloud, their spread and orbit, and the altitudes where they fade
+in. The colours themselves live on the sky timeline.<br><br>
+<img src="docs/screenshots/simulator-time-of-day.png" alt="Time of day panel">
+</td>
+<td valign="top">
+<b>Breath filter</b>: a threshold, keyframed across the breath window,
+that decides which LEDs respond, and how quickly LEDs fade back once
+they're below it.<br><br>
+<img src="docs/screenshots/simulator-breath-filter.png" alt="Breath filter panel">
+<br><br>
+<b>Stream RGB</b>: a live grid of the colour sent to every LED (344
+here).<br><br>
+<img src="docs/screenshots/simulator-stream-rgb.png" alt="Stream RGB matrix">
+</td>
+</tr>
+</table>
+
+**Breath**: the breath oscillator (inhale, hold, exhale and hold-trough
+timings), the hours it's active, the exhale sound, the local
+inhale-inflation effect, and a row of settings for each participant.
+
+![Breath panel](docs/screenshots/simulator-breath.png)
+
+**Lightning**: storm intensity keyframed across the night periods, the
+bolt colour gradients, rates for cloud flashes, strikes and sprites,
+bolt shape, and the thunder and sprite sounds and images.
+
+![Lightning panel](docs/screenshots/simulator-lightning.png)
 
 ### LED mapping
 
-LEDs placed on the cloud mesh, with dome bumps, the mapping light and
-WLED output settings.
+The mapping page places the physical LEDs on the cloud mesh, in strand
+order. It also adds smooth domes that lift nearby LEDs and change how
+light reaches them.
 
 ![LED mapping](docs/screenshots/mapping.png)
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<b>Surface & shape</b>: upload the mesh and set its scale and
+orientation. Then place LEDs one at a time along the strand, nudge
+them outward, or add and bake domes.<br><br>
+<img src="docs/screenshots/mapping-surface-panel.png" width="300" alt="Mapping surface and shape panel">
+</td>
+<td width="50%" valign="top">
+<b>Preview & output</b>: a movable test light for checking the mapping,
+the sensor hemisphere size shared with the simulator, and an option to
+stream this preview straight to WLED.<br><br>
+<img src="docs/screenshots/mapping-output-panel.png" width="300" alt="Mapping preview and output panel">
+</td>
+</tr>
+</table>
 
 ### Drones
 
