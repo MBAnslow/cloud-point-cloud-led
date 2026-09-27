@@ -6,6 +6,83 @@ appear on screen are streamed to a real
 [WLED](https://kno.wled.ge/) controller over UDP using the
 [DDP](http://www.3waylabs.com/ddp/) protocol via a tiny local Node relay.
 
+![Simulator](docs/screenshots/simulator.png)
+
+## How it fits together
+
+The app is five pages that share one store and one 24-hour sky clock.
+Every page reads the same clock, so lighting, drones, pads and samples
+all follow the same day.
+
+- **Simulator** (`#/`) shows the cloud and its LEDs in 3D and computes
+  each LED's colour from the sky cycle, breath and lightning. Those
+  colours are sent over WebSocket to the relay, which forwards them to
+  WLED as DDP packets.
+- **LED mapping** (`#/mapping`) is where LEDs are placed on the uploaded
+  cloud mesh, in strand order. The simulator renders and streams LEDs in
+  this order.
+- **Drones**, **Pads** and **Samples** (`#/drones`, `#/pads`, `#/samples`)
+  arrange audio on the 24-hour timeline. The audio engines run on every
+  page, not only while their editor is open.
+- The **relay** also receives breath data over OSC from TouchDesigner
+  (UDP 999) and forwards it to the browser over the same WebSocket.
+
+```
+TouchDesigner ──OSC/UDP──▶ relay ──WebSocket──▶ browser app ──WebSocket──▶ relay ──DDP/UDP──▶ WLED
+   (breath)                                   (sim + audio)                              (LEDs)
+```
+
+All settings autosave to `localStorage` and can be saved to or loaded
+from a YAML file (the **Save** box, bottom right of the simulator).
+Uploaded meshes and audio are kept in IndexedDB, not in the YAML.
+
+## Screenshots
+
+### Simulator
+
+The sky timeline at the top holds the colour stops for the sun, moon and
+ambient light over 24 hours. The footer buttons open the control panels:
+
+| Master volume | Cloud |
+| --- | --- |
+| ![Master volume panel](docs/screenshots/simulator-master-volume.png) | ![Cloud panel](docs/screenshots/simulator-cloud.png) |
+| **Breath** | **Breath filter** |
+| ![Breath panel](docs/screenshots/simulator-breath.png) | ![Breath filter panel](docs/screenshots/simulator-breath-filter.png) |
+| **Time of day** | **Lightning** |
+| ![Time of day panel](docs/screenshots/simulator-time-of-day.png) | ![Lightning panel](docs/screenshots/simulator-lightning.png) |
+| **Stream RGB** | |
+| ![Stream RGB matrix](docs/screenshots/simulator-stream-rgb.png) | |
+
+### LED mapping
+
+LEDs placed on the cloud mesh, with dome bumps, the mapping light and
+WLED output settings.
+
+![LED mapping](docs/screenshots/mapping.png)
+
+### Drones
+
+A piano roll across the 24-hour day, with oscillator, envelope, tremolo
+and distortion controls. The second image shows the whole roll, C1 to C6.
+
+![Drones](docs/screenshots/drones.png)
+![Drones piano roll](docs/screenshots/drones-piano-roll.png)
+
+### Pads
+
+A warm-pad synth with its own piano roll and per-parameter keyframes
+across the day. The second image shows the whole roll.
+
+![Pads](docs/screenshots/pads.png)
+![Pads piano roll](docs/screenshots/pads-piano-roll.png)
+
+### Samples
+
+A sample library dragged onto lanes on the day timeline, with volume,
+pan, filter, reverb and delay automation per lane.
+
+![Samples](docs/screenshots/samples.png)
+
 ## Workspaces
 
 ```
