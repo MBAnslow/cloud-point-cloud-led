@@ -55,6 +55,8 @@ export function PadFilterResponse({ pad }: { pad: PadParams }) {
     : baseCutoff;
 
   const Q = Math.max(0.1, pad.filterQ);
+  // Tone's -24 rolloff cascades two identical biquads.
+  const stages = pad.filterSlope === 12 ? 1 : 2;
   const W = 300;
   const H = 90;
   const PAD_X = 26;
@@ -92,7 +94,7 @@ export function PadFilterResponse({ pad }: { pad: PadParams }) {
       const db = clamp(
         DB_MIN,
         DB_MAX,
-        biquadLowpassDb(f, cutoff, Q),
+        biquadLowpassDb(f, cutoff, Q) * stages,
       );
       pts.push(`${xForF(f).toFixed(1)},${yForDb(db).toFixed(1)}`);
     }

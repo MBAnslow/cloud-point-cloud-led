@@ -1,5 +1,5 @@
 import * as Tone from "tone";
-import type { PadParams, PadWaveform } from "../state";
+import type { PadDelaySync, PadParams, PadWaveform } from "../state";
 import { activePadVoicesAt } from "./padCycle";
 import { applyFilterChain } from "./filterChain";
 import { meterAbs } from "./meterAbs";
@@ -10,6 +10,48 @@ const finite = (value: number, fallback: number): number =>
 
 const changed = (previous: number, next: number, epsilon = 0.0001): boolean =>
   !Number.isFinite(previous) || Math.abs(previous - next) > epsilon;
+
+/** Map the 0..0.99 "Room" control onto a convolution decay of ~0.6–8 s. */
+function roomSizeToDecaySec(room: number): number {
+  const r = Math.max(0, Math.min(0.99, finite(room, 0.78)));
+  return 0.6 + 8 * Math.pow(r, 1.5);
+}
+
+const SYNC_BEATS: Record<Exclude<PadDelaySync, "off">, number> = {
+  "1/4": 1,
+  "1/8": 0.5,
+  "1/8d": 0.75,
+  "1/8t": 1 / 3,
+  "1/16": 0.25,
+};
+
+function delaySeconds(p: PadParams): number {
+  if (p.delaySync === "off") return finite(p.delayTimeSec, 0.375);
+  const bpm = Math.max(30, Math.min(300, finite(p.tempoBpm, 90)));
+  return (60 / bpm) * SYNC_BEATS[p.delaySync];
+}
+
+/**
+ * Decay and release use exponential curves (setTargetAtTime). Time
+ * constant = stage / divisor. Release uses a gentler divisor so the tail
+ * hangs on through most of the Release time instead of dropping early
+ * (half level at ~0.35 r, -17 dB at r). A release is treated as finished
+ * after ENV_RELEASE_TAIL × r, by which point it is below -60 dB.
+ */
+const ENV_TAU_DIV = 4;
+const ENV_RELEASE_TAU_DIV = 2;
+/** Key tracking pivot: notes at middle C keep the set cutoff. */
+const KEY_TRACK_REF_HZ = 261.63;
+/** Pink noise is broadband and loud; keep Noise level 1 a gentle layer. */
+const NOISE_GAIN_SCALE = 0.25;
+const ENV_RELEASE_TAIL = 3.5;
+
+/** Equal-ish spacing in [-1, 1] bunched toward the centre (supersaw style). */
+function unisonPosition(i: number, n: number): number {
+  if (n <= 1) return 0;
+  const t = (i / (n - 1)) * 2 - 1;
+  return Math.sign(t) * Math.pow(Math.abs(t), 1.6);
+}
 
 function normalizedWetMixes(
   reverb: number,
@@ -26,14 +68,16 @@ function normalizedWetMixes(
  * Warm-pad synth engine. Signal chain per voice:
  *
  *   Oscillator[unisonCount] (detuned, stereo-spread, phase-randomised)
+ *     + mono sine sub
  *     → per-note low-pass → voiceGain (ADSR-scheduled)
  *     → padBus
  *
  * Global bus chain:
  *
- *   padBus → compensated saturation → chorus
+ *   padBus → glue compressor → compensated saturation → chorus
  *          → normalized dry / reverb / ping-pong delay returns
- *          → master → destination
+ *          → master → mid/side (side high-passed) → 3-band EQ
+ *          → HP/LP filter chain → destination
  *
  * Independent of the drone engine — separate Tone graph and singleton
  * so both instruments can play concurrently.
@@ -55,8 +99,29 @@ interface PadVoice {
   driftPhases: number[];
   /** Sums the unison stack. */
   mix: Tone.Gain;
+  /** Mono sine an octave or two below; bypasses unison gain compensation. */
+  sub: Tone.Oscillator;
+  subGain: Tone.Gain;
+  lastSubLevel: number;
+  lastSubOctave: number;
+  /** Second, single-oscillator timbre layer at an interval from the note. */
+  osc2: Tone.Oscillator;
+  osc2Gain: Tone.Gain;
+  lastOsc2Level: number;
+  lastOsc2Semitones: number;
+  lastOsc2Waveform: PadWaveform;
+  /** Band-passed shared noise, enveloped per voice, bypassing the low-pass. */
+  noiseFilter: Tone.Filter;
+  noiseGain: Tone.Gain;
+  lastNoiseLevel: number;
+  lastNoiseToneHz: number;
+  /** Humanize offsets rolled once per note. */
+  humanDetuneCents: number;
+  humanCutoffMul: number;
+  humanGainMul: number;
   /** Per-note low-pass, modulated by this voice's own ADSR. */
   filter: Tone.Filter;
+  lastFilterSlope: number;
   filterCutoffState: number;
   filterLfoPhase: number;
   lastFilterQ: number;
@@ -81,6 +146,23 @@ export class PadEngine {
   private started = false;
   private startPromise: Promise<void> | null = null;
   private master: Tone.Gain | null = null;
+  private msSplit: Tone.MidSideSplit | null = null;
+  private msMerge: Tone.MidSideMerge | null = null;
+  private sideHp: Tone.Filter | null = null;
+  private glue: Tone.Compressor | null = null;
+  private glueMakeup: Tone.Gain | null = null;
+  private lastGlue = Number.NaN;
+  private lastMonoBelowHz = Number.NaN;
+  private eqLow: Tone.Filter | null = null;
+  private eqMid: Tone.Filter | null = null;
+  private eqHigh: Tone.Filter | null = null;
+  private lastEqKey = "";
+  private fft: Tone.FFT | null = null;
+  /** One pink noise source shared by every voice's air layer. */
+  private noise: Tone.Noise | null = null;
+  private lastReverbDecaySec = Number.NaN;
+  private pendingReverbDecaySec = Number.NaN;
+  private reverbDecayTimer: ReturnType<typeof setTimeout> | null = null;
   private masterHp: Tone.Filter | null = null;
   private masterLp: Tone.Filter | null = null;
   private chorus: Tone.Chorus | null = null;
@@ -89,7 +171,7 @@ export class PadEngine {
   private bus: Tone.Gain | null = null;
   private dryGain: Tone.Gain | null = null;
   private reverbPreDelay: Tone.FeedbackDelay | null = null;
-  private reverb: Tone.Freeverb | null = null;
+  private reverb: Tone.Reverb | null = null;
   private reverbDampingFilter: Tone.Filter | null = null;
   private reverbWet: Tone.Gain | null = null;
   private delay: Tone.PingPongDelay | null = null;
@@ -137,7 +219,22 @@ export class PadEngine {
     this.master = new Tone.Gain(0);
     this.masterHp = new Tone.Filter({ type: "highpass", frequency: 10, Q: 0.7 });
     this.masterLp = new Tone.Filter({ type: "lowpass", frequency: 22000, Q: 0.7 });
-    this.master.connect(this.masterHp);
+    // Mid/side stage: high-passing only the side channel keeps the low end
+    // mono so unison panning, chorus and reverb can't smear the bass.
+    this.msSplit = new Tone.MidSideSplit();
+    this.msMerge = new Tone.MidSideMerge();
+    this.sideHp = new Tone.Filter({ type: "highpass", frequency: 140, Q: 0.7 });
+    this.master.connect(this.msSplit);
+    this.msSplit.mid.connect(this.msMerge.mid);
+    this.msSplit.side.connect(this.sideHp);
+    this.sideHp.connect(this.msMerge.side);
+    this.eqLow = new Tone.Filter({ type: "lowshelf", frequency: 120, gain: 0 });
+    this.eqMid = new Tone.Filter({ type: "peaking", frequency: 800, Q: 1, gain: 0 });
+    this.eqHigh = new Tone.Filter({ type: "highshelf", frequency: 8000, gain: 0 });
+    this.msMerge.connect(this.eqLow);
+    this.eqLow.connect(this.eqMid);
+    this.eqMid.connect(this.eqHigh);
+    this.eqHigh.connect(this.masterHp);
     this.masterHp.connect(this.masterLp);
     this.chorus = new Tone.Chorus({
       frequency: 0.3,
@@ -153,7 +250,7 @@ export class PadEngine {
       // wet amount and compensated output gain instead.
       distortion: 0.45,
       wet: 0,
-      oversample: "2x",
+      oversample: "4x",
     });
     this.postSaturationGain = new Tone.Gain(1);
     this.saturation.connect(this.postSaturationGain);
@@ -167,14 +264,17 @@ export class PadEngine {
       feedback: 0,
       wet: 1,
     });
-    this.reverb = new Tone.Freeverb({
-      roomSize: 0.78,
-      // Internal comb damping stays fixed so a ringing tank is never
-      // rewritten mid-tail. A smooth return filter below supplies the
-      // user-facing damping control without metallic zipper artifacts.
-      dampening: 12000,
+    // Convolution reverb from a decaying stereo noise impulse: smoother
+    // and less metallic than Freeverb's comb tank on sustained pads.
+    // Pre-delay is handled by `reverbPreDelay` so it never regenerates
+    // the impulse.
+    this.reverb = new Tone.Reverb({
+      decay: roomSizeToDecaySec(0.78),
+      preDelay: 0,
       wet: 1,
     });
+    this.lastReverbDecaySec = roomSizeToDecaySec(0.78);
+    await this.reverb.ready;
     this.reverbDampingFilter = new Tone.Filter({
       type: "lowpass",
       frequency: 3500,
@@ -198,9 +298,22 @@ export class PadEngine {
     this.delay.connect(this.delayWet);
     this.delayWet.connect(this.master);
 
+    this.glue = new Tone.Compressor({
+      threshold: -0.01,
+      ratio: 2.5,
+      knee: 6,
+      attack: 0.03,
+      release: 0.25,
+    });
+    this.glueMakeup = new Tone.Gain(1);
     this.bus = new Tone.Gain(1);
-    this.bus.connect(this.saturation);
+    this.bus.connect(this.glue);
+    this.glue.connect(this.glueMakeup);
+    this.glueMakeup.connect(this.saturation);
+    this.noise = new Tone.Noise("pink").start();
     this.meter = new Tone.Meter({ normalRange: true });
+    this.fft = new Tone.FFT({ size: 2048, smoothing: 0.8 });
+    this.masterLp.connect(this.fft);
     const aux = await ensureLimitedAux();
     this.masterLp.connect(aux);
     this.masterLp.connect(this.meter);
@@ -220,7 +333,7 @@ export class PadEngine {
     this.masterLp.disconnect();
     if (target) {
       this.masterLp.connect(target);
-      if (this.meter) this.masterLp.connect(this.meter);
+      this.connectTaps();
       this.currentRoutingTarget = target;
       return;
     }
@@ -228,15 +341,60 @@ export class PadEngine {
     const auxNow = limitedAuxIfStarted();
     if (auxNow) {
       this.masterLp.connect(auxNow);
-      if (this.meter) this.masterLp.connect(this.meter);
+      this.connectTaps();
       return;
     }
     void ensureLimitedAux().then((aux) => {
       if (this.currentRoutingTarget !== null || !this.masterLp) return;
       this.masterLp.disconnect();
       this.masterLp.connect(aux);
-      if (this.meter) this.masterLp.connect(this.meter);
+      this.connectTaps();
     });
+  }
+
+  /**
+   * Regenerating a convolution impulse swaps the buffer abruptly, so
+   * changes are debounced (Room keyframes can move it every frame) and
+   * the reverb return is ducked around the swap.
+   */
+  private scheduleReverbDecay(decaySec: number): void {
+    if (Math.abs(decaySec - this.lastReverbDecaySec) < 0.15) return;
+    this.pendingReverbDecaySec = decaySec;
+    if (this.reverbDecayTimer) clearTimeout(this.reverbDecayTimer);
+    this.reverbDecayTimer = setTimeout(() => {
+      this.reverbDecayTimer = null;
+      void this.applyReverbDecay();
+    }, 400);
+  }
+
+  private async applyReverbDecay(): Promise<void> {
+    const reverb = this.reverb;
+    const wet = this.reverbWet;
+    const target = this.pendingReverbDecaySec;
+    if (!reverb || !wet || !Number.isFinite(target)) return;
+    const level = this.lastReverbGain;
+    wet.gain.rampTo(0, 0.08);
+    await new Promise((r) => setTimeout(r, 90));
+    reverb.decay = target;
+    await reverb.ready;
+    this.lastReverbDecaySec = target;
+    wet.gain.rampTo(Number.isFinite(level) ? level : 0, 0.25);
+  }
+
+  /** Re-attach analysis taps after `masterLp.disconnect()` drops them. */
+  private connectTaps(): void {
+    if (!this.masterLp) return;
+    if (this.meter) this.masterLp.connect(this.meter);
+    if (this.fft) this.masterLp.connect(this.fft);
+  }
+
+  /** Output spectrum in dB per FFT bin (bin i = i * sampleRate / size). */
+  getSpectrum(): Float32Array | null {
+    return this.fft ? this.fft.getValue() : null;
+  }
+
+  getSampleRate(): number {
+    return Tone.getContext().sampleRate;
   }
 
   /** Peak level after engine EQ (0..1+). */
@@ -301,6 +459,39 @@ export class PadEngine {
       this.lastSaturation = sat;
     }
 
+    // Glue: threshold drops to -24 dB at full amount; makeup recovers
+    // roughly the expected gain reduction so the control isn't a fader.
+    const glue = Math.max(0, Math.min(1, finite(p.glue, 0)));
+    if (this.glue && this.glueMakeup && changed(this.lastGlue, glue, 0.001)) {
+      // Tone's ramps replace a current value of exactly 0 with 1e-7, which
+      // is outside the threshold's [-100, 0] range and throws.
+      this.glue.threshold.linearRampTo(Math.min(-0.01, -24 * glue), 0.12);
+      this.glueMakeup.gain.rampTo(Math.pow(10, (glue * 4) / 20), 0.12);
+      this.lastGlue = glue;
+    }
+
+    const monoBelowHz = Math.max(20, Math.min(400, finite(p.monoBelowHz, 140)));
+    if (this.sideHp && changed(this.lastMonoBelowHz, monoBelowHz, 0.5)) {
+      this.sideHp.frequency.rampTo(monoBelowHz, 0.1);
+      this.lastMonoBelowHz = monoBelowHz;
+    }
+
+    const eq = p.eq;
+    if (eq && this.eqLow && this.eqMid && this.eqHigh) {
+      const on = eq.enabled;
+      const key = `${on}|${eq.lowHz}|${eq.lowDb}|${eq.midHz}|${eq.midDb}|${eq.midQ}|${eq.highHz}|${eq.highDb}`;
+      if (key !== this.lastEqKey) {
+        this.eqLow.frequency.rampTo(finite(eq.lowHz, 120), 0.08);
+        this.eqLow.gain.rampTo(on ? finite(eq.lowDb, 0) : 0, 0.08);
+        this.eqMid.frequency.rampTo(finite(eq.midHz, 800), 0.08);
+        this.eqMid.Q.rampTo(Math.max(0.2, finite(eq.midQ, 1)), 0.08);
+        this.eqMid.gain.rampTo(on ? finite(eq.midDb, 0) : 0, 0.08);
+        this.eqHigh.frequency.rampTo(finite(eq.highHz, 8000), 0.08);
+        this.eqHigh.gain.rampTo(on ? finite(eq.highDb, 0) : 0, 0.08);
+        this.lastEqKey = key;
+      }
+    }
+
     // Chorus params.
     const chorusRateHz = Math.max(0.05, finite(p.chorusRateHz, 0.3));
     if (changed(this.lastChorusRateHz, chorusRateHz, 0.001)) {
@@ -336,9 +527,7 @@ export class PadEngine {
       Math.min(0.99, finite(p.reverbRoomSize, 0.78)),
     );
     if (changed(this.lastReverbRoomSize, reverbRoomSize, 0.001)) {
-      (
-        this.reverb.roomSize as unknown as Tone.Signal<"normalRange">
-      ).rampTo(reverbRoomSize, 0.2);
+      this.scheduleReverbDecay(roomSizeToDecaySec(reverbRoomSize));
       this.lastReverbRoomSize = reverbRoomSize;
     }
     const reverbDampingHz = Math.max(
@@ -357,10 +546,7 @@ export class PadEngine {
       this.reverbPreDelay.delayTime.rampTo(reverbPreDelaySec, 0.1);
       this.lastReverbPreDelaySec = reverbPreDelaySec;
     }
-    const delayTimeSec = Math.max(
-      0.05,
-      Math.min(1.5, finite(p.delayTimeSec, 0.375)),
-    );
+    const delayTimeSec = Math.max(0.05, Math.min(1.5, delaySeconds(p)));
     if (changed(this.lastDelayTimeSec, delayTimeSec, 0.002)) {
       this.delay.delayTime.rampTo(delayTimeSec, 0.1);
       this.lastDelayTimeSec = delayTimeSec;
@@ -410,10 +596,19 @@ export class PadEngine {
         voice.note = av.note;
         const f = Tone.Frequency(av.note).toFrequency();
         for (const o of voice.oscs) o.frequency.rampTo(f, 0.03);
+        voice.sub.frequency.rampTo(f * Math.pow(2, voice.lastSubOctave), 0.03);
+        voice.osc2.frequency.rampTo(
+          f * Math.pow(2, voice.lastOsc2Semitones / 12),
+          0.03,
+        );
       }
+      this.syncSub(voice, p);
+      this.syncLayers(voice, p);
+      voice.osc2.detune.value = av.detuneCents + voice.humanDetuneCents;
       // Constant detune (unison spread + per-note offset) plus drift LFO.
       for (let i = 0; i < voice.oscs.length; i++) {
-        const constant = (voice.detuneOffsets[i] ?? 0) + av.detuneCents;
+        const constant =
+          (voice.detuneOffsets[i] ?? 0) + av.detuneCents + voice.humanDetuneCents;
         const mod = driftActive
           ? p.driftDepthCents *
             Math.sin(driftOmega * tNow + (voice.driftPhases[i] ?? 0))
@@ -424,7 +619,7 @@ export class PadEngine {
         voice.detuneStates[i] = smoothed;
         voice.oscs[i].detune.value = smoothed;
       }
-      const gain = av.gain;
+      const gain = av.gain * voice.humanGainMul;
       if (!voice.isOn) {
         this.attack(voice, p, gain);
         voice.isOn = true;
@@ -473,6 +668,23 @@ export class PadEngine {
       panner.dispose();
     }
     v.panners = [];
+    try {
+      v.sub.stop();
+    } catch {
+      /* already stopped */
+    }
+    v.sub.dispose();
+    v.subGain.dispose();
+    try {
+      v.osc2.stop();
+    } catch {
+      /* already stopped */
+    }
+    v.osc2.dispose();
+    v.osc2Gain.dispose();
+    this.noise?.disconnect(v.noiseFilter);
+    v.noiseFilter.dispose();
+    v.noiseGain.dispose();
     v.mix.disconnect();
     v.mix.dispose();
     v.filter.disconnect();
@@ -497,15 +709,55 @@ export class PadEngine {
     if (!this.bus) throw new Error("PadEngine.start() must complete first");
     const freq = Tone.Frequency(note).toFrequency();
     const mix = new Tone.Gain(1);
+    const slope = p.filterSlope === 12 ? -12 : -24;
     const filter = new Tone.Filter({
       type: "lowpass",
       frequency: Math.max(20, Math.min(20000, finite(p.filterHz, 900))),
       Q: Math.max(0.1, Math.min(20, finite(p.filterQ, 0.7))),
+      rolloff: slope,
     });
     const env = new Tone.Gain(0);
     mix.connect(filter);
     filter.connect(env);
     env.connect(this.bus);
+
+    const osc2Semitones = Math.round(
+      Math.max(-24, Math.min(24, finite(p.osc2Semitones, 12))),
+    );
+    const osc2Level = Math.max(0, Math.min(1, finite(p.osc2Level, 0)));
+    const osc2 = new Tone.Oscillator({
+      type: p.osc2Waveform,
+      frequency: freq * Math.pow(2, osc2Semitones / 12),
+      phase: Math.random() * 360,
+    }).start();
+    const osc2Gain = new Tone.Gain(osc2Level);
+    osc2.connect(osc2Gain);
+    osc2Gain.connect(filter);
+
+    // Noise skips the low-pass so the air stays bright on dark patches.
+    const noiseToneHz = Math.max(500, Math.min(14000, finite(p.noiseToneHz, 6000)));
+    const noiseLevel = Math.max(0, Math.min(1, finite(p.noiseLevel, 0)));
+    const noiseFilter = new Tone.Filter({
+      type: "bandpass",
+      frequency: noiseToneHz,
+      Q: 0.8,
+    });
+    const noiseGain = new Tone.Gain(noiseLevel * NOISE_GAIN_SCALE);
+    this.noise?.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(env);
+
+    const h = Math.max(0, Math.min(1, finite(p.humanize, 0)));
+    const bipolar = () => Math.random() * 2 - 1;
+    const subOctave = p.subOctave === -2 ? -2 : -1;
+    const subLevel = Math.max(0, Math.min(1, finite(p.subLevel, 0)));
+    const sub = new Tone.Oscillator({
+      type: "sine",
+      frequency: freq * Math.pow(2, subOctave),
+    }).start();
+    const subGain = new Tone.Gain(subLevel);
+    sub.connect(subGain);
+    subGain.connect(filter);
     const v: PadVoice = {
       note,
       oscs: [],
@@ -514,7 +766,24 @@ export class PadEngine {
       detuneStates: [],
       driftPhases: [],
       mix,
+      sub,
+      subGain,
+      lastSubLevel: subLevel,
+      lastSubOctave: subOctave,
+      osc2,
+      osc2Gain,
+      lastOsc2Level: osc2Level,
+      lastOsc2Semitones: osc2Semitones,
+      lastOsc2Waveform: p.osc2Waveform,
+      noiseFilter,
+      noiseGain,
+      lastNoiseLevel: noiseLevel,
+      lastNoiseToneHz: noiseToneHz,
+      humanDetuneCents: bipolar() * 8 * h,
+      humanCutoffMul: Math.pow(2, bipolar() * 0.35 * h),
+      humanGainMul: 1 - Math.random() * 0.25 * h,
       filter,
+      lastFilterSlope: slope,
       filterCutoffState: Math.max(
         20,
         Math.min(20000, finite(p.filterHz, 900)),
@@ -625,18 +894,62 @@ export class PadEngine {
     v.lastStereoWidth = stereoWidth;
   }
 
+  private syncSub(v: PadVoice, p: PadParams): void {
+    const level = Math.max(0, Math.min(1, finite(p.subLevel, 0)));
+    if (changed(v.lastSubLevel, level, 0.001)) {
+      v.subGain.gain.rampTo(level, 0.05);
+      v.lastSubLevel = level;
+    }
+    const octave = p.subOctave === -2 ? -2 : -1;
+    if (octave !== v.lastSubOctave) {
+      const f = Tone.Frequency(v.note).toFrequency();
+      v.sub.frequency.rampTo(f * Math.pow(2, octave), 0.03);
+      v.lastSubOctave = octave;
+    }
+  }
+
+  private syncLayers(v: PadVoice, p: PadParams): void {
+    const osc2Level = Math.max(0, Math.min(1, finite(p.osc2Level, 0)));
+    if (changed(v.lastOsc2Level, osc2Level, 0.001)) {
+      v.osc2Gain.gain.rampTo(osc2Level, 0.05);
+      v.lastOsc2Level = osc2Level;
+    }
+    const semis = Math.round(Math.max(-24, Math.min(24, finite(p.osc2Semitones, 12))));
+    if (semis !== v.lastOsc2Semitones) {
+      const f = Tone.Frequency(v.note).toFrequency();
+      v.osc2.frequency.rampTo(f * Math.pow(2, semis / 12), 0.03);
+      v.lastOsc2Semitones = semis;
+    }
+    if (p.osc2Waveform !== v.lastOsc2Waveform) {
+      v.osc2.type = p.osc2Waveform;
+      v.lastOsc2Waveform = p.osc2Waveform;
+    }
+    const noiseLevel = Math.max(0, Math.min(1, finite(p.noiseLevel, 0)));
+    if (changed(v.lastNoiseLevel, noiseLevel, 0.001)) {
+      v.noiseGain.gain.rampTo(noiseLevel * NOISE_GAIN_SCALE, 0.05);
+      v.lastNoiseLevel = noiseLevel;
+    }
+    const tone = Math.max(500, Math.min(14000, finite(p.noiseToneHz, 6000)));
+    if (changed(v.lastNoiseToneHz, tone, 5)) {
+      v.noiseFilter.frequency.rampTo(tone, 0.08);
+      v.lastNoiseToneHz = tone;
+    }
+    const slope = p.filterSlope === 12 ? -12 : -24;
+    if (slope !== v.lastFilterSlope) {
+      v.filter.rolloff = slope;
+      v.lastFilterSlope = slope;
+    }
+  }
+
   private recomputeDetuneOffsets(v: PadVoice, p: PadParams): void {
     const n = v.oscs.length;
     const spread = Math.max(0, p.unisonDetuneCents);
     const offsets: number[] = [];
-    if (n === 1) {
-      offsets.push(0);
-    } else {
-      for (let i = 0; i < n; i++) {
-        // Fan symmetrically across [-spread, +spread].
-        const t = n === 1 ? 0 : i / (n - 1) - 0.5;
-        offsets.push(t * 2 * spread);
-      }
+    for (let i = 0; i < n; i++) {
+      const pos = unisonPosition(i, n);
+      offsets.push(pos * spread);
+      // Inner voices carry the pitch centre; outer ones add shimmer.
+      v.oscs[i].volume.value = Math.abs(pos) < 0.3 ? 0 : -2;
     }
     v.detuneOffsets = offsets;
   }
@@ -660,11 +973,17 @@ export class PadEngine {
     const envelope = this.envAt(v, now);
     const envOctaves =
       (Math.max(0, finite(p.filterEnvAmount, 0)) / 1200) * envelope;
+    const keyTrack = Math.max(0, Math.min(1, finite(p.filterKeyTrack, 0)));
+    const noteRatio = Tone.Frequency(v.note).toFrequency() / KEY_TRACK_REF_HZ;
+    const keyMul = keyTrack > 0 ? Math.pow(noteRatio, keyTrack) : 1;
     const baseCutoff = Math.max(
       20,
       Math.min(
         20000,
-        finite(p.filterHz, 900) * Math.pow(2, envOctaves),
+        finite(p.filterHz, 900) *
+          Math.pow(2, envOctaves) *
+          keyMul *
+          v.humanCutoffMul,
       ),
     );
     const depth = Math.max(0, Math.min(1, finite(p.filterLfoDepth, 0)));
@@ -692,7 +1011,7 @@ export class PadEngine {
     for (const [id, voice] of this.voices) {
       if (
         voice.releaseAt !== null &&
-        now > voice.releaseAt + voice.adsr.r + 0.1
+        now > voice.releaseAt + voice.adsr.r * ENV_RELEASE_TAIL + 0.1
       ) {
         this.disposeVoice(voice);
         this.voices.delete(id);
@@ -713,7 +1032,7 @@ export class PadEngine {
     g.cancelScheduledValues(now);
     g.setValueAtTime(g.value, now);
     g.linearRampToValueAtTime(gain, now + a);
-    g.linearRampToValueAtTime(s * gain, now + a + d);
+    g.setTargetAtTime(s * gain, now + a, d / ENV_TAU_DIV);
   }
 
   private release(v: PadVoice, p: PadParams): void {
@@ -725,7 +1044,7 @@ export class PadEngine {
     const g = v.env.gain;
     g.cancelScheduledValues(now);
     g.setValueAtTime(g.value, now);
-    g.linearRampToValueAtTime(0, now + r);
+    g.setTargetAtTime(0, now, r / ENV_RELEASE_TAU_DIV);
     v.isOn = false;
     v.lastGain = 0;
   }
@@ -740,10 +1059,10 @@ export class PadEngine {
     const { a, d, s, r } = v.adsr;
     if (v.releaseAt !== null) {
       const rt = t - v.releaseAt;
-      if (rt >= r) return 0;
+      if (rt >= r * ENV_RELEASE_TAIL) return 0;
       // Level at release start: sample the pre-release shape.
       const preRel = this.holdEnv(v.releaseAt - v.attackAt, a, d, s);
-      return preRel * (1 - rt / r);
+      return preRel * Math.exp(-rt / (r / ENV_RELEASE_TAU_DIV));
     }
     return this.holdEnv(t - v.attackAt, a, d, s);
   }
@@ -751,8 +1070,7 @@ export class PadEngine {
   private holdEnv(dt: number, a: number, d: number, s: number): number {
     if (dt <= 0) return 0;
     if (dt < a) return dt / a;
-    if (dt < a + d) return 1 + (s - 1) * ((dt - a) / d);
-    return s;
+    return s + (1 - s) * Math.exp(-(dt - a) / (d / ENV_TAU_DIV));
   }
 
   /**

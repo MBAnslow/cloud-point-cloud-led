@@ -1,11 +1,29 @@
-import type {
-  PadKeyframeParam,
-  PadParams,
-  PadWaveform,
+import {
+  PAD_DELAY_SYNCS,
+  type PadDelaySync,
+  type PadEq,
+  type PadKeyframeParam,
+  type PadParams,
+  type PadWaveform,
 } from "../state";
+import { PadEqDisplay } from "./PadEqDisplay";
 import { PadFilterResponse } from "./PadFilterResponse";
 
 const WAVEFORMS: PadWaveform[] = ["sine", "sawtooth", "square", "triangle"];
+
+const OSC2_INTERVALS: Array<{ semis: number; label: string }> = [
+  { semis: -24, label: "-2 oct" },
+  { semis: -12, label: "-1 oct" },
+  { semis: -5, label: "-4th" },
+  { semis: 0, label: "unison" },
+  { semis: 3, label: "+min 3rd" },
+  { semis: 4, label: "+maj 3rd" },
+  { semis: 5, label: "+4th" },
+  { semis: 7, label: "+5th" },
+  { semis: 12, label: "+1 oct" },
+  { semis: 19, label: "+oct+5th" },
+  { semis: 24, label: "+2 oct" },
+];
 
 /**
  * Warm-pad synth controls: voicing, envelope, filter, chorus, master.
@@ -25,6 +43,8 @@ export function PadSynthPanel({
     onParamSelect(param);
     onChange({ [param]: value } as Partial<PadParams>);
   };
+  const setEq = (patch: Partial<PadEq>) =>
+    onChange({ eq: { ...pad.eq, ...patch } });
 
   return (
     <section style={sectionStyle}>
@@ -96,6 +116,128 @@ export function PadSynthPanel({
           </div>
         </Card>
 
+        <Card title="Body">
+          <Slider
+            label="Sub level"
+            value={pad.subLevel}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("subLevel", v)}
+          />
+          <label style={inlineLabel}>
+            <span style={{ width: 70 }}>Sub octave</span>
+            <select
+              value={pad.subOctave}
+              onChange={(e) =>
+                onChange({ subOctave: parseInt(e.target.value, 10) })
+              }
+              style={selectStyle}
+            >
+              <option value={-1}>-1 oct</option>
+              <option value={-2}>-2 oct</option>
+            </select>
+          </label>
+          <Slider
+            label="Mono below"
+            value={pad.monoBelowHz}
+            min={20}
+            max={400}
+            step={1}
+            unit="Hz"
+            logScale
+            onChange={(v) => setAutomated("monoBelowHz", v)}
+          />
+          <Slider
+            label="Glue"
+            value={pad.glue}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("glue", v)}
+          />
+          <div style={hint}>
+            Sub adds an undetuned mono sine for weight. Everything below
+            Mono below stays centred so the low end holds up on speakers.
+            Glue gently compresses the whole pad so layers sit together.
+          </div>
+        </Card>
+
+        <Card title="Layers">
+          <Slider
+            label="Osc 2"
+            value={pad.osc2Level}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("osc2Level", v)}
+          />
+          <label style={inlineLabel}>
+            <span style={{ width: 70 }}>Osc 2 wave</span>
+            <select
+              value={pad.osc2Waveform}
+              onChange={(e) =>
+                onChange({ osc2Waveform: e.target.value as PadWaveform })
+              }
+              style={selectStyle}
+            >
+              {WAVEFORMS.map((w) => (
+                <option key={w} value={w}>
+                  {w}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={inlineLabel}>
+            <span style={{ width: 70 }}>Interval</span>
+            <select
+              value={pad.osc2Semitones}
+              onChange={(e) =>
+                onChange({ osc2Semitones: parseInt(e.target.value, 10) })
+              }
+              style={selectStyle}
+            >
+              {OSC2_INTERVALS.map((i) => (
+                <option key={i.semis} value={i.semis}>
+                  {i.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Slider
+            label="Noise"
+            value={pad.noiseLevel}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("noiseLevel", v)}
+          />
+          <Slider
+            label="Noise tone"
+            value={pad.noiseToneHz}
+            min={500}
+            max={14000}
+            step={10}
+            unit="Hz"
+            logScale
+            onChange={(v) => setAutomated("noiseToneHz", v)}
+          />
+          <Slider
+            label="Humanize"
+            value={pad.humanize}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("humanize", v)}
+          />
+          <div style={hint}>
+            Osc 2 layers a different waveform at an interval for a richer
+            timbre. Noise adds breathy air that follows each note's
+            envelope. Humanize gives every new note slightly different
+            tuning, brightness and level.
+          </div>
+        </Card>
+
         <Card title="Envelope">
           <Slider
             label="Attack"
@@ -153,6 +295,29 @@ export function PadSynthPanel({
             unit="Hz"
             logScale
             onChange={(v) => setAutomated("filterHz", v)}
+          />
+          <label style={inlineLabel}>
+            <span style={{ width: 70 }}>Slope</span>
+            <select
+              value={pad.filterSlope}
+              onChange={(e) =>
+                onChange({
+                  filterSlope: e.target.value === "12" ? 12 : 24,
+                })
+              }
+              style={selectStyle}
+            >
+              <option value={12}>12 dB/oct (gentle)</option>
+              <option value={24}>24 dB/oct (warm, analog)</option>
+            </select>
+          </label>
+          <Slider
+            label="Key track"
+            value={pad.filterKeyTrack}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => setAutomated("filterKeyTrack", v)}
           />
           <Slider
             label="Q"
@@ -283,16 +448,44 @@ export function PadSynthPanel({
             step={0.01}
             onChange={(v) => setAutomated("delayMix", v)}
           />
-          <Slider
-            label="Delay time"
-            value={pad.delayTimeSec}
-            min={0.05}
-            max={1.5}
-            step={0.005}
-            unit="s"
-            logScale
-            onChange={(v) => setAutomated("delayTimeSec", v)}
-          />
+          <label style={inlineLabel}>
+            <span style={{ width: 70 }}>Delay sync</span>
+            <select
+              value={pad.delaySync}
+              onChange={(e) =>
+                onChange({ delaySync: e.target.value as PadDelaySync })
+              }
+              style={selectStyle}
+            >
+              {PAD_DELAY_SYNCS.map((s) => (
+                <option key={s} value={s}>
+                  {s === "off" ? "free (seconds)" : s}
+                </option>
+              ))}
+            </select>
+          </label>
+          {pad.delaySync === "off" ? (
+            <Slider
+              label="Delay time"
+              value={pad.delayTimeSec}
+              min={0.05}
+              max={1.5}
+              step={0.005}
+              unit="s"
+              logScale
+              onChange={(v) => setAutomated("delayTimeSec", v)}
+            />
+          ) : (
+            <Slider
+              label="Tempo"
+              value={pad.tempoBpm}
+              min={40}
+              max={200}
+              step={1}
+              unit="bpm"
+              onChange={(v) => onChange({ tempoBpm: Math.round(v) })}
+            />
+          )}
           <Slider
             label="Feedback"
             value={pad.delayFeedback}
@@ -324,6 +517,27 @@ export function PadSynthPanel({
             step={0.01}
             onChange={(v) => setAutomated("master", v)}
           />
+          <label style={{ ...inlineLabel, marginTop: 6 }}>
+            <input
+              type="checkbox"
+              checked={pad.eq.enabled}
+              onChange={(e) => setEq({ enabled: e.target.checked })}
+            />
+            <span>EQ</span>
+          </label>
+          <PadEqDisplay eq={pad.eq} />
+          <Slider label="Low" value={pad.eq.lowDb} min={-18} max={18} step={0.5} unit="dB" onChange={(v) => setEq({ lowDb: v })} />
+          <Slider label="Low freq" value={pad.eq.lowHz} min={20} max={1000} step={1} unit="Hz" logScale onChange={(v) => setEq({ lowHz: v })} />
+          <Slider label="Mid" value={pad.eq.midDb} min={-18} max={18} step={0.5} unit="dB" onChange={(v) => setEq({ midDb: v })} />
+          <Slider label="Mid freq" value={pad.eq.midHz} min={100} max={10000} step={1} unit="Hz" logScale onChange={(v) => setEq({ midHz: v })} />
+          <Slider label="Mid Q" value={pad.eq.midQ} min={0.2} max={10} step={0.05} logScale onChange={(v) => setEq({ midQ: v })} />
+          <Slider label="High" value={pad.eq.highDb} min={-18} max={18} step={0.5} unit="dB" onChange={(v) => setEq({ highDb: v })} />
+          <Slider label="High freq" value={pad.eq.highHz} min={1000} max={18000} step={10} unit="Hz" logScale onChange={(v) => setEq({ highHz: v })} />
+          <div style={hint}>
+            Shaded area is the live pad output spectrum; the line is the
+            EQ curve. Try cutting Mid around 300 Hz to clear boxiness and
+            lifting High for air.
+          </div>
         </Card>
       </div>
     </section>
@@ -398,16 +612,27 @@ function EnvelopeGraph({
 }) {
   // Layout ADSR into a 100-wide box, scaled so the whole envelope
   // (including a nominal 0.4s sustain plateau) fits.
+  // Mirrors the engine: linear attack, exponential decay (time constant
+  // d / 4) and release (time constant r / 2, still audible past r).
   const total = Math.max(0.1, a + d + 0.4 + r);
   const px = (t: number) => (t / total) * 100;
-  const sy = 24 - Math.max(0, Math.min(1, s)) * 20;
-  const points = [
-    `0,24`,
-    `${px(a).toFixed(2)},4`,
-    `${px(a + d).toFixed(2)},${sy.toFixed(2)}`,
-    `${px(a + d + 0.4).toFixed(2)},${sy.toFixed(2)}`,
-    `${px(a + d + 0.4 + r).toFixed(2)},24`,
-  ].join(" ");
+  const yFor = (level: number) => 24 - Math.max(0, Math.min(1, level)) * 20;
+  const sus = Math.max(0, Math.min(1, s));
+  const pts: string[] = [`0,24`, `${px(a).toFixed(2)},4`];
+  const steps = 24;
+  for (let i = 1; i <= steps; i++) {
+    const t = (d * i) / steps;
+    const level = sus + (1 - sus) * Math.exp(-t / (d / 4));
+    pts.push(`${px(a + t).toFixed(2)},${yFor(level).toFixed(2)}`);
+  }
+  const holdEnd = a + d + 0.4;
+  pts.push(`${px(holdEnd).toFixed(2)},${yFor(sus).toFixed(2)}`);
+  for (let i = 1; i <= steps; i++) {
+    const t = (r * i) / steps;
+    const level = sus * Math.exp(-t / (r / 2));
+    pts.push(`${px(holdEnd + t).toFixed(2)},${yFor(level).toFixed(2)}`);
+  }
+  const points = pts.join(" ");
   return (
     <svg
       viewBox="0 0 100 28"

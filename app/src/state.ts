@@ -883,6 +883,52 @@ export interface PadNote {
 }
 
 export type PadWaveform = "sine" | "sawtooth" | "square" | "triangle";
+export type PadFilterSlope = 12 | 24;
+export type PadDelaySync = "off" | "1/4" | "1/8" | "1/8d" | "1/8t" | "1/16";
+export const PAD_DELAY_SYNCS: PadDelaySync[] = ["off", "1/4", "1/8", "1/8d", "1/8t", "1/16"];
+
+/** Three-band master EQ on the pad output. Not keyframed. */
+export interface PadEq {
+  enabled: boolean;
+  /** Low shelf corner, Hz. */
+  lowHz: number;
+  lowDb: number;
+  /** Peaking band centre, Hz. */
+  midHz: number;
+  midDb: number;
+  midQ: number;
+  /** High shelf corner, Hz. */
+  highHz: number;
+  highDb: number;
+}
+
+export const DEFAULT_PAD_EQ: PadEq = {
+  enabled: true,
+  lowHz: 120,
+  lowDb: 0,
+  midHz: 800,
+  midDb: 0,
+  midQ: 1,
+  highHz: 8000,
+  highDb: 0,
+};
+
+function resolvePadEq(input: unknown): PadEq {
+  const src = (input && typeof input === "object" ? input : {}) as Partial<PadEq>;
+  const num = (v: unknown, def: number, lo: number, hi: number) =>
+    typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def;
+  const d = DEFAULT_PAD_EQ;
+  return {
+    enabled: typeof src.enabled === "boolean" ? src.enabled : d.enabled,
+    lowHz: num(src.lowHz, d.lowHz, 20, 1000),
+    lowDb: num(src.lowDb, d.lowDb, -18, 18),
+    midHz: num(src.midHz, d.midHz, 100, 10000),
+    midDb: num(src.midDb, d.midDb, -18, 18),
+    midQ: num(src.midQ, d.midQ, 0.2, 10),
+    highHz: num(src.highHz, d.highHz, 1000, 18000),
+    highDb: num(src.highDb, d.highDb, -18, 18),
+  };
+}
 
 /**
  * Warm-pad synth patch. One instance per track — the pad engine is
@@ -930,6 +976,32 @@ export interface PadParams {
    * full octave from the base at the LFO's trough; 0 disables.
    */
   filterLfoDepth: number;
+  /** Low-pass slope, dB/octave. 24 is a darker, more analog-style pad. */
+  filterSlope: PadFilterSlope;
+  /** Cutoff follows pitch: 0 = fixed, 1 = cutoff scales 1:1 with note frequency. */
+  filterKeyTrack: number;
+  /** Second oscillator layer level, [0, 1]. 0 disables. */
+  osc2Level: number;
+  osc2Waveform: PadWaveform;
+  /** Second oscillator interval above/below the note, semitones (-24..24). */
+  osc2Semitones: number;
+  /** Per-voice filtered noise "air" level, [0, 1]. */
+  noiseLevel: number;
+  /** Noise band centre, Hz. */
+  noiseToneHz: number;
+  /** Per-note random tuning / cutoff / level variation, [0, 1]. */
+  humanize: number;
+  /** Delay time source: free seconds, or a note division of `tempoBpm`. */
+  delaySync: PadDelaySync;
+  tempoBpm: number;
+  /** Per-voice mono sine sub oscillator level, [0, 1]. 0 disables. */
+  subLevel: number;
+  /** Sub oscillator octave below the note: -1 or -2. */
+  subOctave: number;
+  /** Side-channel high-pass on the bus; content below this is mono, Hz. */
+  monoBelowHz: number;
+  /** Bus glue compression amount, [0, 1]. 0 = bypass-equivalent. */
+  glue: number;
   /** Waveshaper drive, [0, 1]. 0 = clean. */
   saturation: number;
   /** Parallel reverb return level, [0, 1]. */
@@ -948,6 +1020,8 @@ export interface PadParams {
   delayFeedback: number;
   /** Per-engine HPF+LPF chain applied on the master before output. */
   filters: FilterChain;
+  /** Master tone-shaping EQ. */
+  eq: PadEq;
   /** Independent per-parameter automation points across the 24-hour day. */
   keyframes: PadKeyframe[];
   notes: PadNote[];
@@ -968,6 +1042,14 @@ export const PAD_KEYFRAME_PARAMS = [
   "filterEnvAmount",
   "filterLfoRateHz",
   "filterLfoDepth",
+  "filterKeyTrack",
+  "osc2Level",
+  "noiseLevel",
+  "noiseToneHz",
+  "humanize",
+  "subLevel",
+  "monoBelowHz",
+  "glue",
   "saturation",
   "chorusRateHz",
   "chorusDepth",
@@ -2261,6 +2343,20 @@ const DEFAULTS = {
     driftDepthCents: 4,
     filterLfoRateHz: 0.4,
     filterLfoDepth: 0,
+    filterSlope: 24,
+    filterKeyTrack: 0.4,
+    osc2Level: 0,
+    osc2Waveform: "triangle",
+    osc2Semitones: 12,
+    noiseLevel: 0,
+    noiseToneHz: 6000,
+    humanize: 0.25,
+    delaySync: "off",
+    tempoBpm: 90,
+    subLevel: 0.25,
+    subOctave: -1,
+    monoBelowHz: 140,
+    glue: 0.3,
     saturation: 0.15,
     reverbMix: 0.3,
     reverbRoomSize: 0.78,
@@ -2270,6 +2366,7 @@ const DEFAULTS = {
     delayTimeSec: 0.375,
     delayFeedback: 0.25,
     filters: DEFAULT_FILTER_CHAIN,
+    eq: DEFAULT_PAD_EQ,
     keyframes: [],
     notes: [],
   } as PadParams,
@@ -2683,6 +2780,22 @@ function resolvePadParams(
     driftDepthCents: pick("driftDepthCents"),
     filterLfoRateHz: pick("filterLfoRateHz"),
     filterLfoDepth: pick("filterLfoDepth"),
+    filterSlope: pick("filterSlope") === 12 ? 12 : 24,
+    filterKeyTrack: pick("filterKeyTrack"),
+    osc2Level: pick("osc2Level"),
+    osc2Waveform: pick("osc2Waveform"),
+    osc2Semitones: pick("osc2Semitones"),
+    noiseLevel: pick("noiseLevel"),
+    noiseToneHz: pick("noiseToneHz"),
+    humanize: pick("humanize"),
+    delaySync: PAD_DELAY_SYNCS.includes(pick("delaySync"))
+      ? pick("delaySync")
+      : "off",
+    tempoBpm: pick("tempoBpm"),
+    subLevel: pick("subLevel"),
+    subOctave: pick("subOctave") === -2 ? -2 : -1,
+    monoBelowHz: pick("monoBelowHz"),
+    glue: pick("glue"),
     saturation: pick("saturation"),
     reverbMix: pick("reverbMix"),
     reverbRoomSize: pick("reverbRoomSize"),
@@ -2692,6 +2805,7 @@ function resolvePadParams(
     delayTimeSec: pick("delayTimeSec"),
     delayFeedback: pick("delayFeedback"),
     filters: resolveFilterChain((saved as Record<string, unknown>).filters),
+    eq: resolvePadEq((saved as Record<string, unknown>).eq),
     keyframes: [],
     notes,
   };
